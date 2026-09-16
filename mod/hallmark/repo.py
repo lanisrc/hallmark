@@ -320,6 +320,7 @@ class Repo:
         remote_name: Optional[str] = None,
         remote_url: Optional[str] = None,
         encoding_updates: Optional[Dict[str, str]] = None,
+        remote_auth: Optional[str] = None,
     ) -> dict:
         """
         Update repository configuration values.
@@ -328,6 +329,7 @@ class Repo:
             fmt (str, optional): Data format specification.
             remote_name (str, optional): Name of the remote repository.
             remote_url (str, optional): URL of the remote repository.
+            remote_auth (str, optional): Local profile name; empty string removes it.
             encoding_updates (dict[str, str], optional): Updates to encoding rules.
 
         Returns:
@@ -338,7 +340,8 @@ class Repo:
             fmt=fmt,
             remote_name=remote_name,
             remote_url=remote_url,
-            encoding_updates=encoding_updates)
+            encoding_updates=encoding_updates,
+            **({"remote_auth": remote_auth} if remote_auth is not None else {}))
         self.dothm.dump(self.state)
         return self.state.config
 

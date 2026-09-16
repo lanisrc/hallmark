@@ -43,7 +43,7 @@ def _served(server: MockServer):
     Returns:
         A context manager that patches requests.get and requests.head.
     """
-    return patch("hallmark.repo_builder.requests.Session", return_value=server)
+    return patch("hallmark.transport.requests.Session", return_value=server)
 
 
 # helper function to monkeypatch list_remote_files for testing build_repo
@@ -58,7 +58,7 @@ def _inventory(monkeypatch, files):
         A list of base_url values passed to the fake list_remote_files function.
     """
     calls = []
-    def fake_list(base_url):
+    def fake_list(base_url, **kwargs):
         """create a fake list_remote_files list"""
         calls.append(base_url)
         return dict(files)
@@ -333,7 +333,7 @@ def test_list_remote_files_fetches_each_directory_once():
     server.add_directory("nested/", [("data-object", "file.dat")])
     requested_urls = []
     original_get = server.get
-    def recording_get(url, timeout=None):
+    def recording_get(url, timeout=None, **kwargs):
         """A wrapper around the original server.get that records requested URLs."""
         requested_urls.append(url)
         return original_get(url, timeout=timeout)
@@ -356,11 +356,13 @@ def test_list_remote_files_unavailable_manifest_does_not_hide_files():
     server.add_directory(
         "", [("data-object", "data.tar"), ("data-object", "checksums.txt")])
     original_get = server.get
-    def unavailable_manifest_get(url, timeout=None):
+    def unavailable_manifest_get(url, timeout=None, **kwargs):
         """A wrapper around the original server.get that simulates
         an unavailable manifest."""
         if url.endswith("/checksums.txt"):
-            raise requests.HTTPError("manifest unavailable")
+            response = requests.Response()
+            response.status_code = 404
+            raise requests.HTTPError("manifest unavailable", response=response)
         return original_get(url, timeout=timeout)
     server.get = unavailable_manifest_get
     with _served(server):
@@ -820,6 +822,7 @@ def test_build_repo_size_threshold_skips_large_unmatched_file(tmp_path):
         resp = MagicMock()
         resp.raise_for_status = lambda: None
         resp.headers = {"Content-Length": str(5 * 1024 * 1024 * 1024)}
+        resp.__enter__.return_value = resp
         return resp
     server.fake_head = huge_head
     def refuse_get_body(url, timeout=None):
@@ -1473,7 +1476,7 @@ def test_build_repo_replaces_destination_when_overwrite_is_explicit(
     sentinel.write_text("old data\n", encoding="utf-8")
     monkeypatch.setattr(
         "hallmark.repo_builder.list_remote_files",
-        lambda _base_url: {})
+        lambda _base_url, **kwargs: {})
     repo = build_repo(
         repo_path=destination,
         dataset_name="EHTC_TEST",
@@ -1602,6 +1605,9 @@ def test_build_repo_continues_when_static_checksum_request_fails(monkeypatch, tm
     """
     _inventory(monkeypatch, {"README.md": (None, None)})
     class FailingChecksumSession:
+        def close(self):
+            pass
+
         """
         A mock requests.Session that simulates a failure to retrieve the checksum for
         a static file, by raising an HTTPError when the head() method is called.
@@ -1617,7 +1623,7 @@ def test_build_repo_continues_when_static_checksum_request_fails(monkeypatch, tm
         def head(self, *args, **kwargs):
             """Simulate a failure to retrieve the checksum for a static file."""
             raise requests.HTTPError("HEAD unavailable")
-    monkeypatch.setattr("hallmark.repo_builder.requests.Session",
+    monkeypatch.setattr("hallmark.transport.requests.Session",
                         FailingChecksumSession)
     repo = build_repo(tmp_path / "repo.hm", "EHTC_TEST", fmt_entries=[])
 

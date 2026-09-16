@@ -147,3 +147,17 @@ Preview a complete repository download::
    hallmark download --all --dry-run
 
 Large selections require confirmation unless ``--yes`` is supplied.
+
+Dataset builders and data remotes
+---------------------------------
+
+.. autofunction:: hallmark.repo_builder.build_repo
+
+.. autofunction:: hallmark.repo_builder.list_remote_files
+
+``Repo.set_config(remote_auth="PROFILE")`` records a local SSH profile reference;
+``remote_auth=""`` removes it. ``download_remote_data`` keeps its existing result
+mapping with ``succeeded``, ``failed``, ``total_bytes`` and ``errors``. Configuration
+and SSH connection preflight failures raise ``DownloadError`` before file workers
+start. HTTP, SSH and SFTP follow the same destination/checksum contract. See the
+private-lab workflow in :doc:`usecase` for profile schema and capability limits.

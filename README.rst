@@ -70,3 +70,22 @@ Or install from source for development purposes::
 ..  _yukon:    https://github.com/l6a/yukon
 ..  _banyan:   https://github.com/l6a/banyan
 ..  _eht:      https://eventhorizontelescope.org
+
+Private data remotes
+--------------------
+
+Hallmark can fetch cataloged files from HTTP(S), SSH and SFTP data remotes.
+Data remotes locate file bytes separately from the Git remotes used for catalog
+history. SSH uses system OpenSSH 9.6+, a trusted host key and noninteractive
+key/agent authentication::
+
+    hallmark set-config --remote-name campus --remote-url ssh://campus/srv/export/
+    hallmark download --remote campus --all --dry-run
+    hallmark download --remote campus --all
+
+Optional local auth profiles can be selected with ``--remote-auth PROFILE``.
+Private catalogs can be built with ``build --dataset-url URL --dataset-auth
+PROFILE --allow-remote-commands``; SSH listing requires a POSIX shell and Python 3
+on the server. SFTP-only accounts can download known files. See
+`Private lab data over SSH <doc/usecase.rst#private-lab-data-over-ssh>`_ for setup,
+profiles, bounded hashing, platform scope and disposable integration tests.

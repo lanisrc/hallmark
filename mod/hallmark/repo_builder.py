@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-import hashlib
 import re
 import shutil
 import string
 import time
-from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 from string import Formatter
-from threading import local
-from urllib.parse import quote, unquote, urljoin, urlsplit
+from urllib.parse import unquote, urlsplit
 
 import pandas as pd
 import parse
-import requests
 
 from .repo import Repo
+from .transport import OperationContext, RemoteSpec
+from .transport.base import (
+    CapabilityError, DownloadError, RemoteObjectMissing, reject_controls)
 from .fmt_detection import (
     detect_fmt,
     KNOWN_PROCESSING_STAGES,
@@ -25,9 +24,9 @@ from .dothm import dump_yaml
 from .error import DothmError
 from .helper_functions import (
     CHECKSUM_ALGORITHMS,
+    CHECKSUM_ALGORITHMS_BY_STRENGTH,
     CHECKSUM_ALGORITHM_PATTERN,
     SUPPORTED_CHECKSUM_ALGORITHMS,
-    REMOTE_REQUEST_TIMEOUT,
     valid_checksum,
     atomic_output_path,
     load_yaml_file,
@@ -49,7 +48,7 @@ _INDEX_ROW_RE = re.compile(
     r'<tr class="object (collection|data-object[^"]*)">'
     r'<td class="name"><a href="([^"]+)"')
 # regex to match lines in a checksum file, capturing the checksum and filename
-_SUMS_LINE_RE = re.compile(r"^([0-9a-fA-F]{8,})\s+\*?(.+?)\s*$", re.MULTILINE)
+_SUMS_LINE_RE = re.compile(r"^([0-9a-fA-F]{8,}) [ *](.+)$", re.MULTILINE)
 # regex to match checksum file names, capturing the base name and algorithm
 _SUMS_FILENAME_RE = \
     re.compile(rf"^(?P<name>.+)\."rf"(?P<algorithm>{CHECKSUM_ALGORITHM_PATTERN})sums$")
@@ -57,8 +56,6 @@ _SUMS_FILENAME_RE = \
 _CHECKSUM_NAME_KEYWORDS = ("sum", "checksum", "hash", "manifest", *CHECKSUM_ALGORITHMS)
 # maximum number of worker threads for static checksum computation
 _STATIC_CHECKSUM_MAX_WORKERS = 8
-# thread-local storage for network worker state, including requests sessions
-_NETWORK_WORKER_STATE = local()
 # maximum number of worker threads for remote crawling and checksum computation
 _REMOTE_CRAWL_MAX_WORKERS = 8
 # minimum ratio of matching lines in a checksum file to consider it valid
@@ -77,137 +74,12 @@ KNOWN_FIELD_VALUES: dict[str, tuple[str, ...]] = {
     "algorithm": CHECKSUM_ALGORITHMS}
 
 
-def _network_worker_session():
-    """
-    Used by _checksum_small_remote_url and _fetch_remote_text.
-    Get or create a requests session for the current thread.
-
-    Returns:
-        A requests.Session object for the current thread.
-    """
-    # get the requests session from thread-local storage
-    session = getattr(_NETWORK_WORKER_STATE, "session", None)
-    if session is None:
-        # create a new requests session for this thread if it doesn't exist
-        session = requests.Session()
-        # network worker state is thread-local, so each thread will have its own session
-        _NETWORK_WORKER_STATE.session = session
-    return session
-
-
 def _remote_url(base_url: str, relative_path: str) -> str:
-    """
-    Used by list_remote_files and build_repo.
-    Construct a full remote URL by joining a base URL and a relative path.
-
-    Args:
-        base_url: The base URL of the remote repository.
-        relative_path: The relative path to the file or directory.
-
-    Returns:
-        The full remote URL as a string.
-    """
-    # strip trailing slashes from the base URL and ensure it ends with a single slash
-    directory_url = f"{str(base_url).rstrip('/')}/"
-    # use urljoin to combine the base URL and the quoted relative path
-    return urljoin(directory_url, quote(str(relative_path), safe="/"))
-
-
-def _fetch_remote_text(url: str) -> str:
-    """
-    Used by _fetch_optional_remote_text and list_remote_files.
-    Fetch the text content of a remote URL using a thread-local requests session.
-    Args:
-        url: The URL to fetch.
-    Returns:
-        The text content of the response.
-    """
-    # Use a requests session to fetch the HTML index page for the given URL.
-    response = _network_worker_session().get(url, timeout=REMOTE_REQUEST_TIMEOUT)
-    # Raise an exception if the request failed
-    response.raise_for_status()
-
-    # Return the text content of the response, which is the HTML index page.
-    return response.text
-
-
-def _fetch_optional_remote_text(url: str) -> str | None:
-    """
-    Used by list_remote_files.
-    Fetch the text content of a remote URL, returning None if the request fails.
-
-    Args:
-        url: The URL to fetch.
-
-    Returns:
-        The text content of the response, or None if the request fails.
-    """
-    try:
-        return _fetch_remote_text(url)
-    # if the request fails (e.g., network error, timeout, 404), return None
-    except requests.RequestException:
-        return None
-
-
-def _checksum_small_remote_file(session, file_url: str) -> tuple[str, str]:
-    """
-    Used by _checksum_small_remote_url.
-    Compute the MD5 checksum of a small remote file.
-
-    Args:
-        session: The requests session to use for HTTP requests.
-        file_url: The URL of the remote file.
-
-    Returns:
-        A tuple containing the checksum algorithm and the checksum value.
-        If the file is too large or an error occurs, returns ("unknown", "unknown").
-    """
-    unknown = (_UNKNOWN_CHECKSUM_ALGORITHM, _UNKNOWN_CHECKSUM_ALGORITHM)
-    # try to get the file size using a HEAD request to avoid downloading large files
-    try:
-        head_response = session.head(file_url, timeout=REMOTE_REQUEST_TIMEOUT)
-        head_response.raise_for_status()
-    # if the HEAD request fails, return unknown checksum values
-    except requests.RequestException:
-        return unknown
-
-    # get the Content-Length header to determine the file size
-    content_length = head_response.headers.get("Content-Length")
-    # try to convert the Content-Length to an integer, return unknown if it fails
-    try:
-        file_size = int(content_length)
-    except (TypeError, ValueError):
-        return unknown
-    # if the file size is negative or exceeds the maximum allowed size
-    if (file_size < 0 or file_size > _MAX_DOWNLOAD_SIZE_FOR_CHECKSUM):
-        return unknown
-
-    # try to download the file and compute its MD5 checksum
-    try:
-        file_response = session.get(file_url, timeout=REMOTE_REQUEST_TIMEOUT)
-        file_response.raise_for_status()
-    # if the GET request fails, return unknown checksum values
-    except requests.RequestException:
-        return unknown
-
-    # if all requests succeed, compute and return the MD5 checksum of the file content
-    return ("md5", hashlib.md5(file_response.content).hexdigest())
-
-
-def _checksum_small_remote_url(file_url: str) -> tuple[str, str]:
-    """
-    Used by build_repo.
-    Compute the checksum of a small remote file using a thread-local requests session.
-
-    Args:
-        file_url: The URL of the remote file.
-
-    Returns:
-        _checksum_small_remote_file(session, file_url), where session is a thread-local
-        requests session. Tuple contains the checksum algorithm and the checksum value.
-        If the file is too large or an error occurs, returns ("unknown", "unknown").
-    """
-    return _checksum_small_remote_file(_network_worker_session(), file_url)
+    """Render a transport URL from a literal path, preserving directory slashes."""
+    url = RemoteSpec.parse(base_url).file_url(relative_path)
+    if relative_path.endswith("/") and not url.endswith("/"):
+        url += "/"
+    return url
 
 
 # cache for performance, since the same fmt may be used for many files in a dataset
@@ -631,6 +503,18 @@ def _match_file_against_fmts(rel_path: str, fmt_entries: list[dict]):
         valid_fmts, key=lambda m: (m[2], -m[3]))
     return best_index, best_parse
 
+def _record_checksum(checksums, path, algorithm, checksum):
+    previous_algorithm, previous = checksums.get(path, (None, None))
+    if previous is not None and previous_algorithm == algorithm:
+        if previous.lower() != checksum.lower():
+            raise DownloadError(f"Conflicting {algorithm} manifests for {path!r}")
+        return
+    strength = {name: i for i, name in enumerate(CHECKSUM_ALGORITHMS_BY_STRENGTH)}
+    if previous is None or strength.get(algorithm, 99) < strength.get(
+            previous_algorithm, 100):
+        checksums[path] = (algorithm, checksum)
+
+
 def _manifest_matches(text: str, algorithm: str) -> list[tuple[str, str]]:
     """
     Used by list_remote_files.
@@ -645,6 +529,8 @@ def _manifest_matches(text: str, algorithm: str) -> list[tuple[str, str]]:
         A list of (checksum, filename) tuples for each line in the manifest text
         that has a valid checksum for the given algorithm, allowing unknown algorithms.
     """
+    if any(line.startswith("\\") for line in text.splitlines()):
+        raise ValueError("GNU escaped manifest filenames are unsupported")
     # return a list of (checksum, filename) tuples for each line in the manifest text
     # if the checksum is valid for the given algorithm, allowing unknown algorithms
     return [
@@ -670,7 +556,8 @@ def _resolve_manifest_path(filename: str, rel_dir: str) -> str:
                     or if the resolved path is not a valid relative path.
     """
     # strip whitespace from the filename to avoid issues with leading/trailing spaces
-    filename = str(filename).strip()
+    filename = str(filename)
+    reject_controls(filename, "Manifest path")
 
     # remove leading "./" from the filename to normalize the path
     while filename.startswith("./"):
@@ -727,7 +614,8 @@ def _normalize_index_href(href: str, *, is_directory: bool) -> str:
         ValueError: If the href is not a valid relative path.
     """
     # use urlsplit to check for scheme, netloc, query, and fragment
-    parsed = urlsplit(str(href).strip())
+    reject_controls(str(href), "Index href")
+    parsed = urlsplit(str(href))
 
     # if any components are present, raise a ValueError as the href must be relative
     if (
@@ -740,6 +628,7 @@ def _normalize_index_href(href: str, *, is_directory: bool) -> str:
 
     # use unquote to decode any percent-encoded characters in the path
     decoded_path = unquote(parsed.path)
+    reject_controls(decoded_path, "Index path")
     # if the path is a directory, remove any trailing slashes; otherwise, keep it as-is
     candidate = (decoded_path.rstrip("/") if is_directory else decoded_path)
     # validate the candidate path to ensure it is a valid relative path
@@ -812,26 +701,39 @@ def _normalize_fmt_entries(fmt_entries: list[dict]) -> list[dict]:
     return normalized
 
 
-def list_remote_files(base_url: str) \
-                                    -> dict[str, tuple[str | None, str | None]]:
-    """
-    Recursively list every file under a CyVerse WebDAV directory,
-    collecting checksums along the way.
+def list_remote_files(base_url: str, *, _context=None):
+    """List a CyVerse HTML index (legacy default), or an authorized SSH source."""
+    if _context is None:
+        with OperationContext(RemoteSpec.parse(base_url)) as context:
+            return _list_source(context)
+    return _list_source(_context)
 
-    Sibling checksum manifests enrich matching files with checksums, but
-    directories are still traversed because a manifest may be incomplete.
 
-    Args:
-        base_url: A CyVerse WebDAV directory URL.
+def _list_source(context):
+    if context.remote.scheme in {"ssh", "sftp"}:
+        return _list_ssh_files(context)
+    return CyverseHtmlIndex(context).list_files()
 
-    Returns:
-        A dictionary mapping relative paths to a tuple of (algorithm, checksum),
-        where algorithm is the checksum algorithm used (e.g., "md5", "sha256"),
-        and checksum is the corresponding checksum value. If no checksum is found,
-        both values will be None.
-    """
-    # normalize the base URL to ensure it is a valid WebDAV directory URL
-    base_url = _remote_url(base_url, "")
+
+class CyverseHtmlIndex:
+    """Adapter for CyVerse's HTML directory-index dialect, not WebDAV PROPFIND."""
+
+    def __init__(self, context):
+        self.context = context
+
+    def list_files(self):
+        return _list_cyverse_files(self.context)
+
+
+def _list_cyverse_files(context):
+    def fetch_text(path):
+        return context.read_text(path)
+
+    def optional_text(path):
+        try:
+            return fetch_text(path)
+        except RemoteObjectMissing:
+            return None
 
     # stores all files with their checksums, keyed by relative path, for all algorithms
     file_checksums: dict[str, tuple[str | None, str | None]] = {}
@@ -841,7 +743,7 @@ def list_remote_files(base_url: str) \
     # raw index text for directories that have been fetched but not yet processed
     prefetched_indexes: dict[str, str] = {}
     # Use a requests session and ThreadPoolExecutor to fetch remote indexes concurrently
-    with ThreadPoolExecutor(max_workers=_REMOTE_CRAWL_MAX_WORKERS) as crawl_executor:
+    with context.executor(_REMOTE_CRAWL_MAX_WORKERS) as crawl_executor:
         # while there are directories to open or prefetched indexes to process
         while directories_to_open or prefetched_indexes:
             # if there are no prefetched indexes, fetch a batch of directories to open
@@ -856,15 +758,17 @@ def list_remote_files(base_url: str) \
                         continue
                     # mark directory as visited and add it to the batch for fetching
                     visited_directories.add(candidate)
+                    if len(visited_directories) > context.listing_limit:
+                        raise DownloadError("Remote listing exceeds its entry limit")
                     batch.append(candidate)
                 # if the batch is empty, continue to the next iteration of the loop
                 if not batch:
                     continue
 
                 # construct the full URLs for the batch of directories to fetch
-                directory_urls = [_remote_url(base_url, rel_dir) for rel_dir in batch]
+                directory_urls = batch
                 # fetch the index texts for the batch of directories concurrently
-                index_texts = crawl_executor.map(_fetch_remote_text, directory_urls)
+                index_texts = crawl_executor.map(fetch_text, directory_urls)
                 # update the prefetched indexes with the fetched index texts
                 prefetched_indexes.update(zip(batch, index_texts))
 
@@ -874,6 +778,8 @@ def list_remote_files(base_url: str) \
             index_text = prefetched_indexes.pop(rel_dir)
             # parse the index text to extract entries using regex
             raw_entries = _INDEX_ROW_RE.findall(index_text)
+            if (len(file_checksums) + len(raw_entries) > context.listing_limit):
+                raise DownloadError("Remote listing exceeds its entry limit")
             entries = []
             for entry_type, href in raw_entries:
                 # try to normalize the href to ensure it is a valid relative path
@@ -883,7 +789,10 @@ def list_remote_files(base_url: str) \
                         is_directory=(entry_type == "collection"))
                 # if the href is invalid, skip this entry and continue to the next one
                 except ValueError:
-                    continue
+                    # Directory indexes often include a parent navigation link.
+                    if href in {"../", "./", "/"}:
+                        continue
+                    raise
                 # add the normalized entry to the list of entries for this directory
                 entries.append((entry_type, normalized_href))
 
@@ -895,9 +804,9 @@ def list_remote_files(base_url: str) \
                                    for keyword in _CHECKSUM_NAME_KEYWORDS)))]
             # call _remote_url to construct the full URLs for the manifest files
             manifest_urls = [
-                _remote_url(base_url, rel_dir + href) for href in manifest_hrefs]
+                rel_dir + href for href in manifest_hrefs]
             # crawl the manifest URLs concurrently to fetch their text contents
-            manifest_texts = crawl_executor.map(_fetch_optional_remote_text,
+            manifest_texts = crawl_executor.map(optional_text,
                                                 manifest_urls)
             # create a dictionary mapping manifest hrefs to their fetched text contents
             manifest_text_by_href = {
@@ -918,9 +827,9 @@ def list_remote_files(base_url: str) \
                     try:
                         full_path = _resolve_manifest_path(filename, rel_dir)
                     except ValueError:
-                        continue
+                        raise
 
-                    file_checksums[full_path] = (algorithm, checksum)
+                    _record_checksum(file_checksums, full_path, algorithm, checksum)
                     files_covered_by_manifest.add(full_path)
 
             # Iterate over each entry in the current directory
@@ -974,6 +883,35 @@ def list_remote_files(base_url: str) \
     return file_checksums
 
 
+def _list_ssh_files(context):
+    paths = context.transport.list_entries()
+    result = {path: (None, None) for path in paths}
+    for path in paths:
+        name = Path(path).name
+        sibling = _SUMS_FILENAME_RE.match(name)
+        if not sibling and not any(k in name.lower() for k in _CHECKSUM_NAME_KEYWORDS):
+            continue
+        text = context.read_text(path)
+        name_match = _ALGORITHM_IN_NAME_RE.search(name)
+        algorithm = (sibling.group("algorithm") if sibling else
+                     name_match.group(1).lower() if name_match else "unknown")
+        matches = _manifest_matches(text, algorithm)
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not sibling and (not lines or len(matches) < len(lines) * 0.5):
+            continue
+        directory = str(Path(path).parent)
+        directory = "" if directory == "." else directory + "/"
+        for checksum, filename in matches:
+            target = _resolve_manifest_path(filename, directory)
+            if target in result:
+                _record_checksum(result, target, algorithm, checksum)
+    if context.remote_hash:
+        for path, (_, digest) in result.items():
+            if digest is None:
+                result[path] = context.transport.checksum_small(path)
+    return result
+
+
 def build_repo(
     repo_path: Path,
     dataset_name: str,
@@ -981,6 +919,53 @@ def build_repo(
     config_file: Path | str | None = None,
     remotes: list[dict | str] | dict | str | None = None,
     overwrite: bool = False,
+    *,
+    dataset_url: str | None = None,
+    dataset_auth: str | None = None,
+    index_format: str | None = None,
+    allow_remote_commands: bool = False,
+    remote_hash: bool = False,
+) -> "Repo":
+    """Build catalogs from an explicit dataset root or the legacy CyVerse root.
+
+    ``dataset_auth`` selects a host-bound local SSH profile independently of
+    output ``remotes``. Non-default HTTP roots require ``index_format`` set to
+    ``cyverse-html``. SSH crawling requires ``allow_remote_commands=True``, a
+    POSIX shell and server Python 3. Server SHA-256 hashing is opt-in through
+    ``remote_hash`` and bounded to 10 MiB/file, 100 MiB and 60 seconds in total.
+    """
+    dataset_name = validate_path_component(dataset_name, label="dataset name")
+    base_url = (dataset_url if dataset_url is not None else
+                _remote_url(_CYVERSE_CURATED_BASE, f"{dataset_name}/"))
+    source = RemoteSpec.parse(base_url, dataset_auth)
+    if source.scheme in {"http", "https"}:
+        if index_format not in {None, "cyverse-html"}:
+            raise CapabilityError("Supported HTTP index format: cyverse-html")
+        if dataset_url is not None and index_format is None:
+            raise CapabilityError(
+                "Explicit HTTP roots require --index-format cyverse-html")
+        if remote_hash:
+            raise CapabilityError("--remote-hash is supported only for SSH sources")
+    elif not allow_remote_commands:
+        raise CapabilityError(
+            "SSH builds require --allow-remote-commands; "
+            "SFTP-only accounts can download")
+    elif index_format is not None:
+        raise CapabilityError("--index-format applies only to HTTP sources")
+    with OperationContext(source, allow_remote_commands=allow_remote_commands,
+                          remote_hash=remote_hash) as context:
+        return _build_repo(repo_path, dataset_name, fmt_entries, config_file,
+                           remotes, overwrite, context)
+
+
+def _build_repo(
+    repo_path: Path,
+    dataset_name: str,
+    fmt_entries: list[dict] | None = None,
+    config_file: Path | str | None = None,
+    remotes: list[dict | str] | dict | str | None = None,
+    overwrite: bool = False,
+    source=None,
     ) -> "Repo":
     """
     Build a hallmark repository from the given dataset and format entries.
@@ -1001,7 +986,7 @@ def build_repo(
     dataset_name = validate_path_component(dataset_name, label="dataset name")
     # CyVerse's curated Data Commons datasets live at a predictable URL,
     # built directly from dataset_name.
-    base_url = _remote_url(_CYVERSE_CURATED_BASE, f"{dataset_name}/")
+    base_url = source.remote.url
 
     # Determine if remotes were provided by the user
     remotes_provided = remotes is not None
@@ -1068,7 +1053,7 @@ def build_repo(
         # use time.perf_counter() to measure the time taken to list remote files
         # perf_counter() is preferred for measuring elapsed time with high resolution
         list_start = time.perf_counter()
-        file_checksums = list_remote_files(base_url)
+        file_checksums = list_remote_files(base_url, _context=source)
         print(f"Found {len(file_checksums)} files in "
               f"{time.perf_counter() - list_start:.1f}s")
         # sort the remote files by their relative paths for consistent ordering
@@ -1173,6 +1158,8 @@ def build_repo(
     # normalize the fmt entries to ensure they are valid and consistent
     fmt_entries = _normalize_fmt_entries(fmt_entries)
 
+    _ensure_remote_files_listed()
+
     # if the repo path already exists and has a config.yml, we will reuse it
     if reused_from_existing_repo:
         repo = existing_repo
@@ -1263,13 +1250,10 @@ def build_repo(
         if file_checksums.get(rel_path, (None, None))[1] is None]
     computed_checksums = {}
     if paths_needing_checksums:
-        # construct the full URLs for the unmatched paths that need checksums
-        urls = [_remote_url(base_url, rel_path) for rel_path in paths_needing_checksums]
-        # use ThreadPoolExecutor to compute checksums for small remote files in parallel
-        with ThreadPoolExecutor(max_workers=min(_STATIC_CHECKSUM_MAX_WORKERS, len(urls))
-        ) as executor:
-            # map the _checksum_small_remote_url function over the list of URLs
-            results = executor.map(_checksum_small_remote_url, urls)
+        paths = paths_needing_checksums
+        with source.executor(min(_STATIC_CHECKSUM_MAX_WORKERS, len(paths))) as executor:
+            # The source owns all static checksum I/O, including SSH capability checks.
+            results = executor.map(source.transport.checksum_small, paths)
             # zip the paths needing checksums with their computed results into a dict
             computed_checksums = dict(zip(paths_needing_checksums, results))
 
@@ -1347,6 +1331,8 @@ def build_repo(
     if not remotes:
         # use a default remote named "origin" pointing to the base_url if none provided
         remotes = [{"name": "origin"}]
+        if source.remote.auth is not None:
+            remotes[0]["auth"] = source.remote.auth
     # create the final remotes list by adding the base_url to each remote entry
     final_remotes = [{"url": base_url, **remote} for remote in remotes]
     repo.state.config["remote"] = final_remotes

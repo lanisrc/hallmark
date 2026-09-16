@@ -153,6 +153,8 @@ data:
 remote:
   # name: origin
   # url: https://example.com/path/to/data/
+  # SSH alternative: ssh://campus/srv/export/ (absolute root, trusted host/key)
+  # auth: campus  # Optional local profile name; never put credentials here.
 """
 
     @classmethod

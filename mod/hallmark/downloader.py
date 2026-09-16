@@ -6,24 +6,23 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from threading import local
 from typing import Mapping, Optional, Sequence, Union
-from urllib.parse import quote, urljoin
+from urllib.parse import unquote, urlsplit, urlunsplit
 from tqdm import tqdm
 
 import requests
 import pandas as pd
 
-from .error import HallmarkError
+from .transport import OperationContext, RemoteSpec
+from .transport.base import DownloadError, literal_path
 from .helper_functions import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
-    REMOTE_REQUEST_TIMEOUT,
     SUPPORTED_CHECKSUM_ALGORITHMS,
     as_list_of_dicts,
     atomic_output_path,
     file_checksum,
     normalize_nonempty_string,
     resolve_contained_path,
-    valid_checksum,
-    validate_relative_path)
+    valid_checksum)
 from .repo_config import (
     normalize_remotes,
     normalize_tsv_name,
@@ -40,10 +39,6 @@ _DOWNLOAD_WORKER_STATE = local()
 ChecksumSpec = Union[str, tuple[str, str]]
 # The size of chunks to read from a file when downloading or computing checksums.
 DOWNLOAD_CHUNK_SIZE = 8192
-
-class DownloadError(HallmarkError):
-    """Raised when remote data download fails."""
-
 
 def _repository_config(repo) -> dict:
     """
@@ -90,13 +85,9 @@ def _config_section_entries(config: dict, section_name: str) -> list[dict]:
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
-def _initialize_download_worker() -> None:
-    """
-    Used by download_remote_data.
-    Create one reusable HTTP session for each downloader thread.
-    This function is called once per thread in the ThreadPoolExecutor.
-    """
-    _DOWNLOAD_WORKER_STATE.session = requests.Session()
+def _initialize_download_worker(context) -> None:
+    """Bind this invocation's context to each worker; no cross-operation state."""
+    _DOWNLOAD_WORKER_STATE.context = context
 
 
 def _require_positive_integer(value, *, label: str) -> int:
@@ -360,33 +351,12 @@ def _safe_remote_path(value: Union[str, Path]) -> Path:
     Raises:
         DownloadError: If the path is unsafe.
     """
-    # Convert the input value to a string and strip whitespace.
-    raw_path = str(value).strip()
-    # Validate the path using the validate_relative_path function, which checks for
-    # unsafe characters, absolute paths, and other potential issues.
-    try:
-        return validate_relative_path(raw_path, label="remote path")
-    # Handle exceptions raised by validate_relative_path and raise a DownloadError
-    except ValueError as exc:
-        raise DownloadError(str(exc)) from exc
+    return literal_path(value)
 
 
 def _remote_file_url(remote_url: str, relative_path: Path) -> str:
-    """
-    Used by download_remote_data.
-    Construct the full URL for a remote file based on the remote URL and relative path.
-
-    Args:
-        remote_url: The base URL of the remote repository.
-        relative_path: The relative path of the file to download.
-
-    Returns:
-        The full URL for the remote file as a string.
-    """
-    # quote the relative path to ensure it is safe for use in a URL, preserving slashes
-    encoded_path = quote(relative_path.as_posix(), safe="/")
-    # join the remote URL and the encoded path to create the full URL for the file
-    return urljoin(remote_url.rstrip("/") + "/", encoded_path)
+    """Append a literal catalog path to a supported remote root."""
+    return RemoteSpec.parse(remote_url).file_url(relative_path.as_posix())
 
 
 def _download_tsv_name(value) -> str:
@@ -560,66 +530,67 @@ def _verify_validated_checksum(
         raise DownloadError(f"Checksum mismatch for {path.name} " f"({algorithm})")
 
 
+def _fetch_file(context, relative_path, destination, expected_checksum, chunk_size):
+    validated_checksum = _validate_checksum_spec(expected_checksum)
+    try:
+        context.check_cancelled()
+        destination = resolve_contained_path(
+            context.output_root, relative_path, label="download destination")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with atomic_output_path(destination, suffix=".part") as temp_path:
+            context.transport.fetch(relative_path.as_posix(), temp_path,
+                                    chunk_size=chunk_size)
+            _verify_validated_checksum(temp_path, validated_checksum, chunk_size)
+            size = temp_path.stat().st_size
+            # Recheck after transfer as well as before creation. This protects
+            # against observed symlink swaps, not a concurrently hostile writer.
+            resolve_contained_path(context.output_root, relative_path,
+                                   label="download destination")
+            context.check_cancelled()
+        return size
+    except (OSError, ValueError) as exc:
+        raise DownloadError(f"Failed to write {destination.name}: {exc}") from None
+
+
 def _download_file(
     url: str,
     destination: Path,
     expected_checksum: Optional[ChecksumSpec] = None,
     chunk_size: int = DOWNLOAD_CHUNK_SIZE,
     ) -> int:
-    """
-    Used by download_remote_data.
-    Download one file and return the number of bytes written.
-
-    Args:
-        url: The URL of the file to download.
-        destination: The path where the downloaded file will be saved.
-        expected_checksum: The expected checksum of the file. Can be a tuple of
-        (algorithm, checksum) or a legacy SHA-1 checksum.
-        chunk_size: The size of chunks to read the file in.
-
-    Returns:
-        The number of bytes written to the destination file.
-
-    Raises:
-        DownloadError: If the download fails or the checksum verification fails.
-    """
-    # Ensure that the chunk size is a positive integer for reading the file in chunks.
+    """Compatibility entry point; pool workers use their invocation's context."""
     chunk_size = _require_positive_integer(chunk_size, label="chunk_size")
-    # Validate and normalize the expected checksum specification
-    validated_checksum = _validate_checksum_spec(expected_checksum)
-
-    # try to download the file from the specified URL and write it to the temporary file
-    try:
-        # Ensure the destination directory exists, creating it if necessary.
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        # use atomic_output_path to create a temporary file for the download
-        with atomic_output_path(destination, suffix=".part", ) as temp_path:
-            # get the request client from the thread-local state
-            request_client = getattr(_DOWNLOAD_WORKER_STATE, "session", requests)
-            # use the request client to perform a GET request to the URL
-            with request_client.get(
-                url,
-                stream=True,
-                timeout=REMOTE_REQUEST_TIMEOUT) as response:
-                response.raise_for_status()
-                # handle the response content in chunks
-                with temp_path.open("wb") as handle:
-                    for chunk in response.iter_content(chunk_size=chunk_size):
-                        if chunk:
-                            # write the chunk to the temporary file
-                            handle.write(chunk)
-            # verify the checksum of the downloaded file against the expected value
-            _verify_validated_checksum(temp_path, validated_checksum, chunk_size)
-            # size is the number of bytes written to the temporary file
-            size = temp_path.stat().st_size
-
-        return size
-
-    # raise a DownloadError if the download request fails or issue writing the file
-    except requests.RequestException as exc:
-        raise DownloadError(f"Failed to download {url}: {exc}") from exc
-    except OSError as exc:
-        raise DownloadError(f"Failed to write {destination}: {exc}") from exc
+    _validate_checksum_spec(expected_checksum)
+    context = getattr(_DOWNLOAD_WORKER_STATE, "context", None)
+    if context is not None:
+        relative = destination.relative_to(context.output_root)
+        return _fetch_file(
+            context, relative, destination, expected_checksum, chunk_size)
+    RemoteSpec.parse(url)
+    parsed = urlsplit(url)
+    base = urlunsplit(parsed._replace(path=parsed.path.rsplit("/", 1)[0] + "/"))
+    remote = RemoteSpec.parse(base)
+    relative = literal_path(unquote(parsed.path.rsplit("/", 1)[-1]))
+    destination = Path(destination).absolute()
+    # Direct callers may intentionally choose a different local filename.
+    with OperationContext(remote, destination.parent) as context:
+        if remote.scheme in {"http", "https"}:
+            context._local.session = requests
+            context.transport.direct_url = url
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            resolve_contained_path(destination.parent, destination.name)
+            with atomic_output_path(destination, suffix=".part") as temporary:
+                context.transport.fetch(relative.as_posix(), temporary,
+                                        chunk_size=chunk_size)
+                _verify_validated_checksum(
+                    temporary, _validate_checksum_spec(expected_checksum), chunk_size)
+                size = temporary.stat().st_size
+                resolve_contained_path(destination.parent, destination.name)
+                context.check_cancelled()
+            return size
+        except OSError as exc:
+            raise DownloadError(f"Failed to write {destination}: {exc}") from None
 
 
 def select_download_files(
@@ -814,13 +785,14 @@ def download_remote_data(
         remote_url = normalize_nonempty_string(
             remote_config.get("url"),
             label="Remote URL",
-            exception_type=DownloadError).rstrip("/")
+            exception_type=DownloadError)
     # raise a DownloadError if the remote URL is not configured or invalid
     except DownloadError as exc:
         raise DownloadError("Remote URL not configured in config.yml") from exc
     # if the remote URL is not configured, raise a DownloadError to indicate the issue
     if not remote_url:
         raise DownloadError("Remote URL not configured in config.yml")
+    remote_spec = RemoteSpec.parse(remote_url, remote_config.get("auth"))
     # If there are still no files selected for download
     if not selected_files:
         # return the results without attempting any downloads
@@ -875,55 +847,68 @@ def download_remote_data(
 
     # try to download the files using a thread pool executor for concurrent downloads
     try:
-        with ThreadPoolExecutor(max_workers=max_workers,
-                                initializer=_initialize_download_worker) as executor:
-            # create an iterator over the files to download
-            file_iterator = iter(files_to_download)
-            # initialize a set to keep track of pending download futures
-            pending = set()
-            # determine the window size for concurrent downloads, allow for buffering
-            window_size = max_workers * 2
+        with OperationContext(remote_spec, output_root) as context:
+            context.transport.prepare()
+            executor = ThreadPoolExecutor(
+                max_workers=min(max_workers, context.settings.max_sessions)
+                if remote_spec.scheme in {"ssh", "sftp"} else max_workers,
+                initializer=_initialize_download_worker, initargs=(context,))
+            try:
+                # create an iterator over the files to download
+                file_iterator = iter(files_to_download)
+                # initialize a set to keep track of pending download futures
+                pending = set()
+                # Bound queued work as well as running workers.
+                window_size = max_workers * 2
 
-            def submit_next() -> bool:
-                """
-                Submit the next file for download if available.
-                Returns:
-                    bool: True if a file was submitted,
-                    False if no more files are available.
-                """
-                # try to get the next file from the iterator
-                try:
-                    url, destination, checksum = next(file_iterator)
-                # Handle the exception when there are no more files to download
-                except StopIteration:
-                    return False
-                # add the download task to the pending set using the executor
-                pending.add(executor.submit(_download_file, url, destination, checksum))
-                # if the download was successfully submitted, return True
-                return True
-
-            # for each file in the initial window size, submit it for download
-            for _ in range(min(window_size, len(files_to_download))):
-                submit_next()
-            while pending:
-                # wait for at least one of the pending download tasks to complete
-                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
-                # for each completed download, process the result and update statistics
-                for future in completed:
-                    pending.remove(future)
-                    # try to get the result of the completed download task
+                def submit_next() -> bool:
+                    """
+                    Submit the next file for download if available.
+                    Returns:
+                        bool: True if a file was submitted,
+                        False if no more files are available.
+                    """
+                    # try to get the next file from the iterator
                     try:
-                        results["total_bytes"] += future.result()
-                        results["succeeded"] += 1
-                    # Handle exceptions raised during the download
-                    except DownloadError as exc:
-                        results["failed"] += 1
-                        results["errors"].append(str(exc))
-                    # always update the progress bar, regardless of success or failure
-                    finally:
-                        progress.update(1)
-                    # submit the next file for download if available
+                        url, destination, checksum = next(file_iterator)
+                    # Handle the exception when there are no more files to download
+                    except StopIteration:
+                        return False
+                    # add the download task to the pending set using the executor
+                    pending.add(executor.submit(
+                        _download_file, url, destination, checksum))
+                    # if the download was successfully submitted, return True
+                    return True
+
+                # for each file in the initial window size, submit it for download
+                for _ in range(min(window_size, len(files_to_download))):
                     submit_next()
+                while pending:
+                    # wait for at least one of the pending download tasks to complete
+                    completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    # Aggregate per-file failures and keep successful downloads.
+                    for future in completed:
+                        pending.remove(future)
+                        # try to get the result of the completed download task
+                        try:
+                            results["total_bytes"] += future.result()
+                            results["succeeded"] += 1
+                        # Handle exceptions raised during the download
+                        except DownloadError as exc:
+                            results["failed"] += 1
+                            results["errors"].append(str(exc))
+                        # Every completed transfer advances the progress bar.
+                        finally:
+                            progress.update(1)
+                        # submit the next file for download if available
+                        submit_next()
+            except BaseException:
+                context.cancel()
+                for future in pending:
+                    future.cancel()
+                raise
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
     # close after all downloads are complete, regardless of success or failure
     finally:
         progress.close()

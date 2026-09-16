@@ -72,6 +72,7 @@ _REPO_READ_ERRORS = (
 
 # exception types translated to a clean CLI error by the hallmark build command
 _BUILD_DATASET_ERRORS = (
+    DownloadError,
     RuntimeError,
     ValueError,
     FileNotFoundError,
@@ -306,13 +307,15 @@ def add(repo, encoding, inputs):
 @click.option("--fmt")
 @click.option("--remote-name")
 @click.option("--remote-url")
+@click.option("--remote-auth", help="Local SSH profile; empty string removes it.")
 @click.option("--encoding", "encodings", multiple=True)
 @click.pass_obj
-def set_config(repo, fmt, remote_name, remote_url, encodings):
+def set_config(repo, fmt, remote_name, remote_url, remote_auth, encodings):
     """Update the current branch config.yml."""
     # if no config changes are requested, raise a ClickException to inform the user
     if (
-    fmt is None and remote_name is None and remote_url is None and not encodings):
+    fmt is None and remote_name is None and remote_url is None
+    and remote_auth is None and not encodings):
         raise ClickException("No config changes requested.")
     encoding_updates = {}
     for item in encodings:
@@ -329,7 +332,8 @@ def set_config(repo, fmt, remote_name, remote_url, encodings):
             fmt=fmt,
             remote_name=remote_name,
             remote_url=remote_url,
-            encoding_updates=encoding_updates or None)
+            encoding_updates=encoding_updates or None,
+            **({"remote_auth": remote_auth} if remote_auth is not None else {}))
 
     click.echo("Updated hallmark config.")
 
@@ -604,7 +608,16 @@ def clone(url, path, no_fetch_data, max_workers, yes):
     "--overwrite",
     is_flag=True,
     help="Replace the destination repository if it already exists.")
-def build(directory, dataset_name, remotes, config_file, fmts, overwrite):
+@click.option("--dataset-url",
+              help="Exact crawl root, independent of recorded remotes.")
+@click.option("--dataset-auth", help="Local SSH profile for the crawl source.")
+@click.option("--index-format", type=click.Choice(["cyverse-html"]))
+@click.option("--allow-remote-commands", is_flag=True,
+              help="Allow fixed read-only SSH listing commands (server python3).")
+@click.option("--remote-hash", is_flag=True,
+              help="Allow bounded server-side SHA-256 hashing for SSH builds.")
+def build(directory, dataset_name, remotes, config_file, fmts, overwrite,
+          dataset_url, dataset_auth, index_format, allow_remote_commands, remote_hash):
     """
     Build a hallmark repository at DIRECTORY for the remote dataset DATASET_NAME.
 
@@ -673,6 +686,10 @@ def build(directory, dataset_name, remotes, config_file, fmts, overwrite):
             # if the checks pass, append the fmt and db to the fmt_entries list
             fmt_entries.append({"fmt": fmt, "db": db})
 
+    source_options = {key: value for key, value in {
+        "dataset_url": dataset_url, "dataset_auth": dataset_auth,
+        "index_format": index_format, "allow_remote_commands": allow_remote_commands,
+        "remote_hash": remote_hash}.items() if value is not None and value is not False}
     # build the hallmark repository with the specified parameters
     try:
         with _translate_cli_errors(*_BUILD_DATASET_ERRORS):
@@ -682,7 +699,7 @@ def build(directory, dataset_name, remotes, config_file, fmts, overwrite):
                 fmt_entries=fmt_entries,
                 config_file=config_file,
                 remotes=parsed_remotes or None,
-                overwrite=overwrite)
+                overwrite=overwrite, **source_options)
     except requests.exceptions.RequestException as exc:
         raise ClickException(
             f"Failed to reach dataset {dataset_name!r}: {exc}") from exc

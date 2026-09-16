@@ -307,14 +307,9 @@ def test_safe_remote_path_rejects_unsafe_and_reserved_paths(unsafe_path):
         _safe_remote_path(unsafe_path)
 
 
-def test_safe_remote_path_normalizes_valid_relative_path():
-    """
-    Test that _safe_remote_path correctly normalizes a valid relative path by stripping
-    leading/trailing whitespace and converting it to a Path object.
-    """
-    assert _safe_remote_path("  nested/file.txt  ") == Path("nested/file.txt"), \
-        f"Expected normalized path 'nested/file.txt', \
-            got {_safe_remote_path('  nested/file.txt  ')}"
+def test_safe_remote_path_preserves_literal_whitespace():
+    """Catalog filenames are literal; significant spaces must survive download."""
+    assert _safe_remote_path("  nested/file.txt  ") == Path("  nested/file.txt  ")
 
 
 @pytest.mark.parametrize(
@@ -806,6 +801,8 @@ def test_download_remote_data_reuses_session_per_worker(monkeypatch, tmp_path):
         def __init__(self):
             self.urls = []
             sessions.append(self)
+        def close(self):
+            self.closed = True
         def get(self, url, **kwargs):
             self.urls.append(url)
             return _Response([b"contents"])
@@ -822,6 +819,7 @@ def test_download_remote_data_reuses_session_per_worker(monkeypatch, tmp_path):
 
     assert result["succeeded"] == 2, \
         f"Expected 2 successful downloads, but got {result['succeeded']}"
+    assert sessions[0].closed
     assert len(sessions) == 1, f"Expected a single session to be reused for both \
         downloads, but got {len(sessions)}"
     assert sessions[0].urls == [
