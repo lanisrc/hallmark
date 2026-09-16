@@ -23,18 +23,6 @@ Core Repository
    :members:
    :show-inheritance:
 
-.. automodule:: hallmark.state
-   :members:
-   :show-inheritance:
-
-.. automodule:: hallmark.downloader
-   :members:
-   :show-inheritance:
-
-.. automodule:: hallmark.paraframe
-   :members:
-   :show-inheritance:
-
 Repository Worktrees
 --------------------
 
@@ -61,10 +49,6 @@ Data Handling
    :show-inheritance:
 
 .. automodule:: hallmark.objects
-   :members:
-   :show-inheritance:
-
-.. automodule:: hallmark.eht_datatree
    :members:
    :show-inheritance:
 
