@@ -74,18 +74,25 @@ Or install from source for development purposes::
 Private data remotes
 --------------------
 
-Hallmark can fetch cataloged files from HTTP(S), SSH and SFTP data remotes.
-Data remotes locate file bytes separately from the Git remotes used for catalog
-history. SSH uses system OpenSSH 9.6+, a trusted host key and noninteractive
-key/agent authentication::
+|hallmark|_ can download data products from HTTP(S), SSH, and SFTP servers.
+A data remote specifies where the files are stored, while a Git remote
+is used to share the history of the data index.
+For a private server, |hallmark|_ uses OpenSSH 9.6 or newer with a trusted
+host key and key-based authentication that does not require a prompt.
+
+Configure a data remote, preview the files, and download them::
 
     hallmark set-config --remote-name campus --remote-url ssh://campus/srv/export/
     hallmark download --remote campus --all --dry-run
     hallmark download --remote campus --all
 
-Optional local auth profiles can be selected with ``--remote-auth PROFILE``.
-Private catalogs can be built with ``build --dataset-url URL --dataset-auth
-PROFILE --allow-remote-commands``; SSH listing requires a POSIX shell and Python 3
-on the server. SFTP-only accounts can download known files. See
-`Private lab data over SSH <doc/usecase.rst#private-lab-data-over-ssh>`_ for setup,
-profiles, bounded hashing, platform scope and disposable integration tests.
+Optional authentication profiles keep local SSH settings outside the
+repository and can be selected with ``--remote-auth PROFILE``.
+To build a data index from a private server, use ``hallmark build`` with
+``--dataset-url``, ``--allow-remote-commands``, and, if needed,
+``--dataset-auth PROFILE``.
+Building an index requires a POSIX shell and Python 3 on the server;
+SFTP-only accounts can download files from an existing index.
+
+Examples and configuration details are described in
+`Private lab data over SSH <doc/usecase.rst#private-lab-data-over-ssh>`_.

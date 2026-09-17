@@ -139,9 +139,24 @@ Dataset builders and data remotes
 
 .. autofunction:: hallmark.repo_builder.list_remote_files
 
-``Repo.set_config(remote_auth="PROFILE")`` records a local SSH profile reference;
-``remote_auth=""`` removes it. ``download_remote_data`` keeps its existing result
-mapping with ``succeeded``, ``failed``, ``total_bytes`` and ``errors``. Configuration
-and SSH connection preflight failures raise ``DownloadError`` before file workers
-start. HTTP, SSH and SFTP follow the same destination/checksum contract. See the
-private-lab workflow in :doc:`usecase` for profile schema and capability limits.
+Associate a data remote with a local SSH authentication profile::
+
+   repo.set_config(remote_name="campus", remote_auth="campus")
+
+Remove the profile reference::
+
+   repo.set_config(remote_name="campus", remote_auth="")
+
+The repository stores the profile name. The SSH settings remain in the
+local authentication file. Passing ``remote_auth=None`` leaves the
+reference unchanged.
+
+``download_remote_data`` returns a dictionary containing ``succeeded``,
+``failed``, ``total_bytes``, and ``errors``. Check ``failed`` and ``errors``
+for individual transfer failures. Configuration errors and failed SSH
+connection checks raise ``DownloadError`` before downloads begin.
+HTTP, SSH, and SFTP downloads use the same rules for destination paths
+and checksum verification.
+
+See :ref:`private-lab-data-over-ssh` for a CLI workflow, authentication
+settings, and supported server configurations.
