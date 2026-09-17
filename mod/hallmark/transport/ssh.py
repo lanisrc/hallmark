@@ -153,18 +153,23 @@ class SshTransport(Transport):
 
     def _stop(self, process):
         # Every owned client starts a new process group, including proxy children.
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        def signal_group(signum):
+            try:
+                os.killpg(process.pid, signum)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                # macOS can report EPERM for a group containing only zombies.
+                # Reap our child, but retain errors for a still-running process.
+                if process.poll() is None:
+                    raise
+
+        signal_group(signal.SIGTERM)
         try:
             process.wait(timeout=self.context.settings.shutdown_timeout)
         except subprocess.TimeoutExpired:
             pass
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        signal_group(signal.SIGKILL)
         process.wait()
         with self._process_lock:
             self._processes.discard(process)

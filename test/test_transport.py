@@ -2,8 +2,10 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+import errno
 import hashlib
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -333,6 +335,48 @@ def test_process_start_failure():
     with OperationContext(RemoteSpec.parse("ssh://unused/data")) as context:
         with pytest.raises(DownloadError, match="Unable to start"):
             context.transport._run(["/nonexistent/hallmark-test"], timeout=1)
+
+
+def test_cleanup_exited_process_group_permission_error(monkeypatch):
+    with OperationContext(RemoteSpec.parse("ssh://unused/data")) as context:
+        transport = context.transport
+        process = transport._spawn([sys.executable, "-c", "pass"])
+        process.wait(timeout=5)
+        signals = []
+
+        def zombie_group(pid, signum):
+            assert pid == process.pid
+            signals.append(signum)
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+
+        with monkeypatch.context() as patch:
+            patch.setattr("hallmark.transport.ssh.os.killpg", zombie_group)
+            transport._stop(process)
+        # Exited leaders may still have proxy children: attempt both signals.
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+        assert process.returncode == 0
+        assert not transport._processes
+
+
+def test_cleanup_live_process_permission_error_is_not_suppressed(monkeypatch):
+    with OperationContext(RemoteSpec.parse("ssh://unused/data")) as context:
+        transport = context.transport
+        process = transport._spawn(
+            [sys.executable, "-c", "import time; time.sleep(60)"]
+        )
+
+        def denied(pid, signum):
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+
+        with monkeypatch.context() as patch:
+            patch.setattr("hallmark.transport.ssh.os.killpg", denied)
+            with pytest.raises(PermissionError):
+                transport._stop(process)
+            assert process.poll() is None
+            assert process in transport._processes
+        # Restore real signals before the context closes and reaps this child.
+    assert process.poll() is not None
+    assert not transport._processes
 
 
 def test_cancel_active_process_group(fake_process, tmp_path):
