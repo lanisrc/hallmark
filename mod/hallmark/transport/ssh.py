@@ -158,11 +158,14 @@ class SshTransport(Transport):
                 os.killpg(process.pid, signum)
             except ProcessLookupError:
                 pass
-            except PermissionError:
+            except PermissionError as exc:
                 # macOS can report EPERM for a group containing only zombies.
-                # Reap our child, but retain errors for a still-running process.
-                if process.poll() is None:
-                    raise
+                # poll() may return None while another thread holds Popen's
+                # wait lock, so allow a bounded wait for concurrent reaping.
+                try:
+                    process.wait(timeout=self.context.settings.shutdown_timeout)
+                except subprocess.TimeoutExpired:
+                    raise exc from None
 
         signal_group(signal.SIGTERM)
         try:

@@ -337,7 +337,10 @@ def test_process_start_failure():
             context.transport._run(["/nonexistent/hallmark-test"], timeout=1)
 
 
-def test_cleanup_exited_process_group_permission_error(monkeypatch):
+@pytest.mark.parametrize("reaping_in_progress", [False, True])
+def test_cleanup_exited_process_group_permission_error(
+    monkeypatch, reaping_in_progress
+):
     with OperationContext(RemoteSpec.parse("ssh://unused/data")) as context:
         transport = context.transport
         process = transport._spawn([sys.executable, "-c", "pass"])
@@ -351,6 +354,10 @@ def test_cleanup_exited_process_group_permission_error(monkeypatch):
 
         with monkeypatch.context() as patch:
             patch.setattr("hallmark.transport.ssh.os.killpg", zombie_group)
+            if reaping_in_progress:
+                # Popen.poll() cannot acquire its wait lock while another
+                # thread reaps the child and can temporarily report None.
+                patch.setattr(process, "poll", lambda: None)
             transport._stop(process)
         # Exited leaders may still have proxy children: attempt both signals.
         assert signals == [signal.SIGTERM, signal.SIGKILL]
