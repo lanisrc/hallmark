@@ -215,7 +215,10 @@ def test_http_error_redacts_exception_and_cause(monkeypatch, tmp_path):
     url = "https://user:secret@example.test/data?token=secret"
     with pytest.raises(DownloadError) as error:
         _download_file(url, tmp_path / "out")
-    assert "secret" not in "".join(traceback.format_exception(error.value))
+    formatted = traceback.format_exception(
+        type(error.value), error.value, error.value.__traceback__
+    )
+    assert "secret" not in "".join(formatted)
     assert "secret" not in repr(error.value)
 
 

@@ -295,30 +295,53 @@ def test_build_manifest_download_clone_workflow(ssh_server, tmp_path):
     assert (tmp_path / "cli-clone/nested/item_1.dat").read_bytes() == b"science"
 
 
+def _wait_for_partial_file(directory, pattern, total_size, task):
+    """Wait for actual SFTP bytes before interrupting a transfer."""
+    directory = Path(directory)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if task.done():
+            task.result()  # Surface a transfer error instead of a polling timeout.
+            pytest.fail("Transfer completed before it could be interrupted")
+        for path in directory.glob(pattern):
+            try:
+                size = path.stat().st_size
+            except FileNotFoundError:
+                continue
+            if 0 < size < total_size:
+                return
+        time.sleep(0.01)
+    pytest.fail("SFTP did not write a partial file before the deadline")
+
+
 def test_real_cancel_transfer_and_preserve_other_master(ssh_server, tmp_path):
     server = ssh_server
-    (server["root"] / "large").write_bytes(b"x" * 128 * 1024)
+    payload = b"x" * 128 * 1024
+    (server["root"] / "large").write_bytes(payload)
     with OperationContext(RemoteSpec.parse(server["url"])) as survivor:
         survivor.transport.prepare()
         with OperationContext(RemoteSpec.parse(server["url"])) as context:
-            context.settings = replace(context.settings, shutdown_timeout=1)
+            context.settings = replace(
+                context.settings, shutdown_timeout=1, transfer_timeout=15
+            )
             context.transport.prepare()
-            # Throttle only this test's SFTP process to make interruption deterministic.
-            context.transport.sftp = ["sftp", "-l", "8"]
+            # Bound requests as well as bandwidth: a small file can otherwise
+            # finish inside the client's initial buffering window on macOS.
+            context.transport.sftp = ["sftp", "-B", "1024", "-R", "1", "-l", "8"]
             target = tmp_path / "partial"
             with ThreadPoolExecutor(1) as pool:
                 task = pool.submit(context.transport.fetch, "large", target)
-                deadline = time.monotonic() + 5
-                while (
-                    len(context.transport._processes) < 2
-                    and time.monotonic() < deadline
-                ):
-                    time.sleep(0.01)
-                context.cancel()
-                with pytest.raises(TransferCancelled):
-                    task.result(timeout=5)
+                try:
+                    _wait_for_partial_file(tmp_path, "partial", len(payload), task)
+                    context.cancel()
+                    with pytest.raises(TransferCancelled):
+                        task.result(timeout=5)
+                finally:
+                    context.cancel()
             assert not context.transport._processes
         assert survivor.transport._master.poll() is None
+        survivor.transport.fetch("large", tmp_path / "survivor-copy")
+        assert (tmp_path / "survivor-copy").read_bytes() == payload
 
 
 @pytest.mark.parametrize("ssh_server", ["sftp-only"], indirect=True)
@@ -426,7 +449,8 @@ def test_permission_denied_preserves_existing_file(ssh_server, tmp_path):
 
 
 def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monkeypatch):
-    (ssh_server["root"] / "large").write_bytes(b"x" * 128 * 1024)
+    payload = b"x" * 128 * 1024
+    (ssh_server["root"] / "large").write_bytes(payload)
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url=ssh_server["url"])
     destination = repo.worktree / "large"
@@ -436,7 +460,10 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
 
     def slow_prepare(self):
         prepare(self)
-        self.sftp = ["sftp", "-l", "8"]
+        self.context.settings = replace(
+            self.context.settings, shutdown_timeout=1, transfer_timeout=15
+        )
+        self.sftp = ["sftp", "-B", "1024", "-R", "1", "-l", "8"]
         if self not in transports:
             transports.append(self)
 
@@ -448,14 +475,14 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
             repo.worktree,
             selected_files=[(Path("large"), None)],
         )
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if transports and len(transports[0]._processes) > 1:
-                break
-            time.sleep(0.01)
-        assert transports and len(transports[0]._processes) > 1
-        transports[0]._master.terminate()
-        result = task.result(timeout=5)
+        try:
+            _wait_for_partial_file(repo.worktree, "*.part", len(payload), task)
+            assert len(transports) == 1
+            transports[0]._master.terminate()
+            result = task.result(timeout=5)
+        finally:
+            for transport in transports:
+                transport.context.cancel()
     assert result["failed"] == 1
     assert destination.read_bytes() == b"original"
     assert not list(Path(repo.worktree).glob("*.part"))
