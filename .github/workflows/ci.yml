@@ -27,11 +27,61 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        python -m pip install ruff pytest
+        python -m pip install ruff pytest pytest-cov
         python -m pip install -e .
     - name: Lint with ruff
       run: |
         ruff check --select E,F --exclude ./demo
     - name: Test with pytest
+      env:
+        COVERAGE_FILE: .coverage.py${{ matrix.python-version }}
       run: |
-        pytest
+        pytest --cov
+    - uses: actions/upload-artifact@v4
+      with:
+        name: coverage-py${{ matrix.python-version }}
+        path: .coverage.py${{ matrix.python-version }}
+        include-hidden-files: true
+
+  # Merges coverage from every test job, posts the PR comment, stores the badge
+  # and HTML report on the python-coverage-comment-action-data branch, and
+  # enforces the floor. The floor lives here rather than in pyproject.toml
+  # because pytest-cov would apply it to each partial run.
+  coverage:
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - name: Install coverage
+      run: python -m pip install coverage
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: coverage-*
+        merge-multiple: true
+    - name: Combine coverage data
+      run: coverage combine
+    # The action has no activity for pushes to branches other than the default
+    # one, so it only runs for pull requests and main.
+    - name: Coverage comment
+      id: coverage_comment
+      if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+      uses: py-cov-action/python-coverage-comment-action@a05be3d2e8a6272d3ef5fb2840ab20368bb2eb71 # v4.3
+      with:
+        GITHUB_TOKEN: ${{ github.token }}
+    # Pull requests from forks get a read-only token, so the comment is handed
+    # to coverage-comment.yml to post.
+    - uses: actions/upload-artifact@v4
+      if: steps.coverage_comment.outputs.comment_file_written == 'true'
+      with:
+        name: python-coverage-comment-action
+        path: python-coverage-comment-action.txt
+    - name: Enforce coverage floor
+      run: coverage report --fail-under=90

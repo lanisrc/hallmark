@@ -39,7 +39,7 @@ Repository = "https://github.com/l6a/hallmark"
 Issues = "https://github.com/l6a/hallmark/issues"
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "pytest-cov"]
 doc = ["sphinx"]
 lint = ["ruff"]
 
@@ -55,3 +55,13 @@ exclude = ["doc", "demo"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
+
+[tool.coverage.run]
+source_pkgs = ["hallmark"]
+branch = true
+# Required by the coverage comment action; also merges paths across runners.
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

@@ -19,3 +19,9 @@ _build/
 
 /demo/
 /cli_test_repos/
+
+# Coverage output (after the whitelist so "!*.*ml" cannot re-include it)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
