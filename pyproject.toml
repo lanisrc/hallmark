@@ -55,3 +55,8 @@ exclude = ["doc", "demo"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
+addopts = "--strict-markers"
+markers = [
+    "ssh_client: exercise the actual local OpenSSH SFTP command parser",
+    "ssh_integration: disposable loopback sshd (HALLMARK_RUN_SSH_TESTS=1 required)",
+]

@@ -17,5 +17,6 @@ __pycache__/
 # Ignore Sphinx build output by default
 _build/
 
-/demo/
+/demo/*
+!/demo/private_data_demo.md
 /cli_test_repos/

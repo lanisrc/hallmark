@@ -70,3 +70,34 @@ Or install from source for development purposes::
 ..  _yukon:    https://github.com/l6a/yukon
 ..  _banyan:   https://github.com/l6a/banyan
 ..  _eht:      https://eventhorizontelescope.org
+
+Private data remotes
+--------------------
+
+|hallmark|_ can download data products from HTTP(S), SSH, and SFTP servers.
+A data remote specifies where the files are stored, while a Git remote
+is used to share the history of the data index.
+For a private server, |hallmark|_ uses OpenSSH 9.6 or newer with a trusted
+host key and key-based authentication that does not require a prompt.
+
+Clone a remote directory to prepare its catalog, then approve selected downloads::
+
+    hallmark clone ssh://campus/srv/export/ campus --filter '**/*.h5'
+    cd campus
+    hallmark download --all --dry-run
+    hallmark download --all
+
+Cloning discovers files without downloading dataset contents. CyVerse and
+ordinary browsable HTTPS directories, including DESI, use the same workflow.
+SSH discovery also works with SFTP-only accounts; no server shell or Python
+is required. Omit the filter to catalog everything beneath the supplied URL.
+
+Every dataset transfer requires confirmation. Python callers can inspect
+``repo.plan_download()`` and then execute ``repo.download(plan, approved=True)``.
+Optional authentication profiles remain local and can be selected with
+``clone --auth PROFILE`` or ``set-config --remote-auth PROFILE``.
+``init`` creates a local repository; the older remote ``build`` command is
+deprecated in favor of ``clone``.
+
+Examples and configuration details are described in
+`Private data over SSH and SFTP <doc/private_data.rst>`_.

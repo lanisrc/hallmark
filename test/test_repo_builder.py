@@ -10,6 +10,7 @@ import yaml
 import requests
 
 from mock_server import MockServer
+from hallmark.transport.base import CapabilityError
 from hallmark.repo_builder import (
     KNOWN_FIELD_VALUES,
     _match_file_against_fmts,
@@ -43,7 +44,7 @@ def _served(server: MockServer):
     Returns:
         A context manager that patches requests.get and requests.head.
     """
-    return patch("hallmark.repo_builder.requests.Session", return_value=server)
+    return patch("hallmark.transport.requests.Session", return_value=server)
 
 
 # helper function to monkeypatch list_remote_files for testing build_repo
@@ -58,7 +59,7 @@ def _inventory(monkeypatch, files):
         A list of base_url values passed to the fake list_remote_files function.
     """
     calls = []
-    def fake_list(base_url):
+    def fake_list(base_url, **kwargs):
         """create a fake list_remote_files list"""
         calls.append(base_url)
         return dict(files)
@@ -182,24 +183,15 @@ def test_list_remote_files_partial_sibling_manifest_does_not_hide_files():
             expected (None, None) because the file was not listed in the manifest"
 
 
-def test_list_remote_files_generic_manifest_detected_by_content():
-    """
-    A manifest file whose name is generic (like "md5sum.txt") should
-    still be detected as a manifest if its content looks like one.
-    """
+def test_list_remote_files_does_not_probe_custom_checksum_payloads():
     server = MockServer(BASE_URL)
     server.add_directory("", [
         ("data-object", "data.tar"),
-        ("data-object", "custom_checksum_manifest.log"),])
-    server.add_file("custom_checksum_manifest.log",
-        "aa11bb22cc33dd44ee55ff66aa11bb22  data.tar\n")
+        ("data-object", "custom_checksum_manifest.log")])
+    # No payload is registered: fetching either body would fail the test.
     with _served(server):
-        file_checksums = list_remote_files(server.base_url)
-
-    assert file_checksums["data.tar"] == \
-        ("unknown", "aa11bb22cc33dd44ee55ff66aa11bb22"), \
-            f"unexpected checksum for data.tar: {file_checksums}, \
-                expected unknown aa11bb22cc33dd44ee55ff66aa11bb22"
+        files = list_remote_files(server.base_url)
+    assert files["data.tar"] == (None, None)
 
 
 def test_list_remote_files_generic_manifest_algorithm_from_own_filename():
@@ -333,7 +325,7 @@ def test_list_remote_files_fetches_each_directory_once():
     server.add_directory("nested/", [("data-object", "file.dat")])
     requested_urls = []
     original_get = server.get
-    def recording_get(url, timeout=None):
+    def recording_get(url, timeout=None, **kwargs):
         """A wrapper around the original server.get that records requested URLs."""
         requested_urls.append(url)
         return original_get(url, timeout=timeout)
@@ -356,11 +348,13 @@ def test_list_remote_files_unavailable_manifest_does_not_hide_files():
     server.add_directory(
         "", [("data-object", "data.tar"), ("data-object", "checksums.txt")])
     original_get = server.get
-    def unavailable_manifest_get(url, timeout=None):
+    def unavailable_manifest_get(url, timeout=None, **kwargs):
         """A wrapper around the original server.get that simulates
         an unavailable manifest."""
         if url.endswith("/checksums.txt"):
-            raise requests.HTTPError("manifest unavailable")
+            response = requests.Response()
+            response.status_code = 404
+            raise requests.HTTPError("manifest unavailable", response=response)
         return original_get(url, timeout=timeout)
     server.get = unavailable_manifest_get
     with _served(server):
@@ -820,6 +814,7 @@ def test_build_repo_size_threshold_skips_large_unmatched_file(tmp_path):
         resp = MagicMock()
         resp.raise_for_status = lambda: None
         resp.headers = {"Content-Length": str(5 * 1024 * 1024 * 1024)}
+        resp.__enter__.return_value = resp
         return resp
     server.fake_head = huge_head
     def refuse_get_body(url, timeout=None):
@@ -839,114 +834,37 @@ def test_build_repo_size_threshold_skips_large_unmatched_file(tmp_path):
         e for e in repo.state.config["data"]
         if e.get("file") == "huge_unmatched.dat")
 
-    assert entry == {"file": "huge_unmatched.dat", "checksum": "unknown"}, \
+    assert entry == {"file": "huge_unmatched.dat"}, \
         f"unexpected entry for huge_unmatched.dat: {entry}, expected checksum 'unknown'"
 
 
-def test_build_repo_small_unmatched_file_still_downloaded_and_hashed(tmp_path,
-                                                                 simple_dataset_server):
-    """
-    Test that build_repo still downloads and hashes a small unmatched file,
-    using a simple mock dataset server to avoid hitting the real network.
-    Args:
-        tmp_path: A temporary directory provided by pytest for the test.
-        simple_dataset_server: A fixture providing a MockServer instance
-            with a simple dataset structure and manifest.
-    """
-    with _served(simple_dataset_server):
-        repo = build_repo(
-            repo_path=tmp_path / "repo4.hm",
-            dataset_name="EHTC_TEST",
-            fmt_entries=[],)
-    entry = next(e for e in repo.state.config["data"] if e.get("file") == "README.md")
-
-    has_legacy_md5 = ("md5" in entry and entry["md5"] != "unknown")
-    has_normalized_md5 = (
-        entry.get("checksum_algorithm") == "md5"
-        and entry.get("checksum") not in (None, "unknown"))
-
-    assert has_legacy_md5 or has_normalized_md5, f"unexpected entry for README.md: \
-        {entry}, expected either legacy md5 or normalized checksum schema"
+def test_build_repo_small_unmatched_file_is_not_downloaded(tmp_path):
+    server = MockServer(BASE_URL)
+    server.add_directory("", [("data-object", "README.md")])
+    # Even a tiny file stays remote until download approval.
+    with _served(server):
+        repo = build_repo(tmp_path / "repo.hm", "EHTC_TEST", fmt_entries=[])
+    assert repo.state.config["data"] == [{"name": "readme", "file": "README.md"}]
 
 
-def test_build_repo_interactive_detect_branch(monkeypatch, tmp_path,
-                                              simple_dataset_server):
-    """
-    fmt_entries=None should enter interactive detect flow and accept strict yes/no.
-    Args:
-        monkeypatch: A pytest fixture for safely patching builtins and other objects.
-        tmp_path: A temporary directory provided by pytest for the test.
-        simple_dataset_server: A fixture providing a MockServer instance
-            with a simple dataset structure and manifest.
-    """
-    answers = iter(["detect", "no", "data.tsv"])
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
-    called = {"include_drives": None}
-    def _fake_detect_fmt(rel_paths, include_drives=False):
-        called["include_drives"] = include_drives
-        return ["proj/data.{format}"]
-    monkeypatch.setattr("hallmark.repo_builder.detect_fmt", _fake_detect_fmt)
-    with _served(simple_dataset_server):
-        repo = build_repo(
-            repo_path=tmp_path / "interactive_detect.hm",
-            dataset_name="EHTC_TEST",
-            fmt_entries=None,)
-
-    assert called["include_drives"] is False, \
-        f"expected include_drives=False, got {called['include_drives']}"
-    data_tsv = repo.dothm.path / "data.tsv"
-    assert data_tsv.exists(), f"expected {data_tsv} to be created"
-    df = pd.read_csv(data_tsv, sep="\t", dtype=str)
-    assert "proj/data.tar" in set(df["path"]), \
-        f"expected proj/data.tar in data.tsv, got {df.to_dict(orient='records')}"
+def test_build_repo_defaults_to_generic_path_catalog_without_input(
+        monkeypatch, tmp_path):
+    _inventory(monkeypatch, {
+        "arbitrary.bin": (None, None), "nested/a.fits": (None, None)})
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("Unexpected prompt"))
+    repo = build_repo(tmp_path / "catalog", "label")
+    assert repo.state.config["data"] == [{"fmt": "{path}", "db": "data.tsv"}]
+    frame = pd.read_csv(repo.dothm.path / "data.tsv", sep="\t")
+    assert set(frame["path"]) == {"arbitrary.bin", "nested/a.fits"}
 
 
-def test_build_repo_interactive_input_branch(monkeypatch,
-                                             tmp_path, simple_dataset_server):
-    """
-    fmt_entries=None should allow manual interactive input flow.
-    Args:
-        monkeypatch: A pytest fixture for safely patching builtins and other objects.
-        tmp_path: A temporary directory provided by pytest for the test.
-        simple_dataset_server: A fixture providing a MockServer instance
-            with a simple dataset structure and manifest.
-    """
-    answers = iter(["input", "proj/data.{format}", "data.tsv", ""])
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
-    with _served(simple_dataset_server):
-        repo = build_repo(
-            repo_path=tmp_path / "interactive_input.hm",
-            dataset_name="EHTC_TEST",
-            fmt_entries=None,)
-
-    data_tsv = repo.dothm.path / "data.tsv"
-    assert data_tsv.exists(), f"expected {data_tsv} to be created"
-    df = pd.read_csv(data_tsv, sep="\t", dtype=str)
-    assert "proj/data.tar" in set(df["path"]), \
-        f"expected proj/data.tar in data.tsv, got {df.to_dict(orient='records')}"
 
 
-def test_build_repo_interactive_detect_invalid_yes_no_raises(
-    monkeypatch, tmp_path, simple_dataset_server
-):
-    """
-    Detect flow should raise on any include_drives answer besides strict yes/no.
-    Args:
-        monkeypatch: A pytest fixture for safely patching builtins and other objects.
-        tmp_path: A temporary directory provided by pytest for the test.
-        simple_dataset_server: A fixture providing a MockServer instance
-            with a simple dataset structure and manifest.
-    Raises:
-        ValueError: If the include_drives answer is not "yes" or "no".
-    """
-    answers = iter(["detect", "y"])
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
-    with _served(simple_dataset_server):
-        with pytest.raises(ValueError):
-            build_repo(
-                repo_path=tmp_path / "interactive_invalid.hm",
-                dataset_name="EHTC_TEST",
-                fmt_entries=None,)
+def test_build_repo_rejects_payload_hashing_before_network(monkeypatch, tmp_path):
+    monkeypatch.setattr("hallmark.repo_builder.list_remote_files",
+                        lambda *_: pytest.fail("Unexpected network access"))
+    with pytest.raises(CapabilityError, match="remote_hash"):
+        build_repo(tmp_path / "catalog", "label", remote_hash=True)
 
 
 def test_build_repo_multiple_remotes(tmp_path, simple_dataset_server):
@@ -1156,7 +1074,7 @@ def test_build_repo_empty_dataset_writes_valid_empty_data_config(monkeypatch, tm
             expected 'data: []' at the start"
 
 
-def test_build_repo_loads_formats_and_remotes_interactively_from_config(
+def test_build_repo_loads_formats_and_remotes_from_explicit_config(
     monkeypatch, tmp_path):
     """
     If the user selects a config file that has formats and remotes, build_repo should
@@ -1178,7 +1096,8 @@ def test_build_repo_loads_formats_and_remotes_interactively_from_config(
     answers = iter(["config", str(source_config)])
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
     _inventory(monkeypatch, {"item_1.dat": ("md5", "a" * 32)})
-    repo = build_repo(tmp_path / "from-config.hm", "EHTC_TEST")
+    repo = build_repo(
+        tmp_path / "from-config.hm", "EHTC_TEST", config_file=source_config)
 
     assert {entry.get("fmt") for entry in repo.state.config["data"]} == {
         "item_{number}.dat"}, f"unexpected fmt entries: {repo.state.config['data']}, \
@@ -1188,7 +1107,7 @@ def test_build_repo_loads_formats_and_remotes_interactively_from_config(
             {repo.state.config['remote']}, expected to load from config"
 
 
-def test_build_repo_explicit_remotes_override_interactive_config(monkeypatch, tmp_path):
+def test_build_repo_explicit_remotes_override_loaded_config(monkeypatch, tmp_path):
     """
     If the user selects a config file that has remotes, but also provides explicit
     remotes to build_repo, the explicit remotes should override the config remotes.
@@ -1209,14 +1128,15 @@ def test_build_repo_explicit_remotes_override_interactive_config(monkeypatch, tm
     repo = build_repo(
         tmp_path / "override.hm",
         "EHTC_TEST",
-        remotes=[{"name": "new", "url": "https://new.test"}])
+        remotes=[{"name": "new", "url": "https://new.test"}],
+        config_file=source_config)
 
     assert repo.state.config["remote"] == [{"name": "new", "url": "https://new.test"}],\
      f"unexpected remotes: {repo.state.config['remote']}, \
         expected to override with new remote"
 
 
-def test_build_repo_interactive_config_requires_a_format(monkeypatch, tmp_path):
+def test_build_repo_explicit_config_requires_a_format(monkeypatch, tmp_path):
     """
     If the user selects a config file that has no fmt entries, build_repo should raise
     a ValueError indicating that no formats were found.
@@ -1232,7 +1152,7 @@ def test_build_repo_interactive_config_requires_a_format(monkeypatch, tmp_path):
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
 
     with pytest.raises(ValueError, match="No fmt entries found"):
-        build_repo(tmp_path / "missing-fmt.hm", "EHTC_TEST")
+        build_repo(tmp_path / "missing-fmt.hm", "EHTC_TEST", config_file=source_config)
 
 
 def test_build_repo_reuses_existing_formats_and_remotes(monkeypatch, tmp_path):
@@ -1266,87 +1186,17 @@ def test_build_repo_reuses_existing_formats_and_remotes(monkeypatch, tmp_path):
         {calls}, expected two calls to {BASE_URL}"
 
 
-def test_build_repo_rejects_invalid_existing_repo_choice_before_network(
-    monkeypatch, tmp_path):
-    """
-    If the user chooses an invalid option when prompted to reuse an existing repo,
-    build_repo should raise a ValueError before attempting any network operations.
-    Args:
-        monkeypatch: A pytest fixture for safely patching builtins and other objects.
-        tmp_path: A temporary directory provided by pytest for the test.
-    Raises:
-        AssertionError: If build_repo attempts to perform network operations after an
-            invalid choice is made.
-        ValueError: If the user provides an unrecognized choice when prompted to reuse
-            an existing repo.
-    """
-    repo_path = tmp_path / "existing.hm"
-    _inventory(monkeypatch, {"item_1.dat": ("md5", "a" * 32)})
-    build_repo(
-        repo_path,
-        "EHTC_TEST",
-        fmt_entries=[{"fmt": "item_{number}.dat", "db": "items.tsv"}])
-    monkeypatch.setattr("builtins.input", lambda prompt: "invalid")
-    def network_must_not_run(base_url):
-        """check the invalid input is caught before attempting network operations"""
-        raise AssertionError("remote listing should remain lazy")
-    monkeypatch.setattr(
-        "hallmark.repo_builder.list_remote_files", network_must_not_run)
-
-    with pytest.raises(ValueError, match="Unrecognized choice"):
-        build_repo(repo_path, "EHTC_TEST")
+def test_build_repo_reuses_existing_catalog_without_input(monkeypatch, tmp_path):
+    _inventory(monkeypatch, {"item_1.dat": (None, None)})
+    path = tmp_path / "catalog"
+    build_repo(path, "label", [{"fmt": "item_{number}.dat", "db": "data.tsv"}])
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("Unexpected prompt"))
+    repo = build_repo(path, "label")
+    assert repo.state.config["data"] == [{"fmt": "item_{number}.dat", "db": "data.tsv"}]
 
 
-def test_build_repo_detects_single_format_and_uses_data_tsv(monkeypatch, tmp_path):
-    """
-    If detect_fmt returns a single format, build_repo should use it and default to
-    "data.tsv" as the db name.
-    Args:
-        monkeypatch: A pytest fixture for safely patching builtins and other objects.
-        tmp_path: A temporary directory provided by pytest for the test.
-    """
-    _inventory(monkeypatch,
-               {"item_1.dat": ("md5", "a" * 32), "item_2.dat": ("md5", "b" * 32)})
-    answers = iter(["detect", "yes"])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
-    detected = {}
-    def fake_detect(paths, include_drives=False):
-        """return a single format for testing purposes, and record the arguments"""
-        detected["args"] = (paths, include_drives)
-        return ["item_{number}.dat"]
-    monkeypatch.setattr("hallmark.repo_builder.detect_fmt", fake_detect)
-    repo = build_repo(tmp_path / "detected.hm", "EHTC_TEST")
-
-    assert detected["args"] == (["item_1.dat", "item_2.dat"], True), \
-        f"unexpected arguments to detect_fmt: {detected['args']}, expected \
-            (['item_1.dat', 'item_2.dat'], True)"
-    assert (repo.dothm.path / "data.tsv").is_file(), f"expected data.tsv to be created,\
-          but it does not exist at {repo.dothm.path / 'data.tsv'}"
-    assert [entry for entry in repo.state.config["data"] if "fmt" in entry] == [
-        {"fmt": "item_{number}.dat", "db": "data.tsv"}], f"unexpected data config: \
-            {repo.state.config['data']}, expected a single fmt entry with db 'data.tsv'"
 
 
-def test_build_repo_records_detect_include_drives_in_meta(monkeypatch, tmp_path):
-    """
-    When fmts are auto-detected, build_repo should record the include_drives choice
-    in meta.yml so it can be recovered later without re-running detection interactively.
-    Args:
-        monkeypatch: A pytest fixture for safely patching builtins and other objects.
-        tmp_path: A temporary directory provided by pytest for the test.
-    """
-    _inventory(monkeypatch, {"item_1.dat": ("md5", "a" * 32)})
-    answers = iter(["detect", "yes"])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
-    monkeypatch.setattr(
-        "hallmark.repo_builder.detect_fmt",
-        lambda paths, include_drives=False: ["item_{number}.dat"])
-    repo = build_repo(tmp_path / "detected.hm", "EHTC_TEST")
-
-    assert repo.state.meta.get("detect_include_drives") is True, f"expected meta.yml to\
-          record detect_include_drives=True, got: {repo.state.meta}"
-    assert repo.dothm.load_yml("meta").get("detect_include_drives") is True, \
-        "expected meta.yml on disk to record detect_include_drives=True"
 
 
 def test_build_repo_omits_detect_include_drives_when_fmt_entries_given(
@@ -1367,63 +1217,10 @@ def test_build_repo_omits_detect_include_drives_when_fmt_entries_given(
         f"did not expect detect_include_drives in meta.yml, got: {repo.state.meta}"
 
 
-def test_build_repo_detects_multiple_formats_and_normalizes_db_names(
-    monkeypatch, tmp_path):
-    """
-    If detect_fmt returns multiple formats, build_repo should prompt for a db name
-    for each format and normalize the db names to be unique.
-    Args:
-        monkeypatch: A pytest fixture for safely patching builtins and other objects.
-        tmp_path: A temporary directory provided by pytest for the test.
-    """
-    _inventory(monkeypatch,
-               {"a_1.dat": ("md5", "a" * 32), "b_2.dat": ("md5", "b" * 32)})
-    answers = iter(["detect", "no", "a", "b.tsv"])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
-    monkeypatch.setattr(
-        "hallmark.repo_builder.detect_fmt",
-        lambda paths, include_drives=False: ["a_{n}.dat", "b_{n}.dat"])
-    repo = build_repo(tmp_path / "multi-detect.hm", "EHTC_TEST")
-
-    assert [entry for entry in repo.state.config["data"] if "fmt" in entry] == [
-        {"fmt": "a_{n}.dat", "db": "a.tsv"},
-        {"fmt": "b_{n}.dat", "db": "b.tsv"}], f"unexpected data config: \
-        {repo.state.config['data']}, expected two fmt entries with normalized db names"
 
 
-def test_build_repo_detect_rejects_no_detected_formats(monkeypatch, tmp_path):
-    """
-    If detect_fmt returns no formats, build_repo should raise a ValueError.
-    Args:
-        monkeypatch: A pytest fixture for safely patching builtins and other objects.
-        tmp_path: A temporary directory provided by pytest for the test.
-    Raises:
-        ValueError: If no formats could be automatically detected.
-    """
-    _inventory(monkeypatch, {"item.dat": ("md5", "a" * 32)})
-    answers = iter(["detect", "no"])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
-    monkeypatch.setattr(
-        "hallmark.repo_builder.detect_fmt",
-        lambda paths, include_drives=False: [],)
-
-    with pytest.raises(ValueError, match="No fmts could be automatically detected"):
-        build_repo(tmp_path / "nothing-detected.hm", "EHTC_TEST")
 
 
-def test_build_repo_rejects_unknown_format_input_mode(monkeypatch, tmp_path):
-    monkeypatch.setattr("builtins.input", lambda prompt: "unknown")
-    """
-    Test that build_repo raises a ValueError when an unrecognized choice is provided
-    in interactive mode.
-    Args:
-        monkeypatch: A pytest fixture for safely patching builtins and other objects.
-        tmp_path: A temporary directory provided by pytest for the test.
-    Raises:
-        ValueError: If the provided choice is not recognized.
-    """
-    with pytest.raises(ValueError, match="Unrecognized choice"):
-        build_repo(tmp_path / "unknown.hm", "EHTC_TEST")
 
 
 def test_build_repo_preserves_existing_destination_by_default(
@@ -1473,7 +1270,7 @@ def test_build_repo_replaces_destination_when_overwrite_is_explicit(
     sentinel.write_text("old data\n", encoding="utf-8")
     monkeypatch.setattr(
         "hallmark.repo_builder.list_remote_files",
-        lambda _base_url: {})
+        lambda _base_url, **kwargs: {})
     repo = build_repo(
         repo_path=destination,
         dataset_name="EHTC_TEST",
@@ -1565,7 +1362,7 @@ def test_build_repo_accepts_config_repository_directory(monkeypatch, tmp_path):
     answers = iter(["config", str(source_repo)])
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
     _inventory(monkeypatch, {"item_1.dat": ("md5", "a" * 32)})
-    repo = build_repo(tmp_path / "result.hm", "EHTC_TEST")
+    repo = build_repo(tmp_path / "result.hm", "EHTC_TEST", config_file=source_repo)
     actual = [
         entry for entry in repo.state.config["data"] if "fmt" in entry]
     expected = [{"fmt": "item_{number}.dat", "db": "items.tsv"}]
@@ -1590,41 +1387,12 @@ def test_build_repo_preserves_meta_file_checksum(monkeypatch, tmp_path):
             expected meta.yml with checksum {checksum}"
 
 
-def test_build_repo_continues_when_static_checksum_request_fails(monkeypatch, tmp_path):
-    """
-    Test that build_repo continues to create the repo even if a request to retrieve
-    the checksum for a static file fails, and that it records the checksum as "unknown".
-    Args:
-        monkeypatch: A pytest fixture for safely patching builtins and other objects.
-        tmp_path: A temporary directory provided by pytest for the test.
-    Raises:
-        HTTPError: If the request to retrieve the checksum for a static file fails.
-    """
+def test_build_repo_never_requests_static_checksum(monkeypatch, tmp_path):
     _inventory(monkeypatch, {"README.md": (None, None)})
-    class FailingChecksumSession:
-        """
-        A mock requests.Session that simulates a failure to retrieve the checksum for
-        a static file, by raising an HTTPError when the head() method is called.
-        """
-        def __enter__(self):
-            """enter the context manager"""
-            return self
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            """exit the context manager"""
-            return False
-
-        def head(self, *args, **kwargs):
-            """Simulate a failure to retrieve the checksum for a static file."""
-            raise requests.HTTPError("HEAD unavailable")
-    monkeypatch.setattr("hallmark.repo_builder.requests.Session",
-                        FailingChecksumSession)
+    monkeypatch.setattr("hallmark.transport.requests.Session",
+                        lambda: pytest.fail("Unexpected checksum request"))
     repo = build_repo(tmp_path / "repo.hm", "EHTC_TEST", fmt_entries=[])
-
-    assert repo.state.config["data"] == [
-        {"name": "readme", "file": "README.md", "checksum": "unknown"}], \
-        f"unexpected data config: {repo.state.config['data']}, \
-            expected README.md with checksum 'unknown'"
+    assert repo.state.config["data"] == [{"name": "readme", "file": "README.md"}]
 
 
 def test_build_repo_preserves_multiple_meta_files(monkeypatch, tmp_path):

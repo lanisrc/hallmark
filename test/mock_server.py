@@ -33,7 +33,10 @@ class MockServer:
     def __exit__(self, exc_type, exc_value, traceback):
         return False
 
-    def get(self, url, timeout=None):
+    def close(self):
+        pass
+
+    def get(self, url, timeout=None, stream=False, allow_redirects=True):
         return self.fake_get(url, timeout=timeout)
 
     def head(self, url, timeout=None):
@@ -94,11 +97,15 @@ class MockServer:
         resp.raise_for_status = lambda: None
         if url in self._html_by_url:
             resp.text = self._html_by_url[url]
+            resp.content = resp.text.encode()
         elif url in self._text_by_url:
             resp.text = self._text_by_url[url]
             resp.content = self._content_by_url[url]
         else:
             raise AssertionError(f"MockServer: no registered response for GET {url}")
+        resp.encoding = "utf-8"
+        resp.iter_content = lambda chunk_size: iter([resp.content])
+        resp.__enter__.return_value = resp
         return resp
 
     def fake_head(self, url, timeout=None):
@@ -118,4 +125,5 @@ class MockServer:
             resp.headers = {"Content-Length": str(len(self._content_by_url[url]))}
         else:
             raise AssertionError(f"MockServer: no registered response for HEAD {url}")
+        resp.__enter__.return_value = resp
         return resp

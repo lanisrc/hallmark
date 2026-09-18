@@ -7,6 +7,7 @@ updating repository configuration values stored in ``config.yml``.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from string import Formatter
 from typing import Dict, Optional
@@ -15,10 +16,14 @@ from .helper_functions import (
     as_list_of_dicts, coerce_fmt_value, normalize_nonempty_string,
     validate_path_component, validate_relative_path)
 
+from .transport.base import RemoteSpec, profile_name, reject_controls
+
+
 def _update_remote_config(
     config: dict,
     remote_name: Optional[str],
     remote_url: Optional[str],
+    remote_auth: Optional[str] = None,
     ) -> None:
     """
     Used by set_config.
@@ -81,6 +86,10 @@ def _update_remote_config(
         selected["name"] = remote_name
     if remote_url is not None:
         selected["url"] = remote_url
+    if remote_auth == "":
+        selected.pop("auth", None)
+    elif remote_auth is not None:
+        selected["auth"] = profile_name(remote_auth)
     # normalize the remotes configuration to ensure it is a list of dictionaries
     normalized = normalize_remotes(remotes)
     # if preserve_list is True, store the normalized list;
@@ -156,6 +165,14 @@ def normalize_remotes(remotes) -> list[dict]:
         else:
             raise ValueError(f"remote {index} must be a string or dictionary")
 
+        if set(entry) - {"name", "url", "auth"}:
+            raise ValueError("Remote entries support only name, url and auth fields")
+        if "auth" in entry:
+            profile_name(entry["auth"])
+        if isinstance(entry.get("url"), str):
+            reject_controls(entry["url"], "Remote URL")
+            # Names without URLs are allowed while configuring/building a catalog.
+            RemoteSpec.parse(entry["url"], entry.get("auth"))
         # for each required key ("name" and "url"), validate that it exists
         for key in ("name", "url"):
             # if the key is not present in the entry, skip to the next key
@@ -321,6 +338,7 @@ def set_config(
     remote_name: Optional[str] = None,
     remote_url: Optional[str] = None,
     encoding_updates: Optional[Dict[str, str]] = None,
+    remote_auth: Optional[str] = None,
 ) -> dict:
     """
     Update the repository configuration.
@@ -333,13 +351,14 @@ def set_config(
         fmt (str, optional): Filename format.
         remote_name (str, optional): Remote repository name.
         remote_url (str, optional): Remote repository URL.
+        remote_auth (str, optional): Local SSH profile; empty string removes it.
         encoding_updates (dict, optional): Encoding values to merge into
             the existing configuration.
 
     Returns:
         dict: The updated configuration.
     """
-    config = repo.state.config
+    config = deepcopy(repo.state.config)
     # raise a ValueError if the provided config is not a dictionary
     if not isinstance(config, dict):
         raise ValueError("repository config must be a mapping")
@@ -374,7 +393,11 @@ def set_config(
         remote_name = normalize_nonempty_string(remote_name, label="remote_name")
     # if a new remote URL is provided, validate that it is a non-empty string
     if remote_url is not None:
+        if isinstance(remote_url, str):
+            reject_controls(remote_url, "Remote URL")
         remote_url = normalize_nonempty_string(remote_url, label="remote_url")
+    if remote_auth not in (None, ""):
+        profile_name(remote_auth)
 
     # if a new format string or encoding updates are provided
     if fmt is not None or encoding_updates is not None:
@@ -411,9 +434,10 @@ def set_config(
         config["data"][0] = updated_spec
 
     # if a new remote name or URL is provided, update the remote configuration
-    if remote_name is not None or remote_url is not None:
-        _update_remote_config(config, remote_name, remote_url)
+    if remote_name is not None or remote_url is not None or remote_auth is not None:
+        _update_remote_config(config, remote_name, remote_url, remote_auth)
 
+    repo.state.config = config
     return config
 
 

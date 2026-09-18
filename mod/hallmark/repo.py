@@ -203,72 +203,75 @@ class Repo:
         url: str,
         path: Union[Path, str],
         *,
-        fetch_data: bool = True,
+        auth: Optional[str] = None,
+        filter=None,
+        fmt: Optional[str] = None,
+        source_type: str = "auto",
+        progress: bool = False,
+        download: bool = False,
+        approve=None,
         max_workers: int = 4,
-        show_progress: bool = False,
+        fetch_data: Optional[bool] = None,
+        show_progress: Optional[bool] = None,
     ) -> "Repo":
-        '''
-        Clone a remote hallmark repository. Raises DestinationExistsError
-        if the destination path already exists. Raises DownloadError if
-        data download is enabled and files fail to download.
+        """Clone catalog metadata, discovering ordinary remote directories as needed.
 
-        Args:
-            url(string): remote repository URL.
-            path(path|string): destination path for clone.
-            fetch_data (boolean): if true, downloads associated data files.
-            max_workers (integer): Number of parallel workers for downloading data.
-            show_progress (boolean): wether to display download progress.
-        Returns:
-            Repo: Cloned Repository instance
-        '''
-        clone_path = Path(path)
-        if clone_path.exists():
-            raise DestinationExistsError(
-                f"fatal: destination path '{clone_path}' already exists "
-                "and is not an empty directory."
-            )
+        ``filter`` is a relative path glob; ``fmt`` is a filename template.
+        Dataset files are transferred only with ``download=True`` and an
+        ``approve(plan)`` callback returning True after inspecting the plan.
+        ``source_type`` can explicitly select git, directory, or catalog sources.
+        The legacy ``fetch_data`` and ``show_progress`` names remain aliases.
+        """
+        from .catalog import clone_catalog
+        from .downloader import DownloadError, _require_positive_integer
 
-        dothm_path, worktree_path = cls.lwpaths(path)
-        # try to clone the repository, and if it fails, clean up the destination path
-        try:
-            Dothm.clone(url, dothm_path, display_path=path)
-        except Exception:
-            # remove the partially created directory to avoid leaving a broken state
-            rmtree(clone_path, ignore_errors=True)
-            # re-raise the exception to propagate the error to the caller
-            raise
-
-        # Initialize worktree if non-bare
-        if worktree_path:
-            Worktree.init(worktree_path)
-
-        repo = cls(path)
-        # If fetch_data is True and a worktree exists, download remote data files
-        if fetch_data and worktree_path:
-            from .downloader import (DownloadError, download_remote_data,
-                                     select_download_files)
-            # Select files to download from the remote repository
-            selected_files = select_download_files(repo, all_files=True)
-            result = download_remote_data(
-                repo,
-                worktree_path,
-                max_workers=max_workers,
-                show_progress=show_progress,
-                selected_files=selected_files,)
-
-            repo.download_result = result
-            if result["failed"]:
-                errors = result.get("errors", [])
-                details = "\n".join(f"  - {error}" for error in errors[:5])
-                remaining = result["failed"] - len(errors[:5])
-                if remaining > 0:
-                    details += f"\n  - ... {remaining} more error(s)"
-                raise DownloadError(
-                    f"Failed to download {result['failed']} file(s):\n"
-                    f"{details}"
-                )
-
+        _require_positive_integer(max_workers, label="max_workers")
+        if fetch_data is not None:
+            if download and not fetch_data:
+                raise ValueError("download and fetch_data conflict")
+            download = fetch_data
+        if show_progress is not None:
+            progress = show_progress
+        if download and not callable(approve):
+            raise DownloadError(
+                "Downloading during clone requires an approve(plan) callback")
+        if download and cls.lwpaths(path)[1] is None:
+            raise DownloadError(
+                "Clone a worktree to download; bare catalogs need an output path")
+        repo = clone_catalog(cls, url, path, auth=auth, filter=filter, fmt=fmt,
+                             source_type=source_type, progress=progress)
+        if download:
+            plan = repo.plan_download()
+            if plan.file_count and approve(plan) is True:
+                repo.download_result = repo.download(
+                    plan, approved=True, max_workers=max_workers, progress=progress)
+                if repo.download_result["failed"]:
+                    details = "\n".join(repo.download_result["errors"][:5])
+                    raise DownloadError(
+                        f"Failed to download {repo.download_result['failed']} "
+                        f"file(s):\n{details}")
         return repo
+
+    def plan_download(self, output_path=None, *, file_paths=None, tsv_names=None,
+                      all_files=False, filter=None, fmt=None, remote_name=None,
+                      estimated_bytes_per_second=None):
+        """Inspect a transfer using local catalog metadata without network access."""
+        from .downloader import plan_download
+
+        return plan_download(
+            self, output_path, file_paths=file_paths, tsv_names=tsv_names,
+            all_files=all_files, filter=filter, fmt=fmt, remote_name=remote_name,
+            estimated_bytes_per_second=estimated_bytes_per_second)
+
+    def download(self, plan, *, approved=False, max_workers=4, progress=False):
+        """Execute an inspected DownloadPlan only with explicit approval."""
+        from .downloader import execute_download_plan
+
+        result = execute_download_plan(
+            self, plan, approved=approved, max_workers=max_workers,
+            show_progress=progress)
+        self.download_result = result
+        return result
 
     @staticmethod
     def checksum(path: Path, chunk_size: int = FILE_IO_CHUNK_SIZE) -> str:
@@ -320,6 +323,7 @@ class Repo:
         remote_name: Optional[str] = None,
         remote_url: Optional[str] = None,
         encoding_updates: Optional[Dict[str, str]] = None,
+        remote_auth: Optional[str] = None,
     ) -> dict:
         """
         Update repository configuration values.
@@ -328,6 +332,7 @@ class Repo:
             fmt (str, optional): Data format specification.
             remote_name (str, optional): Name of the remote repository.
             remote_url (str, optional): URL of the remote repository.
+            remote_auth (str, optional): Local profile name; empty string removes it.
             encoding_updates (dict[str, str], optional): Updates to encoding rules.
 
         Returns:
@@ -338,7 +343,8 @@ class Repo:
             fmt=fmt,
             remote_name=remote_name,
             remote_url=remote_url,
-            encoding_updates=encoding_updates)
+            encoding_updates=encoding_updates,
+            **({"remote_auth": remote_auth} if remote_auth is not None else {}))
         self.dothm.dump(self.state)
         return self.state.config
 
