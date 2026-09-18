@@ -451,11 +451,12 @@ def test_download_remote_data_builds_urls_and_destinations_from_fmt(
         tmp_path: A pytest fixture providing a temporary directory.
     """
     captured = {}
-    def fake_download_file(url, destination, sha1, chunk_size=8192):
+    def fake_download_file(context, relative_path, destination, sha1, chunk_size):
+        url = context.remote.file_url(relative_path.as_posix())
         """A fake _download_file function that records its arguments"""
         captured.setdefault("files", []).append((url, destination, sha1))
         return 123
-    monkeypatch.setattr("hallmark.downloader._download_file", fake_download_file)
+    monkeypatch.setattr("hallmark.downloader._fetch_file", fake_download_file)
     repo = SimpleNamespace(
         state=SimpleNamespace(
             config={
@@ -474,7 +475,7 @@ def test_download_remote_data_builds_urls_and_destinations_from_fmt(
                         "pipeline": "hops",
                         "step": "netcal",
                         "type": "StokesI"}])))
-    result = download_remote_data(repo, tmp_path)
+    result = download_remote_data(repo, tmp_path, approved=True)
 
     assert result == {"succeeded": 1, "failed": 0, "total_bytes": 123, "errors": []},\
         f"Expected result {{'succeeded': 1, 'failed': 0, 'total_bytes': 123, \
@@ -494,12 +495,12 @@ def test_download_remote_data_returns_empty_result_without_remote(tmp_path):
         tmp_path: A pytest fixture providing a temporary directory."""
     repo = _repo(tmp_path)
 
-    assert download_remote_data(repo, tmp_path) == {
+    assert download_remote_data(repo, tmp_path, approved=True) == {
         "succeeded": 0,
         "failed": 0,
         "total_bytes": 0,
         "errors": []}, f"Expected empty result for repo without remote, but got \
-            {download_remote_data(repo, tmp_path)}"
+            {download_remote_data(repo, tmp_path, approved=True)}"
 
 
 def test_download_remote_data_requires_remote_url(tmp_path):
@@ -513,7 +514,7 @@ def test_download_remote_data_requires_remote_url(tmp_path):
     repo = _repo(tmp_path, {"remote": {"name": "origin"}})
 
     with pytest.raises(DownloadError, match="Remote URL not configured"):
-        download_remote_data(repo, tmp_path, selected_files=[])
+        download_remote_data(repo, tmp_path, selected_files=[], approved=True)
 
 
 def test_download_remote_data_returns_empty_result_for_empty_selection(tmp_path):
@@ -526,7 +527,7 @@ def test_download_remote_data_returns_empty_result_for_empty_selection(tmp_path)
     repo = _repo(
         tmp_path,
         {"remote": {"name": "origin", "url": "https://example.test/data"}})
-    result = download_remote_data(repo, tmp_path, selected_files=[])
+    result = download_remote_data(repo, tmp_path, selected_files=[], approved=True)
 
     assert result["succeeded"] == result["failed"] == result["total_bytes"] == 0, \
         f"Expected all counts to be 0, but got {result}"
@@ -551,7 +552,8 @@ def test_download_remote_data_aggregates_successes_and_failures(monkeypatch, tmp
                 {"name": "origin", "url": "https://origin.test/data"},
                 {"name": "mirror", "url": "https://mirror.test/base/"}]})
     calls = []
-    def fake_download(url, destination, sha1):
+    def fake_download(context, relative_path, destination, sha1, chunk_size):
+        url = context.remote.file_url(relative_path.as_posix())
         """A fake _download_file function that records its arguments and
         simulates a failure for a specific file"""
         calls.append((url, destination, sha1))
@@ -570,7 +572,7 @@ def test_download_remote_data_aggregates_successes_and_failures(monkeypatch, tmp
         def close(self):
             self.closed = True
     progress = Progress()
-    monkeypatch.setattr("hallmark.downloader._download_file", fake_download)
+    monkeypatch.setattr("hallmark.downloader._fetch_file", fake_download)
     monkeypatch.setattr("hallmark.downloader.tqdm", lambda **kwargs: progress)
     result = download_remote_data(
         repo,
@@ -580,7 +582,7 @@ def test_download_remote_data_aggregates_successes_and_failures(monkeypatch, tmp
         selected_files=[
             (Path("nested/good.bin"), "good-sha"),
             (Path("bad.bin"), None)],
-        remote_name="mirror")
+        remote_name="mirror", approved=True)
 
     assert result == {
         "succeeded": 1,
@@ -619,7 +621,7 @@ def test_download_remote_data_revalidates_selected_paths(tmp_path):
         download_remote_data(
             repo,
             tmp_path,
-            selected_files=[(Path("../escape.bin"), None)])
+            selected_files=[(Path("../escape.bin"), None)], approved=True)
 
 def test_download_remote_data_rejects_symlink_parent_escape(tmp_path):
     """
@@ -652,7 +654,7 @@ def test_download_remote_data_rejects_symlink_parent_escape(tmp_path):
         download_remote_data(
             repo,
             output_root,
-            selected_files=[(Path("linked/file.bin"), None)])
+            selected_files=[(Path("linked/file.bin"), None)], approved=True)
     assert not (outside_root / "file.bin").exists(), \
         "Expected no file to be created outside the download root, but it exists"
 
@@ -689,7 +691,7 @@ def test_download_remote_data_rejects_symlink_destination(tmp_path):
         download_remote_data(
             repo,
             output_root,
-            selected_files=[(Path("file.bin"), None)])
+            selected_files=[(Path("file.bin"), None)], approved=True)
     assert outside_file.read_bytes() == b"do not overwrite", \
         "Expected the outside file to remain unchanged, but it was modified"
 
@@ -709,19 +711,20 @@ def test_download_remote_data_deduplicates_selected_paths(monkeypatch, tmp_path)
                 "name": "origin",
                 "url": "https://example.test/data"}})
     calls = []
-    def fake_download(url, destination, checksum):
+    def fake_download(context, relative_path, destination, checksum, chunk_size):
+        url = context.remote.file_url(relative_path.as_posix())
         """A fake _download_file function that records its arguments and
         simulates a download."""
         calls.append((url, destination, checksum))
         return 4
-    monkeypatch.setattr("hallmark.downloader._download_file", fake_download)
+    monkeypatch.setattr("hallmark.downloader._fetch_file", fake_download)
     result = download_remote_data(
         repo,
         tmp_path,
         selected_files=[
             (Path("file.bin"), None),
             (Path("file.bin"), "abc123"),
-            (Path("file.bin"), "abc123")])
+            (Path("file.bin"), "abc123")], approved=True)
 
     assert result["succeeded"] == 1, \
         f"Expected succeeded to be 1, but got {result['succeeded']}"
@@ -748,7 +751,8 @@ def test_download_remote_data_rejects_conflicting_checksums(tmp_path):
         download_remote_data(
             repo,
             tmp_path,
-            selected_files=[(Path("file.bin"), "first"), (Path("file.bin"), "second")])
+            selected_files=[(Path("file.bin"), "first"), (Path("file.bin"), "second")],
+            approved=True)
 
 
 @pytest.mark.parametrize("max_workers", [0, -1, 1.5, True, None])
@@ -766,7 +770,7 @@ def test_download_remote_data_rejects_invalid_worker_count(max_workers, tmp_path
 
     with pytest.raises(
         DownloadError, match="max_workers must be a positive integer"):
-        download_remote_data(repo, tmp_path, max_workers=max_workers)
+        download_remote_data(repo, tmp_path, max_workers=max_workers, approved=True)
 
 
 def test_download_remote_data_rejects_selected_files_without_remote(tmp_path):
@@ -782,7 +786,8 @@ def test_download_remote_data_rejects_selected_files_without_remote(tmp_path):
     repo = _repo(tmp_path)
 
     with pytest.raises(DownloadError, match="No remote is configured"):
-        download_remote_data(repo, tmp_path, selected_files=[(Path("data.bin"), None)])
+        download_remote_data(repo, tmp_path,
+                             selected_files=[(Path("data.bin"), None)], approved=True)
 
 
 def test_download_remote_data_reuses_session_per_worker(monkeypatch, tmp_path):
@@ -815,7 +820,8 @@ def test_download_remote_data_reuses_session_per_worker(monkeypatch, tmp_path):
         repo,
         tmp_path,
         selected_files=[
-            (Path("first.dat"), None), (Path("second.dat"), None)], max_workers=1)
+            (Path("first.dat"), None), (Path("second.dat"), None)],
+        max_workers=1, approved=True)
 
     assert result["succeeded"] == 2, \
         f"Expected 2 successful downloads, but got {result['succeeded']}"
@@ -844,7 +850,7 @@ def test_download_remote_data_rejects_malformed_selection(tmp_path):
 
     with pytest.raises(DownloadError, match="path, checksum"):
         download_remote_data(
-            repo, tmp_path, selected_files=[("file.dat", None, "extra")])
+            repo, tmp_path, selected_files=[("file.dat", None, "extra")], approved=True)
 
 
 def test_download_remote_data_rejects_malformed_checksum_tuple(tmp_path):
@@ -864,7 +870,8 @@ def test_download_remote_data_rejects_malformed_checksum_tuple(tmp_path):
         download_remote_data(
             repo,
             tmp_path,
-            selected_files=[(Path("file.dat"), ("sha1", "abc123", "extra"))])
+            selected_files=[(Path("file.dat"), ("sha1", "abc123", "extra"))],
+            approved=True)
 
 
 def test_download_remote_data_rejects_output_path_that_is_file(tmp_path):
@@ -882,7 +889,7 @@ def test_download_remote_data_rejects_output_path_that_is_file(tmp_path):
         download_remote_data(
             repo,
             output_path,
-            selected_files=[(Path("file.bin"), None)])
+            selected_files=[(Path("file.bin"), None)], approved=True)
 
 
 def test_download_remote_data_deduplicates_equivalent_checksum_tuples(
@@ -900,11 +907,12 @@ def test_download_remote_data_deduplicates_equivalent_checksum_tuples(
                 "name": "origin",
                 "url": "https://example.test/data"}})
     calls = []
-    def fake_download(url, destination, checksum):
+    def fake_download(context, relative_path, destination, checksum, chunk_size):
+        url = context.remote.file_url(relative_path.as_posix())
         """Record download requests and return a fixed byte count."""
         calls.append((url, destination, checksum))
         return 11
-    monkeypatch.setattr("hallmark.downloader._download_file", fake_download)
+    monkeypatch.setattr("hallmark.downloader._fetch_file", fake_download)
     checksum_upper = ("SHA256", "A" * 64)
     checksum_lower = ("sha256", "a" * 64)
     result = download_remote_data(
@@ -912,7 +920,7 @@ def test_download_remote_data_deduplicates_equivalent_checksum_tuples(
         tmp_path,
         selected_files=[
             (Path("file.bin"), checksum_upper),
-            (Path("file.bin"), checksum_lower)])
+            (Path("file.bin"), checksum_lower)], approved=True)
 
     assert result["succeeded"] == 1, \
         f"Expected succeeded to be 1, but got {result['succeeded']}"

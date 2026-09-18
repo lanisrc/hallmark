@@ -36,7 +36,7 @@ class MockServer:
     def close(self):
         pass
 
-    def get(self, url, timeout=None, stream=False):
+    def get(self, url, timeout=None, stream=False, allow_redirects=True):
         return self.fake_get(url, timeout=timeout)
 
     def head(self, url, timeout=None):

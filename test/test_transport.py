@@ -224,6 +224,76 @@ def test_http_error_redacts_exception_and_cause(monkeypatch, tmp_path):
     assert "secret" not in repr(error.value)
 
 
+@pytest.mark.parametrize("location", [
+    "https://other.test/data/", "https://example.test/outside/",
+    "http://example.test/data/", "/data/%2e%2e/outside/",
+    "https://new:secret@example.test/data/", "https://example.test:444/data/",
+])
+def test_metadata_redirect_never_requests_outside_root(monkeypatch, location):
+    calls = []
+    closed = []
+    with OperationContext(RemoteSpec.parse("https://example.test/data/")) as context:
+        response = requests.Response()
+        response.status_code = 302
+        response.headers["Location"] = location
+        response.close = lambda: closed.append(True)
+
+        def get(url, **kwargs):
+            calls.append(url)
+            assert kwargs["allow_redirects"] is False
+            return response
+
+        monkeypatch.setattr(context.session(), "get", get)
+        with pytest.raises(DownloadError, match="source root"):
+            context.read_text("")
+    assert calls == ["https://example.test/data/"]
+    assert closed == [True]
+
+
+def test_metadata_redirect_within_root_and_default_port_is_supported(monkeypatch):
+    calls = []
+    with OperationContext(RemoteSpec.parse("https://example.test/data/")) as context:
+        first = requests.Response()
+        first.status_code = 301
+        first.headers["Location"] = "https://example.test:443/data/listing/"
+        first.close = lambda: None
+        second = requests.Response()
+        second.status_code = 200
+        second.encoding = "utf-8"
+        second._content = b"<h1>Index of data</h1>"
+        second._content_consumed = True
+
+        def get(url, **kwargs):
+            calls.append(url)
+            assert kwargs["allow_redirects"] is False
+            return first if len(calls) == 1 else second
+
+        monkeypatch.setattr(context.session(), "get", get)
+        assert context.read_text("") == "<h1>Index of data</h1>"
+        assert context.transport.text_urls[""] == (
+            "https://example.test:443/data/listing/")
+    assert calls == ["https://example.test/data/",
+                     "https://example.test:443/data/listing/"]
+
+
+def test_metadata_redirect_loop_is_bounded(monkeypatch):
+    calls = []
+    with OperationContext(RemoteSpec.parse("https://example.test/data/")) as context:
+        response = requests.Response()
+        response.status_code = 307
+        response.headers["Location"] = "/data/"
+        response.close = lambda: None
+
+        def get(url, **kwargs):
+            calls.append(url)
+            return response
+
+        monkeypatch.setattr(context.session(), "get", get)
+        with pytest.raises(DownloadError, match="redirect limit"):
+            context.read_text("")
+    assert len(calls) == 11
+
+
 def test_symlink_swap_after_planning(monkeypatch, tmp_path):
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url="https://example.test/")
@@ -239,18 +309,19 @@ def test_symlink_swap_after_planning(monkeypatch, tmp_path):
     monkeypatch.setattr("hallmark.transport.http.HttpTransport.prepare", swap)
     result = download_remote_data(
         repo, repo.worktree, selected_files=[(Path("sub/data"), None)]
-    )
+    , approved=True)
     assert result["failed"] == 1
     assert list(outside.iterdir()) == []
 
 
-def test_builder_requires_explicit_capabilities(tmp_path):
-    with pytest.raises(CapabilityError, match="index-format"):
-        build_repo(
-            tmp_path / "repo", "lab", [], dataset_url="https://example.test/data"
-        )
-    with pytest.raises(CapabilityError, match="allow-remote-commands"):
-        build_repo(tmp_path / "repo", "lab", [], dataset_url="ssh://campus/data")
+@pytest.mark.parametrize("scheme", ["https", "ssh"])
+def test_builder_discovers_without_backend_flags(monkeypatch, tmp_path, scheme):
+    calls = []
+    monkeypatch.setattr(
+        "hallmark.repo_builder._build_repo", lambda *a, **kw: calls.append((a, kw))
+    )
+    build_repo(tmp_path / "repo", "lab", [], dataset_url=f"{scheme}://unused/data")
+    assert len(calls) == 1
     assert not (tmp_path / "repo").exists()
 
 
@@ -422,7 +493,7 @@ def test_partial_failure_preserves_destination(monkeypatch, fake_process, tmp_pa
     monkeypatch.setattr(SshTransport, "fetch", fetch)
     result = download_remote_data(
         repo, repo.worktree, selected_files=[(Path("data.bin"), None)]
-    )
+    , approved=True)
     assert result["failed"] == 1
     assert destination.read_bytes() == b"original"
     assert not list(Path(repo.worktree).glob("*.part"))
@@ -443,7 +514,7 @@ def test_checksum_failure_is_atomic(monkeypatch, tmp_path):
         selected_files=[
             (Path("data.bin"), ("sha256", hashlib.sha256(b"right").hexdigest()))
         ],
-    )
+     approved=True)
     assert result["failed"] == 1
     assert destination.read_bytes() == b"original"
     assert not list(Path(repo.worktree).glob("*.part"))
@@ -463,7 +534,7 @@ def test_cancel_before_publish(monkeypatch, tmp_path):
     monkeypatch.setattr(SshTransport, "fetch", fetch)
     result = download_remote_data(
         repo, repo.worktree, selected_files=[(Path("item"), None)]
-    )
+    , approved=True)
     assert result["failed"] == 1
     assert destination.read_bytes() == b"original"
     assert not list(Path(repo.worktree).glob("*.part"))
@@ -493,7 +564,7 @@ def test_keyboard_interrupt_stops_owned_workers(monkeypatch, tmp_path, fake_proc
     with pytest.raises(KeyboardInterrupt):
         download_remote_data(
             repo, repo.worktree, max_workers=1, selected_files=[(Path("item"), None)]
-        )
+        , approved=True)
     assert not (repo.worktree / "item").exists()
     assert not list(Path(repo.worktree).glob("*.part"))
     assert all(not transport._processes for transport in transports)
@@ -532,24 +603,6 @@ def test_cli_profile_roundtrip(monkeypatch, tmp_path):
     result = runner.invoke(hallmark, ["set-config", "--remote-auth", ""])
     assert result.exit_code == 0, result.output
     assert "auth" not in Repo(repo.worktree).state.config["remote"]
-
-
-def test_ssh_hash_budgets_skip_without_commands(monkeypatch):
-    with OperationContext(
-        RemoteSpec.parse("ssh://unused/data"),
-        allow_remote_commands=True,
-        remote_hash=True,
-    ) as context:
-        transport = context.transport
-        transport._entries = {"big": (context.hash_file_limit + 1, 0), "small": (1, 0)}
-        transport._hash_bytes = context.hash_total_limit
-
-        def fail(*args, **kwargs):
-            raise AssertionError("Budgeted-out files must not run a command")
-
-        monkeypatch.setattr(transport, "_command", fail)
-        assert transport.checksum_small("big") == ("unknown", "unknown")
-        assert transport.checksum_small("small") == ("unknown", "unknown")
 
 
 def test_http_manifest_auth_failure_is_not_optional(monkeypatch):
@@ -645,7 +698,9 @@ def test_explicit_http_source_is_exact_and_keeps_output_remotes(monkeypatch, tmp
         remotes=[{"name": "mirror", "url": "https://elsewhere.test/data"}],
     )
     assert repo.state.config["remote"][0]["url"] == "https://elsewhere.test/data"
-    assert repo.state.config["data"][0]["md5"] == hashlib.md5(b"notes").hexdigest()
+    entry = repo.state.config["data"][0]
+    assert not any(key in entry for key in ("md5", "sha1", "sha256"))
+    assert entry.get("checksum") in (None, "unknown")
 
 
 def test_build_cli_passes_source_controls(monkeypatch, tmp_path):

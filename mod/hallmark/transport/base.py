@@ -83,6 +83,17 @@ def ssh_user(value: str) -> str:
 
 
 @dataclass(frozen=True)
+class RemoteEntry:
+    """A discovered file; absent attributes remain unknown without reading it."""
+
+    path: str
+    size: int | None = None
+    mtime: float | None = None
+    checksum_algorithm: str | None = None
+    checksum: str | None = None
+
+
+@dataclass(frozen=True)
 class RemoteSpec:
     """A parsed URL root; catalog paths appended to it are always literal."""
 
@@ -187,10 +198,13 @@ class Transport:
         raise NotImplementedError
 
     def list_entries(self):
+        return [entry.path for entry in self.iter_entries()]
+
+    def iter_entries(self, on_directory=None):
         raise CapabilityError("Recursive listing is unsupported by this transport")
 
-    def checksum_small(self, relative_path):
-        return ("unknown", "unknown")
+    def read_text(self, relative_path, limit):
+        raise CapabilityError("Reading metadata is unsupported by this transport")
 
     def close(self):
         pass

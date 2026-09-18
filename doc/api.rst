@@ -88,49 +88,51 @@ and interacting with Hallmark repositories.
    :members:
    :show-inheritance:
 
-Building a repository
----------------------
+Preparing a repository
+----------------------
 
-Build a repository and choose filename formats interactively::
+Create a local repository::
 
-   hallmark build ./repositories EHTC_2018L1_Dec2024
+   hallmark init ./local-project
 
-Load formats and remotes from an existing configuration::
+Clone a remote dataset without downloading dataset files::
 
-   hallmark build ./repositories EHTC_2018L1_Dec2024 \
-       --config-file ./existing/config.yml
+   hallmark clone https://data.desi.lbl.gov/public/ ./desi --filter '**/*.fits'
+   hallmark clone ssh://lab-data/srv/data/ ./lab --fmt 'run{run:d}.h5'
 
-Provide filename formats directly::
-
-   hallmark build ./repositories EHTC_EXAMPLE \
-       --fmt "images/{source}_{date}.fits=data" \
-       --fmt "README.{format}=readme"
-
-Provide a custom remote or remotes::
-
-   hallmark build ./repositories EHTC_EXAMPLE \
-       --remote "origin=https://data.example.org/EHTC_EXAMPLE/" \
-       --remote "backup=https://backup.example.org/EHTC_EXAMPLE/"
-
-The generated repository is named ``DATASET_NAME.hm``. The ``--fmt`` option
-may be repeated, but it cannot be combined with ``--config-file``.
+An existing Hallmark Git repository is cloned with its history. A published
+HTTP/SFTP catalog snapshot starts new local history. Use ``--source-type git``
+for a Git endpoint whose URL cannot be distinguished from a directory URL.
+The older ``build`` command remains a deprecated compatibility interface.
 
 Downloading remote data
 -----------------------
 
-Download specific remote-relative paths::
-
-   hallmark download README.md data/example.fits
-
-Download everything represented by a configured TSV::
-
-   hallmark download --tsv data.tsv
-
-Preview a complete repository download::
+Inspect the offline transfer plan and then confirm a download::
 
    hallmark download --all --dry-run
+   hallmark download --filter 'runs/**'
 
-Large selections require confirmation unless ``--yes`` is supplied.
+Explicit paths and ``--tsv data.tsv`` also select files. Every nonempty transfer
+requires interactive confirmation, including transfers requested through
+``clone --download``. The old ``--yes`` option no longer bypasses approval.
+A filter or filename format never authorizes a transfer.
+
+Python uses the same plan and requires explicit approval::
+
+   from hallmark import Repo
+
+   repo = Repo.clone('ssh://lab-data/srv/data/', 'lab', progress=True)
+   plan = repo.plan_download(filter='runs/**')
+   print(plan.summary())
+   result = repo.download(plan, approved=True, progress=True)
+
+Plans preserve their selected remote, destination and checksums even when
+repository configuration later changes. Size and time estimates remain unknown
+when metadata or a credible throughput estimate is unavailable.
+
+.. automodule:: hallmark.download_plan
+   :members:
 
 Dataset builders and data remotes
 ---------------------------------
@@ -151,12 +153,14 @@ The repository stores the profile name. The SSH settings remain in the
 local authentication file. Passing ``remote_auth=None`` leaves the
 reference unchanged.
 
-``download_remote_data`` returns a dictionary containing ``succeeded``,
+The legacy ``download_remote_data`` function also requires ``approved=True``.
+Both download APIs return a dictionary containing ``succeeded``,
 ``failed``, ``total_bytes``, and ``errors``. Check ``failed`` and ``errors``
 for individual transfer failures. Configuration errors and failed SSH
 connection checks raise ``DownloadError`` before downloads begin.
 HTTP, SSH, and SFTP downloads use the same rules for destination paths
 and checksum verification.
 
-See :ref:`private-lab-data-over-ssh` for a CLI workflow, authentication
-settings, and supported server configurations.
+See :doc:`private_data` for CLI and Python examples, and
+:ref:`private-transport-reference` for authentication settings and
+supported server configurations.

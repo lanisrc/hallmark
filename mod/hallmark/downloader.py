@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from threading import local
+from threading import Lock
 from typing import Mapping, Optional, Sequence, Union
 from urllib.parse import unquote, urlsplit, urlunsplit
 from tqdm import tqdm
@@ -14,6 +15,7 @@ import pandas as pd
 
 from .transport import OperationContext, RemoteSpec
 from .transport.base import DownloadError, literal_path
+from .download_plan import DownloadItem, DownloadPlan
 from .helper_functions import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
     SUPPORTED_CHECKSUM_ALGORITHMS,
@@ -32,9 +34,6 @@ from .repo_config import (
 BULK_DOWNLOAD_WARNING_FILE_COUNT = 100
 # Maximum number of rows to read from a file at once when computing checksums.
 TSV_READ_CHUNK_SIZE = 10_000
-# Thread-local storage for download worker state,
-# allowing each thread to maintain its own state.
-_DOWNLOAD_WORKER_STATE = local()
 # union type for checksum specifications, string or a tuple of (algorithm, checksum).
 ChecksumSpec = Union[str, tuple[str, str]]
 # The size of chunks to read from a file when downloading or computing checksums.
@@ -83,11 +82,6 @@ def _config_section_entries(config: dict, section_name: str) -> list[dict]:
     if entries is None:
         return []
     return [entry for entry in entries if isinstance(entry, dict)]
-
-
-def _initialize_download_worker(context) -> None:
-    """Bind this invocation's context to each worker; no cross-operation state."""
-    _DOWNLOAD_WORKER_STATE.context = context
 
 
 def _require_positive_integer(value, *, label: str) -> int:
@@ -191,7 +185,8 @@ def _row_checksum(row: Union[pd.Series, Mapping[str, object]]
     if legacy_sha1 is not None:
         return legacy_sha1
     # If not found, check the "checksum" and "checksum_algorithm" columns
-    return _checksum_spec(row.get("checksum"), row.get("checksum_algorithm"))
+    return (_checksum_spec(row.get("checksum"), row.get("checksum_algorithm"))
+            or _entry_checksum(row))
 
 
 def _entry_checksum(entry: dict) -> Optional[ChecksumSpec]:
@@ -558,14 +553,9 @@ def _download_file(
     expected_checksum: Optional[ChecksumSpec] = None,
     chunk_size: int = DOWNLOAD_CHUNK_SIZE,
     ) -> int:
-    """Compatibility entry point; pool workers use their invocation's context."""
+    """Standalone compatibility entry point for downloading one known URL."""
     chunk_size = _require_positive_integer(chunk_size, label="chunk_size")
     _validate_checksum_spec(expected_checksum)
-    context = getattr(_DOWNLOAD_WORKER_STATE, "context", None)
-    if context is not None:
-        relative = destination.relative_to(context.output_root)
-        return _fetch_file(
-            context, relative, destination, expected_checksum, chunk_size)
     RemoteSpec.parse(url)
     parsed = urlsplit(url)
     base = urlunsplit(parsed._replace(path=parsed.path.rsplit("/", 1)[0] + "/"))
@@ -593,12 +583,12 @@ def _download_file(
             raise DownloadError(f"Failed to write {destination}: {exc}") from None
 
 
-def select_download_files(
+def _select_download_items(
     repo,
     file_paths: Sequence[str] = (),
     tsv_names: Sequence[str] = (),
     all_files: bool = False,
-    ) -> list[tuple[Path, Optional[ChecksumSpec]]]:
+    ) -> list[DownloadItem]:
     """
     Select files to download from a hallmark repository based on the provided
     file paths, TSV names, and the repository's configuration.
@@ -610,8 +600,7 @@ def select_download_files(
         all_files: If True, include all files from the repository's configuration.
 
     Returns:
-        A list of tuples containing the relative path and optional checksum
-        specification for each selected file.
+        Catalog items with their relative paths, checksums, and available metadata.
     """
     # Get the repository configuration, defaulting to an empty dictionary if not found.
     config = _repository_config(repo)
@@ -620,10 +609,13 @@ def select_download_files(
     data_config = _config_section_entries(config, "data")
     # dictionary to store selected files with relative paths and optional checksums.
     selected: dict[str, tuple[Path, Optional[ChecksumSpec]]] = {}
+    metadata = {}
+    explicit_paths = {_safe_remote_path(path).as_posix() for path in file_paths}
 
     def add_file(
             value: Union[str, Path],
-            expected_checksum: Optional[ChecksumSpec] = None
+            expected_checksum: Optional[ChecksumSpec] = None,
+            row=None,
             ) -> None:
         """Add file to the selected files dictionary, ensuring it is safe and valid."""
         # Resolve the input value to a safe relative path
@@ -631,8 +623,22 @@ def select_download_files(
         # Merge the selected file into the dictionary of selected files, ensuring no
         # conflicting checksums exist.
         _merge_selected_file(selected, relative_path, expected_checksum)
+        if row is not None:
+            size = _catalog_size(row.get("size_bytes"))
+            modified = row.get("mtime")
+            modified = (None if modified is None or pd.isna(modified)
+                        or str(modified).strip() == "" else str(modified))
+            previous_size, previous_modified = metadata.get(
+                relative_path.as_posix(), (None, None))
+            if size is not None and previous_size not in (None, size):
+                raise DownloadError(
+                    f"Conflicting sizes for {relative_path.as_posix()!r}")
+            metadata[relative_path.as_posix()] = (
+                size if size is not None else previous_size,
+                modified if modified is not None else previous_modified)
 
-    def add_frame(frame: pd.DataFrame, fmt_entries: list[dict]) -> None:
+    def add_frame(frame: pd.DataFrame, fmt_entries: list[dict],
+                  *, explicit_only=False) -> None:
         """ Add every file represented by a manifest DataFrame."""
         # if the DataFrame is None or empty, return early without adding any files
         if frame is None or frame.empty:
@@ -644,8 +650,9 @@ def select_download_files(
             # create a dictionary mapping column names to their corresponding values
             row = dict(zip(columns, values))
             # add the resolved remote path and its checksum to the selected files
-            add_file(
-                _resolve_remote_path(row, fmt_entries), _row_checksum(row))
+            relative_path = _safe_remote_path(_resolve_remote_path(row, fmt_entries))
+            if not explicit_only or relative_path.as_posix() in explicit_paths:
+                add_file(relative_path, _row_checksum(row), row)
 
     # Add explicitly requested file paths to the selected files.
     for file_path in file_paths:
@@ -653,8 +660,8 @@ def select_download_files(
     # Organize data configuration entries by their TSV names for easier access.
     entries_by_tsv: dict[str, list[dict]] = {}
     for entry in data_config:
-        # Skip entries that do not have both "fmt" and "db" keys
-        if not entry.get("fmt") or not entry.get("db"):
+        # Path catalogs need no parameterized filename format.
+        if not entry.get("db"):
             continue
         # download_tsv_name will normalize and validate the TSV name
         tsv_name = _download_tsv_name(entry["db"])
@@ -679,7 +686,11 @@ def select_download_files(
                 requested_tsvs.append(tsv_name)
                 seen_tsvs.add(tsv_name)
 
-    for tsv_name in requested_tsvs:
+    lookup_tsvs = list(requested_tsvs)
+    if explicit_paths:
+        lookup_tsvs.extend(name for name in entries_by_tsv
+                           if name not in requested_tsvs)
+    for tsv_name in lookup_tsvs:
         fmt_entries = entries_by_tsv.get(tsv_name)
         # if there are no format entries for the requested TSV
         if fmt_entries is None:
@@ -703,7 +714,8 @@ def select_download_files(
                 keep_default_na=False,
                 chunksize=TSV_READ_CHUNK_SIZE)
             for frame in frames:
-                add_frame(frame, fmt_entries)
+                add_frame(frame, fmt_entries,
+                          explicit_only=tsv_name not in requested_tsvs)
         # skip empty TSV files without raising an error
         except pd.errors.EmptyDataError:
             continue
@@ -711,7 +723,7 @@ def select_download_files(
         except (OSError, UnicodeError, pd.errors.ParserError) as exc:
             raise DownloadError(f"Unable to read TSV {tsv_path}: {exc}") from exc
 
-    if all_files:
+    if all_files or explicit_paths:
         # for each section ("data" and "meta") in the repository configuration
         for section_name in ("data", "meta"):
             # iterate through each entry in the section
@@ -719,8 +731,9 @@ def select_download_files(
                 # get the file path from the entry, if it exists
                 file_path = entry.get("file")
                 # if a file path is specified in the entry, add it to the selected files
-                if file_path:
-                    add_file(file_path, _entry_checksum(entry))
+                if file_path and (all_files or _safe_remote_path(file_path).as_posix()
+                                  in explicit_paths):
+                    add_file(file_path, _entry_checksum(entry), entry)
 
     # Determine whether to use legacy data formats based on the presence of file paths,
     # TSV names, and all_files flag.
@@ -731,8 +744,117 @@ def select_download_files(
         legacy_formats = [entry for entry in data_config if entry.get("fmt")]
         # add files from legacy formats to the selected files
         add_frame(repo.state.data, legacy_formats)
+    elif explicit_paths and not entries_by_tsv:
+        add_frame(repo.state.data, data_config, explicit_only=True)
 
-    return list(selected.values())
+    return [DownloadItem(path, checksum, *metadata.get(path.as_posix(), (None, None)))
+            for path, checksum in selected.values()]
+
+
+def _catalog_size(value) -> Optional[int]:
+    """Read a recorded size without treating missing or malformed sizes as zero."""
+    if value is None or isinstance(value, bool) or pd.isna(value):
+        return None
+    try:
+        size = Decimal(str(value).strip())
+    except InvalidOperation:
+        return None
+    if not size.is_finite() or size < 0 or size != size.to_integral_value():
+        return None
+    return int(size)
+
+
+def select_download_files(
+    repo,
+    file_paths: Sequence[str] = (),
+    tsv_names: Sequence[str] = (),
+    all_files: bool = False,
+) -> list[tuple[Path, Optional[ChecksumSpec]]]:
+    """Select paths and checksums, including catalog checksums for explicit paths."""
+    return [(item.relative_path, item.checksum) for item in _select_download_items(
+        repo, file_paths=file_paths, tsv_names=tsv_names, all_files=all_files)]
+
+
+def plan_download(
+    repo,
+    output_path: Optional[Union[Path, str]] = None,
+    *,
+    file_paths: Optional[Sequence[str]] = None,
+    tsv_names: Optional[Sequence[str]] = None,
+    all_files: bool = False,
+    filter: Optional[Union[str, Sequence[str]]] = None,
+    fmt: Optional[str] = None,
+    remote_name: Optional[str] = None,
+    estimated_bytes_per_second: Optional[float] = None,
+) -> DownloadPlan:
+    """Plan a transfer using local catalog metadata, without contacting a server.
+
+    With no explicit path or TSV selection, include the complete catalog before
+    applying the optional path filter and format. Unknown sizes stay unknown.
+    """
+    if output_path is None:
+        output_path = getattr(repo, "worktree", None)
+    if output_path is None:
+        raise DownloadError("output_path is required for a bare repository")
+    output_root = Path(output_path).expanduser().resolve()
+    if output_root.exists() and not output_root.is_dir():
+        raise DownloadError(f"Download output is not a directory: {output_root}")
+    if isinstance(file_paths, (str, Path)):
+        file_paths = (str(file_paths),)
+    if isinstance(tsv_names, str):
+        tsv_names = (tsv_names,)
+    file_paths, tsv_names = tuple(file_paths or ()), tuple(tsv_names or ())
+    if all_files and (file_paths or tsv_names):
+        raise DownloadError("all_files cannot be combined with paths or TSVs")
+    items = _select_download_items(
+        repo, file_paths=file_paths, tsv_names=tsv_names,
+        all_files=all_files or (not file_paths and not tsv_names))
+    if filter is not None or fmt is not None:
+        from .discovery import path_matches
+        items = [item for item in items if path_matches(
+            item.relative_path.as_posix(), filter=filter, fmt=fmt)]
+    remote = _select_remote_config(repo, remote_name)
+    if items and (remote is None or not remote.get("url")):
+        raise DownloadError("No remote URL is configured in config.yml")
+    remote = remote or {}
+    if remote.get("url"):
+        RemoteSpec.parse(remote["url"], remote.get("auth"))
+    for item in items:
+        try:
+            resolve_contained_path(output_root, item.relative_path,
+                                   label="download destination")
+        except ValueError as exc:
+            raise DownloadError(str(exc)) from exc
+    return DownloadPlan(
+        tuple(items), remote.get("url"), output_root,
+        remote_auth=remote.get("auth"), remote_name=remote.get("name"),
+        estimated_bytes_per_second=estimated_bytes_per_second)
+
+
+def execute_download_plan(
+    repo,
+    plan: DownloadPlan,
+    *,
+    approved: bool = False,
+    max_workers: int = 4,
+    show_progress: bool = False,
+) -> dict:
+    """Execute the approved plan's source and selection, ignoring later config edits."""
+    if not isinstance(plan, DownloadPlan):
+        raise TypeError("plan must be a DownloadPlan")
+    if plan.items and approved is not True:
+        raise DownloadError("Dataset downloads require explicit approval")
+    max_workers = _require_positive_integer(max_workers, label="max_workers")
+    if not plan.items:
+        return {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
+    if plan.output_path.resolve() != plan.output_path:
+        raise DownloadError("Download destination changed since planning")
+    remote = RemoteSpec.parse(plan.remote_url, plan.remote_auth)
+    return _download_selected(
+        remote, plan.output_path,
+        [(item.relative_path, item.checksum) for item in plan.items],
+        max_workers=max_workers, show_progress=show_progress,
+        byte_progress=True, total_bytes=plan.total_bytes)
 
 
 def download_remote_data(
@@ -742,6 +864,8 @@ def download_remote_data(
     show_progress: bool = False,
     selected_files: Optional[Sequence[tuple[Path, Optional[ChecksumSpec]]]] = None,
     remote_name: Optional[str] = None,
+    *,
+    approved: bool = False,
     ) -> dict:
     """
     Download remote data files for a hallmark repository.
@@ -754,6 +878,7 @@ def download_remote_data(
         selected_files: A sequence of tuples containing the relative path and optional
         checksum of files to download.
         remote_name: The name of the remote configuration to use.
+        approved: Explicit approval to transfer the selected dataset files.
 
     Returns:
         A dict with the download results (succeeded, failed, total_bytes, and errors)
@@ -798,6 +923,26 @@ def download_remote_data(
         # return the results without attempting any downloads
         return results
 
+    if approved is not True:
+        raise DownloadError("Dataset downloads require explicit approval")
+    return _download_selected(
+        remote_spec, worktree_path, selected_files,
+        max_workers=max_workers, show_progress=show_progress)
+
+
+def _download_selected(
+    remote_spec,
+    worktree_path,
+    selected_files,
+    *,
+    max_workers,
+    show_progress,
+    byte_progress=False,
+    total_bytes=None,
+):
+    """Run one approved transfer with operation-owned resources and atomic output."""
+    results = {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
+
     # output_root is the resolved absolute path where files will be downloaded
     output_root = Path(worktree_path).expanduser().resolve()
     # if the output root exists and is not a directory, raise a DownloadError
@@ -833,26 +978,30 @@ def download_remote_data(
         except ValueError as exc:
             raise DownloadError(str(exc)) from exc
 
-        # Append the download info (URL, destination, expected checksum) to the list
-        files_to_download.append((
-                _remote_file_url(remote_url, relative_path),
-                destination,
-                expected_checksum))
+        files_to_download.append((relative_path, destination, expected_checksum))
 
     # track the download progress using tqdm, with the number of files to download
     progress = tqdm(
-        total=len(files_to_download),
-        unit="file",
+        total=total_bytes if byte_progress else len(files_to_download),
+        unit="B" if byte_progress else "file",
+        unit_scale=byte_progress,
         disable=not show_progress,)
+    progress_lock = Lock()
+
+    def advance_bytes(count):
+        # Transport callbacks run concurrently, one for each active worker.
+        with progress_lock:
+            progress.update(count)
 
     # try to download the files using a thread pool executor for concurrent downloads
     try:
         with OperationContext(remote_spec, output_root) as context:
+            if byte_progress:
+                context.on_bytes = advance_bytes
             context.transport.prepare()
             executor = ThreadPoolExecutor(
                 max_workers=min(max_workers, context.settings.max_sessions)
-                if remote_spec.scheme in {"ssh", "sftp"} else max_workers,
-                initializer=_initialize_download_worker, initargs=(context,))
+                if remote_spec.scheme in {"ssh", "sftp"} else max_workers)
             try:
                 # create an iterator over the files to download
                 file_iterator = iter(files_to_download)
@@ -870,13 +1019,14 @@ def download_remote_data(
                     """
                     # try to get the next file from the iterator
                     try:
-                        url, destination, checksum = next(file_iterator)
+                        relative_path, destination, checksum = next(file_iterator)
                     # Handle the exception when there are no more files to download
                     except StopIteration:
                         return False
                     # add the download task to the pending set using the executor
                     pending.add(executor.submit(
-                        _download_file, url, destination, checksum))
+                        _fetch_file, context, relative_path, destination, checksum,
+                        DOWNLOAD_CHUNK_SIZE))
                     # if the download was successfully submitted, return True
                     return True
 
@@ -899,7 +1049,14 @@ def download_remote_data(
                             results["errors"].append(str(exc))
                         # Every completed transfer advances the progress bar.
                         finally:
-                            progress.update(1)
+                            if byte_progress:
+                                with progress_lock:
+                                    finished = results["succeeded"] + results["failed"]
+                                    progress.set_postfix(
+                                        files=f"{finished}/{len(files_to_download)}",
+                                        failed=results["failed"])
+                            else:
+                                progress.update(1)
                         # submit the next file for download if available
                         submit_next()
             except BaseException:

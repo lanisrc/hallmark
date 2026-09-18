@@ -122,10 +122,14 @@ This is especially useful for data (re-)organization.
 ..  _hallmark: https://github.com/l6a/hallmark
 
 
+.. _private-transport-reference:
+
 .. _private-lab-data-over-ssh:
 
 6. CLI: Private Lab Data over SSH
 ----------------------------------
+
+For a step-by-step CLI workflow and Python examples, see :doc:`private_data`.
 
 Frank works with simulation data stored on a private lab server.
 He has an existing |hallmark|_ repository that indexes the files and
@@ -259,74 +263,63 @@ The local profile or defaults may use ``host_key_policy: accept-new``
 to accept a host key on first contact. Changed host keys still cause
 an error. Repository configuration cannot enable this setting.
 
-Build a private catalog
+Clone a private catalog
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Frank can also build a catalog directly from the files on the server.
-He supplies the dataset directory and a filename format::
+Frank can prepare a catalog directly from the files on the server::
 
-    hallmark build catalogs lab \
-      --dataset-url ssh://campus/srv/export/ \
-      --dataset-auth campus --allow-remote-commands \
-      --fmt 'runs/run_{i:d}.h5=data.tsv'
+    hallmark clone ssh://campus/srv/export/ lab \
+      --auth campus --fmt 'runs/run_{i:d}.h5'
+    cd lab
+    hallmark download --all --dry-run
+    hallmark download --all
 
-This creates ``catalogs/lab.hm`` with an index of the matching run files
-in ``data.tsv``. The name ``lab`` labels the catalog; it is not appended
-to ``--dataset-url``.
+This creates ``lab/.hm`` with only the matching run files in ``data.tsv``.
+Without a filter or format, the catalog contains all discovered files below
+the supplied URL. No dataset contents are downloaded while cloning.
+The final command displays the transfer plan and asks Frank for confirmation.
 
-Building over SSH requires a POSIX login shell and Python 3 on the server.
-The ``--allow-remote-commands`` option permits fixed, read-only commands
-to list files recursively and, when requested, compute checksums.
-This permission must be supplied explicitly; repository configuration
-cannot enable it.
-SFTP-only accounts can download indexed files but cannot build catalogs.
-Listings skip symlinks, including symlinked directories, and special files.
-The dataset directory defines where listing starts; access permissions
-must be enforced on the server.
+Both SSH and SFTP sources use structured SFTP directory enumeration. The server
+needs no login shell, Python or Hallmark, and SFTP-only accounts work for
+both discovery and downloads. Symlinks and special files are skipped.
+Authentication and permission failures stop discovery rather than producing
+an apparently complete catalog.
 
-|hallmark|_ uses existing checksum manifests when available.
-Supported manifests use unescaped GNU sum records: a hexadecimal
-checksum, a space, a space or ``*`` marker, and the literal filename.
-Algorithm names such as ``sha256`` are retained, and GNU records with
-escaped filenames are rejected.
-Missing checksums remain absent or ``unknown``. Authentication failures
-and SSH errors with an unclear cause stop the build instead of being
-treated as missing manifests.
+The generated data ``origin`` records the source URL and optional profile name.
+Existing Git-hosted catalogs keep their recorded data remotes when cloned.
+A filter on an existing Git catalog creates a local metadata commit while
+preserving fetched history; it does not fetch the dataset's content objects.
 
-Frank can add ``--remote-hash`` to compute SHA-256 checksums on the server
-for files without a manifest checksum.
-This is limited to 10 MiB per file, 100 MiB in total, and 60 seconds for
-the operation. Files beyond these limits retain unknown checksums.
-Detected changes to file size or modification time during hashing cause
-an error. Dataset files are not downloaded to compute SSH checksums.
+Published checksum manifests are retained. Missing checksums remain unknown;
+Hallmark never downloads files or hashes them on the server merely to finish
+a catalog. Downloads verify any available publisher checksum. No global
+five-minute crawl deadline or 100,000-entry cap limits the requested tree;
+individual requests remain bounded and discovery can be cancelled.
 
-Recursive listing is limited to 100,000 files, 16 MiB of output, and a
-60-second command timeout. Text reads are limited to 16 MiB per file
-and 64 MiB in total; new reads stop after five minutes of crawling.
+CyVerse and common HTTPS directory indexes are detected automatically::
 
-By default, the generated ``origin`` data remote records the source URL
-and its profile name.
-The ``--remote NAME=URL`` option records a different download location
-without changing the directory being indexed or copying its profile name.
-A remote specified by name alone uses the source URL.
-In either case, a profile for that remote must be configured separately
-if needed.
+    hallmark clone https://data.desi.lbl.gov/public/ desi --filter '**/*.fits'
 
-Without ``--dataset-url``, the builder looks up the dataset name on
-CyVerse as before.
-An explicit HTTP directory requires ``--index-format cyverse-html`` and
-a matching HTML index. Other HTTP directory indexes and WebDAV PROPFIND
-are not supported. For HTTP files without a recorded checksum, the
-builder retains its existing size and time limits for computing MD5.
-Building and downloading can use multiple catalogs; local ``add``,
-``commit``, and ``checkout`` operations require one format backed by
-``data.tsv``.
+A server with no usable listing must provide a published catalog or file
+manifest through a supported adapter. Discovery cannot enumerate arbitrary
+hidden URLs. HTTP/SFTP catalog snapshots start local history; Git endpoints
+supply catalog history. Use ``--source-type git`` for ambiguous Git URLs.
 
-For reproducible results, Frank uses an immutable export or a server
-snapshot. Listing and hashing a directory while its files change cannot
-guarantee a consistent snapshot.
-Later downloads verify any usable checksums included in their selections;
-missing or unknown checksums do not prevent a transfer.
+Frank can also inspect and approve a transfer in Python::
+
+    from hallmark import Repo
+
+    repo = Repo('lab')
+    plan = repo.plan_download(filter='runs/run_1.h5')
+    print(plan.summary())
+    result = repo.download(plan, approved=True, progress=True)
+
+Plans are built from local metadata without contacting the server. Missing
+sizes and duration estimates are reported as unknown. During transfer,
+progress reports bytes and estimates remaining time when possible.
+``build`` and ``build_repo`` remain deprecated compatibility interfaces.
+Local ``add``, ``commit`` and ``checkout`` retain their existing format and
+local-object requirements; preparing a remote catalog does not materialize it.
 
 Transport validation
 ~~~~~~~~~~~~~~~~~~~~

@@ -4,6 +4,7 @@ import re
 import shutil
 import string
 import time
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from string import Formatter
@@ -15,9 +16,8 @@ import parse
 from .repo import Repo
 from .transport import OperationContext, RemoteSpec
 from .transport.base import (
-    CapabilityError, DownloadError, RemoteObjectMissing, reject_controls)
+    CapabilityError, DownloadError, reject_controls)
 from .fmt_detection import (
-    detect_fmt,
     KNOWN_PROCESSING_STAGES,
     KNOWN_STATIC_FILE_STEMS)
 from .dothm import dump_yaml
@@ -25,13 +25,11 @@ from .error import DothmError
 from .helper_functions import (
     CHECKSUM_ALGORITHMS,
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
-    CHECKSUM_ALGORITHM_PATTERN,
     SUPPORTED_CHECKSUM_ALGORITHMS,
     valid_checksum,
     atomic_output_path,
     load_yaml_file,
     normalize_nonempty_string,
-    prompt_choice,
     validate_path_component,
     validate_relative_path)
 from .repo_config import (
@@ -43,29 +41,10 @@ from .repo_config import (
 # base URL for the CyVerse curated data repository
 _CYVERSE_CURATED_BASE = \
     "https://data.cyverse.org/dav-anon/iplant/commons/cyverse_curated/"
-# regular expression to match rows in an HTML index page for a directory listing
-_INDEX_ROW_RE = re.compile(
-    r'<tr class="object (collection|data-object[^"]*)">'
-    r'<td class="name"><a href="([^"]+)"')
 # regex to match lines in a checksum file, capturing the checksum and filename
 _SUMS_LINE_RE = re.compile(r"^([0-9a-fA-F]{8,}) [ *](.+)$", re.MULTILINE)
-# regex to match checksum file names, capturing the base name and algorithm
-_SUMS_FILENAME_RE = \
-    re.compile(rf"^(?P<name>.+)\."rf"(?P<algorithm>{CHECKSUM_ALGORITHM_PATTERN})sums$")
-# keywords to identify checksum files based on their names
-_CHECKSUM_NAME_KEYWORDS = ("sum", "checksum", "hash", "manifest", *CHECKSUM_ALGORITHMS)
-# maximum number of worker threads for static checksum computation
-_STATIC_CHECKSUM_MAX_WORKERS = 8
-# maximum number of worker threads for remote crawling and checksum computation
-_REMOTE_CRAWL_MAX_WORKERS = 8
-# minimum ratio of matching lines in a checksum file to consider it valid
-_MANIFEST_LINE_MATCH_RATIO = 0.5
-# regular expression to match checksum algorithms in file names, case-insensitive
-_ALGORITHM_IN_NAME_RE = re.compile(rf"({CHECKSUM_ALGORITHM_PATTERN})", re.IGNORECASE)
 # default checksum algorithm to use when the algorithm cannot be determined
 _UNKNOWN_CHECKSUM_ALGORITHM = "unknown"
-# maximum file size (in bytes) for which we will compute a checksum
-_MAX_DOWNLOAD_SIZE_FOR_CHECKSUM = 10 * 1024 * 1024  # 10 MB
 # maximum length of a literal segment in a format string that can be cleared
 _MAX_CLEARABLE_LITERAL_LENGTH = 2
 # known field values for specific format fields, used for parsing and matching
@@ -702,214 +681,17 @@ def _normalize_fmt_entries(fmt_entries: list[dict]) -> list[dict]:
 
 
 def list_remote_files(base_url: str, *, _context=None):
-    """List a CyVerse HTML index (legacy default), or an authorized SSH source."""
+    """Return a checksum inventory from an automatically detected remote listing."""
+    from .discovery import discover
+
+    def inventory(context):
+        return {entry.path: (entry.checksum_algorithm, entry.checksum)
+                for entry in discover(context)}
+
     if _context is None:
         with OperationContext(RemoteSpec.parse(base_url)) as context:
-            return _list_source(context)
-    return _list_source(_context)
-
-
-def _list_source(context):
-    if context.remote.scheme in {"ssh", "sftp"}:
-        return _list_ssh_files(context)
-    return CyverseHtmlIndex(context).list_files()
-
-
-class CyverseHtmlIndex:
-    """Adapter for CyVerse's HTML directory-index dialect, not WebDAV PROPFIND."""
-
-    def __init__(self, context):
-        self.context = context
-
-    def list_files(self):
-        return _list_cyverse_files(self.context)
-
-
-def _list_cyverse_files(context):
-    def fetch_text(path):
-        return context.read_text(path)
-
-    def optional_text(path):
-        try:
-            return fetch_text(path)
-        except RemoteObjectMissing:
-            return None
-
-    # stores all files with their checksums, keyed by relative path, for all algorithms
-    file_checksums: dict[str, tuple[str | None, str | None]] = {}
-
-    directories_to_open = [""]
-    visited_directories: set[str] = set()
-    # raw index text for directories that have been fetched but not yet processed
-    prefetched_indexes: dict[str, str] = {}
-    # Use a requests session and ThreadPoolExecutor to fetch remote indexes concurrently
-    with context.executor(_REMOTE_CRAWL_MAX_WORKERS) as crawl_executor:
-        # while there are directories to open or prefetched indexes to process
-        while directories_to_open or prefetched_indexes:
-            # if there are no prefetched indexes, fetch a batch of directories to open
-            if not prefetched_indexes:
-                batch = []
-                # while there are directories to open and we haven't reached max workers
-                while (directories_to_open and len(batch) < _REMOTE_CRAWL_MAX_WORKERS):
-                    # pop a directory from the stack to process
-                    candidate = directories_to_open.pop()
-                    # skip if this directory has already been visited to avoid cycles
-                    if candidate in visited_directories:
-                        continue
-                    # mark directory as visited and add it to the batch for fetching
-                    visited_directories.add(candidate)
-                    if len(visited_directories) > context.listing_limit:
-                        raise DownloadError("Remote listing exceeds its entry limit")
-                    batch.append(candidate)
-                # if the batch is empty, continue to the next iteration of the loop
-                if not batch:
-                    continue
-
-                # construct the full URLs for the batch of directories to fetch
-                directory_urls = batch
-                # fetch the index texts for the batch of directories concurrently
-                index_texts = crawl_executor.map(fetch_text, directory_urls)
-                # update the prefetched indexes with the fetched index texts
-                prefetched_indexes.update(zip(batch, index_texts))
-
-            # get the next directory to process from the prefetched indexes
-            rel_dir = next(iter(prefetched_indexes))
-            # pop the index text for this directory from the prefetched indexes
-            index_text = prefetched_indexes.pop(rel_dir)
-            # parse the index text to extract entries using regex
-            raw_entries = _INDEX_ROW_RE.findall(index_text)
-            if (len(file_checksums) + len(raw_entries) > context.listing_limit):
-                raise DownloadError("Remote listing exceeds its entry limit")
-            entries = []
-            for entry_type, href in raw_entries:
-                # try to normalize the href to ensure it is a valid relative path
-                try:
-                    normalized_href = _normalize_index_href(
-                        href,
-                        is_directory=(entry_type == "collection"))
-                # if the href is invalid, skip this entry and continue to the next one
-                except ValueError:
-                    # Directory indexes often include a parent navigation link.
-                    if href in {"../", "./", "/"}:
-                        continue
-                    raise
-                # add the normalized entry to the list of entries for this directory
-                entries.append((entry_type, normalized_href))
-
-            # find manifest files that are not directories and match expected patterns
-            manifest_hrefs = [href for entry_type, href in entries
-                             if (entry_type != "collection"
-                             and (_SUMS_FILENAME_RE.match(href)
-                                or any(keyword in href.lower()
-                                   for keyword in _CHECKSUM_NAME_KEYWORDS)))]
-            # call _remote_url to construct the full URLs for the manifest files
-            manifest_urls = [
-                rel_dir + href for href in manifest_hrefs]
-            # crawl the manifest URLs concurrently to fetch their text contents
-            manifest_texts = crawl_executor.map(optional_text,
-                                                manifest_urls)
-            # create a dictionary mapping manifest hrefs to their fetched text contents
-            manifest_text_by_href = {
-                href: text for href, text in zip(manifest_hrefs, manifest_texts)
-                if text is not None}
-            # track only files explicitly covered by parsed manifest lines
-            files_covered_by_manifest: set[str] = set()
-
-            def record_manifest_matches(
-                matches: list[tuple[str, str]], algorithm: str) -> None:
-                """
-                Record matches from a manifest file into the file_checksums dictionary.
-                Args:
-                    matches: List of (checksum, filename) extracted from the manifest.
-                    algorithm: The checksum algorithm used in the manifest.
-                """
-                for checksum, filename in matches:
-                    try:
-                        full_path = _resolve_manifest_path(filename, rel_dir)
-                    except ValueError:
-                        raise
-
-                    _record_checksum(file_checksums, full_path, algorithm, checksum)
-                    files_covered_by_manifest.add(full_path)
-
-            # Iterate over each entry in the current directory
-            for entry_type, href in entries:
-                # if the entry is a collection (directory), skip it for now
-                if entry_type == "collection":
-                    continue
-                # get the manifest text for this href from the prefetched manifest texts
-                text = manifest_text_by_href.get(href)
-                # skip if manifest text is None, meaning the file could not be fetched
-                if text is None:
-                    continue
-                # Match against expected pattern to extract covered directory and algo
-                sibling_match = _SUMS_FILENAME_RE.match(href)
-                if sibling_match:
-                    algorithm = sibling_match.group("algorithm")
-                    # match if the checksum is valid for the given algorithm
-                    matches = _manifest_matches(text, algorithm)
-                    # add each path and its checksum to the file_checksums dictionary
-                    record_manifest_matches(matches, algorithm)
-                    # go to the next entry since this one has been processed
-                    continue
-
-                # lines in manifest text that are not empty after stripping whitespace
-                lines = [line for line in text.splitlines() if line.strip()]
-
-                # search for the checksum algorithm in the filename using regex
-                name_match = _ALGORITHM_IN_NAME_RE.search(href)
-                # if a match is found, use the matched algorithm; otherwise, use unknown
-                algorithm = (name_match.group(1).lower() if name_match
-                             else _UNKNOWN_CHECKSUM_ALGORITHM)
-                # only matches that are valid for the given algorithm are considered
-                matches = _manifest_matches(text, algorithm)
-                # if the file is empty or the number of valid matches is too low, skip
-                if (not lines or len(matches) < _MANIFEST_LINE_MATCH_RATIO * len(lines)
-                ):
-                    continue
-                # record the matches from the manifest into file_checksums dictionary
-                record_manifest_matches(matches, algorithm)
-
-            # After processing all entries, add any uncovered directories to the stack
-            for entry_type, href in entries:
-                rel_path = rel_dir + href
-                if entry_type == "collection":
-                    directories_to_open.append(rel_path)
-                else:
-                    # add files not explicitly covered by any manifest line with None
-                    if rel_path not in files_covered_by_manifest:
-                        file_checksums.setdefault(rel_path, (None, None))
-    # return the complete mapping of relative paths to their checksums organized by algo
-    return file_checksums
-
-
-def _list_ssh_files(context):
-    paths = context.transport.list_entries()
-    result = {path: (None, None) for path in paths}
-    for path in paths:
-        name = Path(path).name
-        sibling = _SUMS_FILENAME_RE.match(name)
-        if not sibling and not any(k in name.lower() for k in _CHECKSUM_NAME_KEYWORDS):
-            continue
-        text = context.read_text(path)
-        name_match = _ALGORITHM_IN_NAME_RE.search(name)
-        algorithm = (sibling.group("algorithm") if sibling else
-                     name_match.group(1).lower() if name_match else "unknown")
-        matches = _manifest_matches(text, algorithm)
-        lines = [line for line in text.splitlines() if line.strip()]
-        if not sibling and (not lines or len(matches) < len(lines) * 0.5):
-            continue
-        directory = str(Path(path).parent)
-        directory = "" if directory == "." else directory + "/"
-        for checksum, filename in matches:
-            target = _resolve_manifest_path(filename, directory)
-            if target in result:
-                _record_checksum(result, target, algorithm, checksum)
-    if context.remote_hash:
-        for path, (_, digest) in result.items():
-            if digest is None:
-                result[path] = context.transport.checksum_small(path)
-    return result
+            return inventory(context)
+    return inventory(_context)
 
 
 def build_repo(
@@ -926,34 +708,30 @@ def build_repo(
     allow_remote_commands: bool = False,
     remote_hash: bool = False,
 ) -> "Repo":
-    """Build catalogs from an explicit dataset root or the legacy CyVerse root.
+    """Compatibility wrapper for legacy catalog construction.
 
-    ``dataset_auth`` selects a host-bound local SSH profile independently of
-    output ``remotes``. Non-default HTTP roots require ``index_format`` set to
-    ``cyverse-html``. SSH crawling requires ``allow_remote_commands=True``, a
-    POSIX shell and server Python 3. Server SHA-256 hashing is opt-in through
-    ``remote_hash`` and bounded to 10 MiB/file, 100 MiB and 60 seconds in total.
+    Prefer ``Repo.clone(url, path)`` for remote catalogs and ``Repo.init(path)``
+    for local repositories. Discovery reads listings and published manifests only.
+    Missing formats default to a generic path catalog without prompting.
     """
+    warnings.warn(
+        "build_repo is deprecated; use Repo.clone(url, path) or Repo.init(path)",
+        DeprecationWarning, stacklevel=2)
+    if remote_hash:
+        raise CapabilityError(
+            "remote_hash is no longer supported: catalog discovery does not read "
+            "dataset payloads to compute checksums")
+    if index_format not in {None, "auto", "cyverse-html"}:
+        raise CapabilityError("Directory indexes are detected automatically")
+    if index_format is not None or allow_remote_commands:
+        warnings.warn(
+            "index_format and allow_remote_commands are obsolete and ignored",
+            DeprecationWarning, stacklevel=2)
     dataset_name = validate_path_component(dataset_name, label="dataset name")
     base_url = (dataset_url if dataset_url is not None else
                 _remote_url(_CYVERSE_CURATED_BASE, f"{dataset_name}/"))
     source = RemoteSpec.parse(base_url, dataset_auth)
-    if source.scheme in {"http", "https"}:
-        if index_format not in {None, "cyverse-html"}:
-            raise CapabilityError("Supported HTTP index format: cyverse-html")
-        if dataset_url is not None and index_format is None:
-            raise CapabilityError(
-                "Explicit HTTP roots require --index-format cyverse-html")
-        if remote_hash:
-            raise CapabilityError("--remote-hash is supported only for SSH sources")
-    elif not allow_remote_commands:
-        raise CapabilityError(
-            "SSH builds require --allow-remote-commands; "
-            "SFTP-only accounts can download")
-    elif index_format is not None:
-        raise CapabilityError("--index-format applies only to HTTP sources")
-    with OperationContext(source, allow_remote_commands=allow_remote_commands,
-                          remote_hash=remote_hash) as context:
+    with OperationContext(source) as context:
         return _build_repo(repo_path, dataset_name, fmt_entries, config_file,
                            remotes, overwrite, context)
 
@@ -974,7 +752,7 @@ def _build_repo(
     Args:
         repo_path: Path where the hallmark repo will be created.
         fmt_entries: dict entries with "fmt", "db", and optional "name" keys.
-         If None, the function will attempt to detect the format entries automatically.
+         If None, preserve existing formats or create a generic path catalog.
         config_file: Path to an existing config.yml file to load fmt entries from.
         remotes: Optional list of remote repos to add to the repo. Each remote can be a
          dict with "name" and "url" keys, or a str representing the name of the remote.
@@ -984,8 +762,7 @@ def _build_repo(
     """
     # validate the dataset name to ensure it is a valid path component
     dataset_name = validate_path_component(dataset_name, label="dataset name")
-    # CyVerse's curated Data Commons datasets live at a predictable URL,
-    # built directly from dataset_name.
+    # The wrapper has already resolved the exact URL, including the legacy default.
     base_url = source.remote.url
 
     # Determine if remotes were provided by the user
@@ -1041,8 +818,7 @@ def _build_repo(
         """
         Used by build_repo.
         Ensure that the remote files have been listed and checksums collected.
-        This function is called lazily to avoid unnecessary network requests if the
-        user provides their own fmt entries or chooses to reuse an existing config.
+        Defer network requests until destination and configuration validation pass.
         """
         # create nonlocal references to the outer variables so they can be modified
         nonlocal file_checksums, remote_files
@@ -1059,101 +835,16 @@ def _build_repo(
         # sort the remote files by their relative paths for consistent ordering
         remote_files = sorted(file_checksums)
 
-    # if the repo path already exists and has a config.yml, we will reuse it
-    reused_from_existing_repo = False
-    # records the interactive include_drives choice when fmts are auto-detected, so it
-    # can be persisted to meta.yml and isn't lost once the build finishes
-    detect_include_drives: bool | None = None
-
-    if fmt_entries is None and existing_fmt_entries:
-        print(f"Found existing config.yml with {len(existing_fmt_entries)} fmt(s):")
-        for entry in existing_fmt_entries:
-            print(f"  {entry['fmt']!r} -> {entry['db']}")
-        # prompt the user to either use the existing fmt entries or update them
-        keep_choice = prompt_choice("Use these fmts as-is, or update the list? "
-        "[use/update]: ", {"use", "update"})
-        # if user chooses to use existing fmts, set them as the current fmt_entries
-        if keep_choice == "use":
-            fmt_entries = existing_fmt_entries
-            reused_from_existing_repo = True
-
-    # if repo path exists and we are not reusing it, check if overwrite is allowed
-    if repo_path.exists() and not reused_from_existing_repo and not overwrite:
-        # raise an error to prevent accidental overwriting of an existing repo
+    # Keep existing catalog formats when refreshing through the legacy wrapper.
+    reused_from_existing_repo = fmt_entries is None and bool(existing_fmt_entries)
+    if reused_from_existing_repo:
+        fmt_entries = existing_fmt_entries
+    elif repo_path.exists() and not overwrite:
         raise FileExistsError(
             f'Destination "{repo_path}" already exists. '
             "Use overwrite=True to replace it.")
-
     if fmt_entries is None:
-        # prompt the user to choose how to supply fmt entries
-        choice = prompt_choice(
-            "Load fmts from an existing config file, detect them "
-            "automatically, or input them yourself? "
-            "[config/detect/input]: ", {"config", "detect", "input"})
-        if choice == "config":
-            # prompt the user for the path to an existing config.yml or repo directory
-            config_path = Path(
-                input(
-                    "Path to the existing config.yml or repository "
-                    "directory to load fmts from: ").strip()).expanduser()
-            # if the provided path is a directory, assume it contains a config.yml
-            if config_path.is_dir():
-                config_path = config_path / "config.yml"
-            # if the config file does not exist, raise an error
-            if not config_path.is_file():
-                raise FileNotFoundError(f"Config file does not exist: {config_path}")
-
-            # load the config.yml file and extract the fmt entries
-            loaded_config = load_yaml_file(config_path)
-            fmt_entries = fmt_entries_from_config(loaded_config)
-            if not fmt_entries:
-                raise ValueError(
-                    f"No fmt entries found in config file {config_path}.")
-            # if remotes were not provided and the loaded config has a "remote" key
-            if not remotes_provided and loaded_config.get("remote"):
-                # normalize the remotes from the loaded config and use them
-                remotes = normalize_remotes(loaded_config["remote"])
-
-        elif choice == "detect":
-            # ask the user if they want to include drive files during fmt detection
-            include_drives = prompt_choice("Include drive/archive files during fmt " \
-            "detection? [yes/no]: ", {"yes", "no"}, ) == "yes"
-            # remember the choice so it can be recorded in meta.yml below
-            detect_include_drives = include_drives
-
-            # check if the remote files have already been listed; if not, list them now
-            _ensure_remote_files_listed()
-            detected_fmts = detect_fmt(remote_files, include_drives=include_drives)
-            if not detected_fmts:
-                raise ValueError(
-                    "No fmts could be automatically detected from this dataset.")
-            fmt_entries = []
-            # create a fmt entry for each detected format
-            if len(detected_fmts) == 1:
-                # if there is only one detected format, assume it is "data.tsv"
-                print(f"Detected fmt: {detected_fmts[0]!r}\n"
-                      f"  Only one fmt detected; using db name 'data.tsv'.")
-                fmt_entries.append({"fmt": detected_fmts[0], "db": "data.tsv"})
-            else:
-                for fmt in detected_fmts:
-                    # prompt the user to enter a database name for each detected format
-                    db_name = normalize_tsv_name(input(
-                        f"Detected fmt: {fmt!r}\n"
-                        f"  Enter a db name for this fmt (e.g. 'data.tsv'): "))
-                    fmt_entries.append({"fmt": fmt, "db": db_name})
-        elif choice == "input":
-            fmt_entries = []
-            print("Enter fmt entries one at a time. Leave the fmt blank to finish.")
-            # allow the user to input multiple fmt entries manually
-            while True:
-                fmt = input("fmt (blank to finish): ").strip()
-                # if the user inputs a blank fmt, exit the loop
-                if not fmt:
-                    break
-                # prompt the user to enter a database name for the provided format
-                db_name = normalize_tsv_name(input("  db name for this fmt: "))
-                # append the user-provided fmt and db name to the fmt_entries list
-                fmt_entries.append({"fmt": fmt, "db": db_name})
+        fmt_entries = [{"fmt": "{path}", "db": "data.tsv"}]
 
     # normalize the fmt entries to ensure they are valid and consistent
     fmt_entries = _normalize_fmt_entries(fmt_entries)
@@ -1243,20 +934,6 @@ def _build_repo(
     static_file_entries = []
     meta_file_entries: list[dict] = []
 
-    # identify which unmatched paths need checksums computed (those without a checksum)
-    paths_needing_checksums = [
-        rel_path
-        for rel_path in unmatched_paths
-        if file_checksums.get(rel_path, (None, None))[1] is None]
-    computed_checksums = {}
-    if paths_needing_checksums:
-        paths = paths_needing_checksums
-        with source.executor(min(_STATIC_CHECKSUM_MAX_WORKERS, len(paths))) as executor:
-            # The source owns all static checksum I/O, including SSH capability checks.
-            results = executor.map(source.transport.checksum_small, paths)
-            # zip the paths needing checksums with their computed results into a dict
-            computed_checksums = dict(zip(paths_needing_checksums, results))
-
     for rel_path in unmatched_paths:
         path = Path(rel_path)
         stem_name = path.stem.split(".")[-1]
@@ -1265,9 +942,6 @@ def _build_repo(
         is_meta_file = stem_name.lower() == "meta"
         # for each unmatched path, look up its checksum
         algo, checksum = file_checksums.get(rel_path, (None, None))
-        # if not available, use the computed checksum from the parallel computation
-        if checksum is None:
-            algo, checksum = computed_checksums[rel_path]
 
         # create an entry for the static file with its relative path
         entry = {"file": rel_path}
@@ -1292,9 +966,6 @@ def _build_repo(
 
     # hallmark's bookkeeping: create and commit the meta.yml file
     meta_dict: dict = {"dataset": dataset_name}
-    # record the include_drives choice so a detect-built repo's fmts stay consistent
-    if detect_include_drives is not None:
-        meta_dict["detect_include_drives"] = detect_include_drives
     repo.dothm.dump_yml(meta_dict, "meta")
     repo.dothm.index.add(["meta.yml"])
     repo.dothm.index.commit(f"Initialize dataset: {dataset_name}")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import selectors
-import shlex
+import stat
 import shutil
 import signal
 import subprocess
@@ -18,6 +18,7 @@ from .base import (
     CapabilityError,
     DownloadError,
     RemoteConfigurationError,
+    RemoteEntry,
     Transport,
     literal_path,
     reject_controls,
@@ -36,57 +37,6 @@ def batch_argument(path):
     return "".join("\\" + char if char in special else char for char in text)
 
 
-# Fixed read-only programs. The server needs a POSIX login shell and python3.
-# Paths are operands, never interpolated into program text. Symlinks are omitted.
-_LIST_SCRIPT = """import os, stat, sys, time
-root, max_entries, max_bytes, seconds = sys.argv[1:]
-limit, budget = int(max_entries), int(max_bytes)
-deadline = time.monotonic() + int(seconds)
-count = size = 0
-if not os.path.isdir(root):
-    raise RuntimeError("Not a directory")
-def fail(error):
-    raise error
-for directory, dirs, files in os.walk(root, followlinks=False, onerror=fail):
-    dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(directory, d))]
-    for name in files:
-        path = os.path.join(directory, name)
-        info = os.lstat(path)
-        if not stat.S_ISREG(info.st_mode):
-            continue
-        relative = os.path.relpath(path, root)
-        record = (os.fsencode(relative) + b"\\0" + str(info.st_size).encode()
-                  + b"\\0" + str(info.st_mtime_ns).encode() + b"\\0")
-        count += 1
-        size += len(record)
-        if count > limit or size > budget or time.monotonic() > deadline:
-            raise RuntimeError("Listing limit exceeded")
-        sys.stdout.buffer.write(record)
-"""
-
-_HASH_SCRIPT = """import hashlib, os, stat, sys
-path, size, mtime = sys.argv[1:]
-with open(path, "rb") as handle:
-    before = os.fstat(handle.fileno())
-    if (not stat.S_ISREG(before.st_mode) or before.st_size != int(size)
-            or before.st_mtime_ns != int(mtime)):
-        raise RuntimeError("File changed")
-    digest = hashlib.sha256()
-    remaining = int(size)
-    while remaining:
-        chunk = handle.read(min(65536, remaining))
-        if not chunk:
-            raise RuntimeError("File shortened")
-        remaining -= len(chunk)
-        digest.update(chunk)
-    after = os.fstat(handle.fileno())
-    if (handle.read(1) or after.st_size != before.st_size
-            or after.st_mtime_ns != before.st_mtime_ns):
-        raise RuntimeError("File changed")
-print(digest.hexdigest())
-"""
-
-
 class SshTransport(Transport):
     def __init__(self, context, *, ssh=None, sftp=None):
         super().__init__(context)
@@ -101,10 +51,6 @@ class SshTransport(Transport):
         self._socket_dir = None
         self._socket = None
         self._slots = BoundedSemaphore(context.settings.max_sessions)
-        self._entries = {}
-        self._hash_lock = Lock()
-        self._hash_bytes = 0
-        self._hash_started = None
 
     def _options(self, *, master=False):
         settings = self.context.settings
@@ -187,10 +133,22 @@ class SshTransport(Transport):
         destination=None,
         file_limit=None,
         capture_stderr=False,
+        report_progress=False,
     ):
         output = bytearray()
         stderr_size = 0
         diagnostics = bytearray()
+        reported_bytes = 0
+
+        def report_bytes():
+            nonlocal reported_bytes
+            if report_progress and destination is not None and destination.exists():
+                current = destination.stat().st_size
+                if current > reported_bytes:
+                    if self.context.on_bytes is not None:
+                        self.context.on_bytes(current - reported_bytes)
+                    reported_bytes = current
+
         with tempfile.TemporaryFile() as batch:
             batch.write(data)
             batch.seek(0)
@@ -205,6 +163,7 @@ class SshTransport(Transport):
                         selector.register(pipe, selectors.EVENT_READ)
                     while selector.get_map() or process.poll() is None:
                         self.context.check_cancelled()
+                        report_bytes()
                         if time.monotonic() >= deadline:
                             raise DownloadError("SSH operation exceeded its time limit")
                         if (
@@ -228,6 +187,7 @@ class SshTransport(Transport):
                                     "SSH output exceeded its size limit"
                                 )
                 self.context.check_cancelled()
+                report_bytes()
                 if process.wait() != 0:
                     # stderr is untrusted and may contain echoed credentials/paths.
                     # SFTP exits do not reliably distinguish absence from auth errors.
@@ -309,12 +269,16 @@ class SshTransport(Transport):
                 data=batch,
                 destination=destination,
                 file_limit=file_limit,
+                report_progress=file_limit is None,
             )
 
     def fetch(self, relative_path, destination, *, chunk_size=8192):
         self._fetch(relative_path, destination)
 
     def read_text(self, relative_path, limit):
+        entry = self.stat(relative_path)
+        if entry.size is not None and entry.size > limit:
+            raise DownloadError("Remote text exceeds its size limit")
         with tempfile.TemporaryDirectory(prefix="hm-text-") as directory:
             destination = Path(directory) / "content"
             self._fetch(relative_path, destination, file_limit=limit)
@@ -325,85 +289,71 @@ class SshTransport(Transport):
             except UnicodeError:
                 raise DownloadError("Remote manifest must contain UTF-8 text") from None
 
-    def _command(self, script, operands, *, timeout, limit):
-        if not self.context.allow_remote_commands:
-            raise CapabilityError(
-                "SSH builds require --allow-remote-commands, a POSIX shell and "
-                "server python3; SFTP-only accounts support downloads only"
-            )
-        self.prepare()
-        command = " ".join(
-            shlex.quote(value)
-            for value in ["python3", "-c", script, *map(str, operands)]
-        )
-        with self._slots:
-            return self._run(
-                self.ssh + self._options() + ["--", self.context.remote.host, command],
-                timeout=timeout,
-                limit=limit,
-            )
+    def _metadata(self):
+        from .sftp import SftpMetadata
 
-    def list_entries(self):
-        context = self.context
-        data = self._command(
-            _LIST_SCRIPT,
-            [
-                context.remote.root,
-                context.listing_limit,
-                context.text_limit,
-                context.listing_timeout,
-            ],
-            timeout=context.listing_timeout,
-            limit=context.text_limit,
-        )
-        try:
-            fields = data.decode("utf-8").split("\0")
-            if fields.pop() != "" or len(fields) % 3:
-                raise ValueError
-            for i in range(0, len(fields), 3):
-                path = literal_path(fields[i]).as_posix()
-                size, mtime = int(fields[i + 1]), int(fields[i + 2])
-                if size < 0 or path in self._entries:
-                    raise ValueError
-                self._entries[path] = (size, mtime)
-            if len(self._entries) > context.listing_limit:
-                raise ValueError
-        except (UnicodeError, ValueError):
-            raise DownloadError("Invalid or oversized SSH listing") from None
-        return list(self._entries)
+        return SftpMetadata(self)
 
-    def checksum_small(self, relative_path):
-        if not self.context.remote_hash:
-            return "unknown", "unknown"
-        size, mtime = self._entries.get(relative_path, (-1, 0))
-        with self._hash_lock:
-            if (
-                size < 0
-                or size > self.context.hash_file_limit
-                or self._hash_bytes + size > self.context.hash_total_limit
-            ):
-                return "unknown", "unknown"
-            if self._hash_started is None:
-                self._hash_started = time.monotonic()
-            remaining = self.context.hash_timeout - (
-                time.monotonic() - self._hash_started
-            )
-            if remaining <= 0:
-                return "unknown", "unknown"
-            self._hash_bytes += size
-        result = (
-            self._command(
-                _HASH_SCRIPT,
-                [self.context.remote.pathname(relative_path), size, mtime],
-                timeout=remaining,
-                limit=128,
-            )
-            .decode("ascii", errors="replace")
-            .strip()
-        )
-        if not re.fullmatch(r"[0-9a-f]{64}", result):
-            raise DownloadError("Invalid remote SHA-256 result")
-        return "sha256", result
+    def stat(self, relative_path):
+        """Read attributes without fetching file contents or following symlinks."""
+        path = literal_path(relative_path).as_posix()
+        with self._metadata() as session:
+            attrs = session.lstat(self.context.remote.pathname(path))
+        mode = attrs["mode"]
+        if mode is None or not stat.S_ISREG(mode):
+            raise DownloadError("Remote metadata must be a regular file")
+        return RemoteEntry(path, attrs["size"], attrs["mtime"])
+
+    def iter_entries(self, on_directory=None):
+        """Yield regular files recursively using only the SFTP subsystem."""
+        with self._metadata() as session:
+            root = session.realpath(self.context.remote.root).rstrip("/") or "/"
+            reject_controls(root, "SFTP root")
+            if not root.startswith("/") or ".." in root.split("/"):
+                raise DownloadError("Invalid SFTP canonical root")
+            pending = [("", root)]
+            visited = set()
+            while pending:
+                self.context.check_cancelled()
+                relative, directory = pending.pop()
+                canonical = session.realpath(directory).rstrip("/") or "/"
+                if (root != "/" and canonical != root
+                        and not canonical.startswith(root + "/")):
+                    raise DownloadError("SFTP directory escapes the source root")
+                if canonical in visited:
+                    continue
+                visited.add(canonical)
+                attrs = session.lstat(directory)
+                if attrs["mode"] is None:
+                    raise CapabilityError("SFTP server omitted directory type")
+                if not stat.S_ISDIR(attrs["mode"]):
+                    raise DownloadError("SFTP discovery root must be a directory")
+                if on_directory is not None:
+                    on_directory(relative)
+                names = set()
+                for name, attrs in session.iterdir(directory):
+                    self.context.check_cancelled()
+                    if name in {".", ".."}:
+                        continue
+                    if name.lower() in {".hm", ".git"}:
+                        continue
+                    if not name or "/" in name or name in names:
+                        raise DownloadError("Invalid or duplicate SFTP directory name")
+                    names.add(name)
+                    path = literal_path(relative + name).as_posix()
+                    absolute = directory.rstrip("/") + "/" + name
+                    mode = attrs["mode"]
+                    if mode is None:
+                        attrs = session.lstat(absolute)
+                        mode = attrs["mode"]
+                    if mode is None:
+                        raise CapabilityError("SFTP server omitted file type")
+                    if stat.S_ISDIR(mode):
+                        pending.append((path + "/", absolute))
+                    elif stat.S_ISREG(mode):
+                        entry = RemoteEntry(path, attrs["size"], attrs["mtime"])
+                        yield entry
+                    # Symlinks and special files are deliberately not traversed.
 
     def cancel(self):
         with self._process_lock:

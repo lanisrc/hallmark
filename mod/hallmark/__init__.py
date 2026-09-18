@@ -17,5 +17,6 @@
 
 from .repo import Repo
 from .paraframe import ParaFrame
+from .download_plan import DownloadItem, DownloadPlan
 
-__all__ = ["Repo", "ParaFrame"]
+__all__ = ["Repo", "ParaFrame", "DownloadItem", "DownloadPlan"]

@@ -1277,7 +1277,7 @@ def test_checkout_restores_only_changed_target_files(monkeypatch, tmp_path):
 
 ### Repo.clone() tests ###
 
-def test_repo_clone_downloads_remote_data_by_default(monkeypatch, tmp_path):
+def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
     source = Repo.init(tmp_path / "source")
     _write_files(source.worktree, ["a0_i0.h5"])
     source.add("a{a}_i{i}.h5")
@@ -1287,16 +1287,17 @@ def test_repo_clone_downloads_remote_data_by_default(monkeypatch, tmp_path):
 
     captured = {}
 
-    def fake_download_file(url, destination, sha1, chunk_size=8192):
-        captured["url"] = url
+    def fake_download_file(context, relative_path, destination, sha1, chunk_size):
+        captured["url"] = context.remote.file_url(str(relative_path))
         captured["sha1"] = sha1
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text("downloaded\n", encoding="utf-8")
         return destination.stat().st_size
 
-    monkeypatch.setattr("hallmark.downloader._download_file", fake_download_file)
+    monkeypatch.setattr("hallmark.downloader._fetch_file", fake_download_file)
 
-    clone = Repo.clone(str(source.dothm.path), tmp_path / "clone")
+    clone = Repo.clone(str(source.dothm.path), tmp_path / "clone",
+                       download=True, approve=lambda plan: plan.file_count == 1)
 
     assert captured == {
         "url": "https://example.com/data/a0_i0.h5",
@@ -1318,9 +1319,9 @@ def test_repo_clone_can_skip_remote_data_download(monkeypatch, tmp_path):
     def fail_download(*args, **kwargs):
         raise AssertionError("download should not be attempted")
 
-    monkeypatch.setattr("hallmark.downloader._download_file", fail_download)
+    monkeypatch.setattr("hallmark.downloader._fetch_file", fail_download)
 
-    clone = Repo.clone(str(source.dothm.path), tmp_path / "clone", fetch_data=False)
+    clone = Repo.clone(str(source.dothm.path), tmp_path / "clone")
 
     assert not (clone.worktree / "a0_i0.h5").exists()
     assert clone.download_result is None

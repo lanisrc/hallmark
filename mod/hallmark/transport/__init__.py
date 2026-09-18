@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,7 +10,7 @@ from threading import Event, Lock, local
 import requests
 
 from .auth import resolve_settings
-from .base import DownloadError, RemoteSpec, TransferCancelled
+from .base import RemoteEntry, RemoteSpec, TransferCancelled
 
 
 class OperationContext:
@@ -21,27 +20,17 @@ class OperationContext:
         self,
         remote,
         output_root=None,
-        *,
-        allow_remote_commands=False,
-        remote_hash=False,
     ):
         self.remote = remote
         self.settings = resolve_settings(remote)
         self.output_root = Path(output_root) if output_root is not None else None
         self.cancelled = Event()
-        self.allow_remote_commands = allow_remote_commands
-        self.remote_hash = remote_hash
+        self.on_bytes = None
         self.text_limit = 16 * 1024 * 1024
-        self.listing_limit = 100_000
         self.listing_timeout = 60
-        self.hash_file_limit = 10 * 1024 * 1024
-        self.hash_total_limit = 100 * 1024 * 1024
-        self.hash_timeout = 60
         self._local = local()
         self._lock = Lock()
         self._sessions = []
-        self._text_bytes = 0
-        self._listing_started = None
         if remote.scheme in {"http", "https"}:
             from .http import HttpTransport
 
@@ -72,17 +61,7 @@ class OperationContext:
         return self._local.session
 
     def read_text(self, path):
-        with self._lock:
-            if self._listing_started is None:
-                self._listing_started = time.monotonic()
-            if time.monotonic() - self._listing_started > 300:
-                raise DownloadError("Remote crawl exceeded its five minute budget")
-        text = self.transport.read_text(path, self.text_limit)
-        with self._lock:
-            self._text_bytes += len(text.encode("utf-8"))
-            if self._text_bytes > 64 * 1024 * 1024:
-                raise DownloadError("Remote crawl exceeded its 64 MiB text budget")
-        return text
+        return self.transport.read_text(path, self.text_limit)
 
     def check_cancelled(self):
         if self.cancelled.is_set():
@@ -107,4 +86,4 @@ class OperationContext:
                 session.close()
 
 
-__all__ = ["OperationContext", "RemoteSpec"]
+__all__ = ["OperationContext", "RemoteEntry", "RemoteSpec"]
