@@ -2351,6 +2351,48 @@ def test_list_worktrees_reports_linked_worktrees_and_their_branches(tmp_path):
         f"Expected a \".hm\" dothm path, got {by_branch['experiment']['dothm']}"
 
 
+def _repo_with_second_branch(tmp_path):
+    """
+    Build a repository whose "main" and "experiment" branches hold different
+    contents for the same tracked file, left checked out on "main".
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    Returns:
+        Repo: the repository, on branch "main".
+    """
+    repo = Repo.init(tmp_path / "repo")
+    data_path = repo.worktree / "data_1.txt"
+    data_path.write_text("main contents\n", encoding="utf-8")
+    repo.add("data_{number}.txt")
+    repo.commit("main data")
+    repo.checkout("experiment")
+    data_path.write_text("experiment contents\n", encoding="utf-8")
+    repo.add(".")
+    repo.commit("experiment data")
+    repo.checkout("main")
+    return repo
+
+
+def test_add_worktree_rejects_a_destination_that_is_already_a_worktree(tmp_path):
+    """
+    Test that adding a worktree where one already exists is refused rather than
+    reported as a fresh creation, which would misstate the branch checked out there.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_with_second_branch(tmp_path)
+    destination = tmp_path / "linked"
+    repo.add_worktree("experiment", path=destination)
+
+    with pytest.raises(DestinationExistsError,
+                       match="is already a Hallmark worktree"):
+        repo.add_worktree("experiment", path=destination)
+    # the same refusal must apply when a different branch is requested
+    with pytest.raises(DestinationExistsError,
+                       match="is already a Hallmark worktree"):
+        repo.add_worktree("main", path=destination)
+
+
 def test_add_worktree_wraps_existing_branch_link_failure(monkeypatch, tmp_path):
     """
     Test that adding a worktree wraps a failure in the dothm.link method with a

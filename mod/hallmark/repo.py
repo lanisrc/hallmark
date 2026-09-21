@@ -929,6 +929,11 @@ class Repo:
             raise DestinationExistsError(
                 f'worktree destination "{target}" already exists '
                 "and is not a Hallmark worktree")
+        # an existing worktree is never re-created, and it may well be checked out
+        # to a different branch, so reporting success here would misstate its state
+        if target_dothm.exists():
+            raise DestinationExistsError(
+                f'worktree destination "{target}" is already a Hallmark worktree')
 
         # existing_branches is a set of all branch names in the current repository
         existing_branches = {head.name for head in self.dothm.heads}
