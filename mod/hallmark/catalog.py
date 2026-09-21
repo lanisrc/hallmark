@@ -1,4 +1,4 @@
-"""Prepare remote inventories and published catalogs without dataset transfers."""
+"""Create local catalogs from Git repositories and remote data directories."""
 
 from __future__ import annotations
 
@@ -38,12 +38,14 @@ def _catalog_names(config):
 
 
 def _catalog_formats(config, name):
+    """Return the filename formats associated with a catalog TSV."""
     entries = as_list_of_dicts(config.get("data", [])) or []
     return [entry["fmt"] for entry in entries if entry.get("fmt")
             and normalize_tsv_name(entry.get("db", "data.tsv")) == name]
 
 
 def _row_path(row, formats):
+    """Resolve a catalog row to one literal relative path."""
     value = row.get("path")
     if value is not None and not pd.isna(value) and str(value):
         return literal_path(str(value)).as_posix()
@@ -59,7 +61,7 @@ def _row_path(row, formats):
 
 
 def _validate_snapshot(files, config):
-    """Reject login pages and unsafe inventories before publishing a snapshot."""
+    """Validate catalog tables and paths before writing the snapshot."""
     for name in _catalog_names(config):
         try:
             frame = pd.read_csv(StringIO(files[name]), sep="\t", dtype=str,
@@ -76,7 +78,12 @@ def _validate_snapshot(files, config):
 
 
 def _snapshot(context):
-    """Probe fixed catalog metadata names, never a dataset file or object store."""
+    """
+    Read and validate a published catalog without fetching dataset files.
+
+    Return None when required catalog files are absent or ``config.yml``
+    does not describe a catalog. Invalid tables and metadata raise CloneError.
+    """
     try:
         config_text = context.read_text("config.yml")
     except RemoteObjectMissing:
@@ -108,7 +115,7 @@ def _snapshot(context):
 
 
 def _metadata_commit(repo, files, message):
-    """Commit only catalog metadata, without capturing local dataset objects."""
+    """Commit catalog metadata and reload the repository state."""
     repo.dothm.index.add(list(files))
     if repo.dothm.index.diff("HEAD"):
         repo.dothm.index.commit(message)
@@ -116,6 +123,7 @@ def _metadata_commit(repo, files, message):
 
 
 def _filter_catalog(repo, *, filter=None, fmt=None):
+    """Filter catalog tables and file entries, then commit the selection."""
     if filter is None and fmt is None:
         return
     config = repo.state.config
@@ -140,6 +148,7 @@ def _filter_catalog(repo, *, filter=None, fmt=None):
 
 
 def _write_inventory(repo, source, entries, fmt):
+    """Write discovered files and their source to a new catalog."""
     columns = ["path", "checksum_algorithm", "checksum", "size_bytes", "mtime"]
     rows = []
     for entry in entries:
@@ -168,6 +177,7 @@ def _write_inventory(repo, source, entries, fmt):
 
 
 def _git_source(url, source_type):
+    """Determine whether the selected source should be cloned with Git."""
     if source_type == "git":
         return True
     if source_type != "auto":
@@ -180,7 +190,33 @@ def _git_source(url, source_type):
 
 def clone_catalog(cls, url, path, *, auth=None, filter=None, fmt=None,
                   source_type="auto", progress=False):
-    """Create a complete local catalog or remove this operation's destination."""
+    """
+    Create a local catalog from Git, a published snapshot, or a data directory.
+
+    An incomplete destination created by this call is removed on failure.
+    Existing destinations are rejected before any source access.
+
+    Args:
+        cls: Repository class used to initialize or open the result.
+        url (str): Catalog location or URL of the dataset directory.
+        path (Path | str): New repository destination.
+        auth (str, optional): Local SSH profile for data access.
+        filter (str | list[str], optional): Relative path glob or globs.
+        fmt (str, optional): Filename format used to select paths.
+        source_type (str): ``auto``, ``git``, ``directory``, or ``catalog``.
+            Defaults to automatic detection.
+        progress (bool | callable): Discovery progress display or callback.
+            Defaults to False.
+
+    Returns:
+        Repo: Repository containing catalog metadata without dataset files.
+
+    Raises:
+        DestinationExistsError: If the destination already exists.
+        CloneError: If a requested catalog is missing or invalid.
+        ValueError: If source options are invalid.
+        DownloadError: If remote metadata cannot be read or validated.
+    """
     if source_type not in {"auto", "git", "directory", "catalog"}:
         raise ValueError("source_type must be auto, git, directory, or catalog")
     url = str(url)
@@ -192,7 +228,7 @@ def clone_catalog(cls, url, path, *, auth=None, filter=None, fmt=None,
     is_git = _git_source(url, source_type)
     if is_git and auth is not None:
         raise ValueError("Git cloning uses Git/SSH authentication, not auth profiles")
-    # Reserve ownership before cleanup becomes possible; never remove another repo.
+    # Create the destination exclusively so cleanup only removes our own directory.
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         destination.mkdir()

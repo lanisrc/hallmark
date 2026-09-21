@@ -31,6 +31,7 @@ pytestmark = pytest.mark.ssh_integration
 
 @pytest.fixture
 def ssh_server(tmp_path, monkeypatch, request):
+    """Start a loopback SSH server with temporary keys and configuration."""
     if os.environ.get("HALLMARK_RUN_SSH_TESTS") != "1":
         pytest.skip("Set HALLMARK_RUN_SSH_TESTS=1 for disposable loopback SSH tests")
     sshd = shutil.which("sshd") or "/usr/sbin/sshd"
@@ -271,7 +272,7 @@ def test_build_manifest_download_clone_workflow(ssh_server, tmp_path):
     assert not (destination / "bad_2.dat").exists()
     assert not list(destination.rglob("*.part"))
 
-    # Single-catalog public Python clone and CLI clone both route SSH downloads.
+    # Python and CLI clones both use the recorded SSH data remote.
     single = build_repo(
         tmp_path / "single",
         "lab",

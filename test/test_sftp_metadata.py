@@ -20,6 +20,7 @@ from hallmark.transport.sftp import _Packet
 
 @pytest.fixture
 def local_sftp(tmp_path, monkeypatch):
+    """Connect the transport to a local SFTP subsystem without networking."""
     server = next((path for path in (
         "/usr/lib/openssh/sftp-server", "/usr/libexec/sftp-server",
     ) if Path(path).exists()), None)
@@ -115,6 +116,7 @@ def test_metadata_file_size_limit_before_transfer(local_sftp, monkeypatch):
 
 
 def _fake_subsystem(monkeypatch, context, script):
+    """Use a supplied script when starting an SFTP subsystem process."""
     transport = context.transport
     monkeypatch.setattr(transport, "prepare", lambda: None)
     spawn = transport._spawn

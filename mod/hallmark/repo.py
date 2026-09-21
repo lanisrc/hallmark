@@ -214,13 +214,45 @@ class Repo:
         fetch_data: Optional[bool] = None,
         show_progress: Optional[bool] = None,
     ) -> "Repo":
-        """Clone catalog metadata, discovering ordinary remote directories as needed.
+        """
+        Clone a Hallmark catalog or index a remote data directory.
 
-        ``filter`` is a relative path glob; ``fmt`` is a filename template.
-        Dataset files are transferred only with ``download=True`` and an
-        ``approve(plan)`` callback returning True after inspecting the plan.
-        ``source_type`` can explicitly select git, directory, or catalog sources.
-        The legacy ``fetch_data`` and ``show_progress`` names remain aliases.
+        Git sources retain their history. Published catalog snapshots and
+        discovered directories start new local history. Dataset files are
+        downloaded only when requested and approved after catalog creation.
+        Declining approval leaves the catalog available without dataset files.
+
+        Args:
+            url (str): Catalog location or URL of the dataset directory.
+            path (Path | str): New worktree or bare ``.hm`` repository path.
+            auth (str, optional): Local SSH profile for data access. Git
+                sources use Git's authentication configuration instead.
+            filter (str | list[str], optional): Relative path glob or globs.
+                A path must match at least one glob when provided.
+            fmt (str, optional): Filename format used to select paths and
+                extract parameters when discovering a directory.
+            source_type (str): ``auto``, ``git``, ``directory``, or ``catalog``.
+                Defaults to automatic source detection.
+            progress (bool): Show discovery and download progress. Defaults
+                to False.
+            download (bool): Request downloads after preparing the catalog.
+                Defaults to False and requires an approval callback when True.
+            approve (callable, optional): Called with the completed download
+                plan. Return the Boolean True to approve the transfer.
+            max_workers (int): Maximum download workers. Defaults to 4.
+            fetch_data (bool, optional): Compatibility alias for ``download``.
+            show_progress (bool, optional): Compatibility alias for ``progress``.
+
+        Returns:
+            Repo: The cloned repository. ``download_result`` contains results
+            when an approved, nonempty download was performed.
+
+        Raises:
+            DestinationExistsError: If the destination already exists.
+            CloneError: If a requested catalog is missing or invalid.
+            ValueError: If source options are invalid or conflict.
+            DownloadError: If discovery or downloading fails, or a download
+                is requested without a callback or worktree destination.
         """
         from .catalog import clone_catalog
         from .downloader import DownloadError, _require_positive_integer
@@ -255,7 +287,35 @@ class Repo:
     def plan_download(self, output_path=None, *, file_paths=None, tsv_names=None,
                       all_files=False, filter=None, fmt=None, remote_name=None,
                       estimated_bytes_per_second=None):
-        """Inspect a transfer using local catalog metadata without network access."""
+        """
+        Plan a download using the local catalog without contacting a server.
+
+        With no explicit paths or TSVs, select the complete catalog before
+        applying any filter or filename format. Planning does not approve
+        the transfer.
+
+        Args:
+            output_path (Path | str, optional): Destination directory. Defaults
+                to the worktree; required for a bare repository.
+            file_paths (sequence[str], optional): Remote-relative file paths.
+            tsv_names (sequence[str], optional): Catalog TSVs to select.
+            all_files (bool): Select all configured files. Cannot be combined
+                with explicit paths or TSVs. Defaults to False.
+            filter (str | list[str], optional): Relative path glob or globs.
+            fmt (str, optional): Filename format that selected paths must match.
+            remote_name (str, optional): Configured data remote to use.
+            estimated_bytes_per_second (float, optional): Positive transfer
+                rate for duration estimates. No rate is measured while planning.
+
+        Returns:
+            DownloadPlan: Immutable selection with its source, destination,
+            checksums, and available file metadata.
+
+        Raises:
+            DownloadError: If the catalog, remote, selection, or destination
+                is invalid.
+            ValueError: If a filter, format, or supplied rate is invalid.
+        """
         from .downloader import plan_download
 
         return plan_download(
@@ -264,7 +324,30 @@ class Repo:
             estimated_bytes_per_second=estimated_bytes_per_second)
 
     def download(self, plan, *, approved=False, max_workers=4, progress=False):
-        """Execute an inspected DownloadPlan only with explicit approval."""
+        """
+        Download the files in an approved plan.
+
+        The plan fixes the source and destination even if repository settings
+        change. Successful files remain available when another transfer fails.
+
+        Args:
+            plan (DownloadPlan): Plan returned by ``plan_download``.
+            approved (bool): Must be True for a nonempty transfer. Defaults
+                to False; an empty plan requires no approval.
+            max_workers (int): Maximum concurrent download workers. Defaults
+                to 4; the local SSH session limit may reduce concurrency.
+            progress (bool): Show byte progress. Defaults to False.
+
+        Returns:
+            dict: Results with ``succeeded``, ``failed``, ``total_bytes``, and
+            ``errors`` keys. Also stored in ``download_result``. Individual
+            transfer failures are recorded in ``failed`` and ``errors``.
+
+        Raises:
+            TypeError: If ``plan`` is not a DownloadPlan.
+            DownloadError: If approval is missing, setup fails, or the
+                destination is invalid.
+        """
         from .downloader import execute_download_plan
 
         result = execute_download_plan(
@@ -332,7 +415,8 @@ class Repo:
             fmt (str, optional): Data format specification.
             remote_name (str, optional): Name of the remote repository.
             remote_url (str, optional): URL of the remote repository.
-            remote_auth (str, optional): Local profile name; empty string removes it.
+            remote_auth (str, optional): Local SSH profile name. An empty string
+                removes the reference; None leaves it unchanged.
             encoding_updates (dict[str, str], optional): Updates to encoding rules.
 
         Returns:

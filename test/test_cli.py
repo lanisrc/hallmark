@@ -61,7 +61,7 @@ def _install_repo(monkeypatch, worktree=Path("worktree")):
 
 
 def _download_plan(count, output=Path("worktree")):
-    """A real immutable plan for testing CLI rendering and approval boundaries."""
+    """Create a download plan for CLI display and approval tests."""
     return DownloadPlan(tuple(DownloadItem(Path(f"file-{index:03d}.dat"),
                                            size_bytes=8 if index == 0 else None)
                               for index in range(count)),
@@ -69,7 +69,7 @@ def _download_plan(count, output=Path("worktree")):
 
 
 def _local_cli_catalog(path):
-    """Create a metadata-only repository backed by a tiny fake HTTP dataset."""
+    """Create a local catalog for a small, simulated HTTP dataset."""
     repo = Repo.init(path)
     repo.state.config = {
         "data": [{"db": "data.tsv"}],

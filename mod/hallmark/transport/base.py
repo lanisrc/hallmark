@@ -1,4 +1,4 @@
-"""Internal transport contracts and validated data-remote locators."""
+"""Shared transport interfaces and data-remote URL validation."""
 
 from __future__ import annotations
 
@@ -13,26 +13,27 @@ from ..helper_functions import validate_relative_path
 
 
 class DownloadError(HallmarkError):
-    """A remote transfer or its verification failed."""
+    """Raised when download setup, transfer, or verification fails."""
 
 
 class RemoteConfigurationError(DownloadError, ValueError):
-    """A remote cannot be used with the selected local policy."""
+    """Raised when a data remote or its local settings are invalid."""
 
 
 class RemoteObjectMissing(DownloadError):
-    """The transport positively identified an absent object."""
+    """Raised when the server reports that a remote file is missing."""
 
 
 class CapabilityError(DownloadError):
-    """The selected source does not support this operation."""
+    """Raised when the source or client does not support an operation."""
 
 
 class TransferCancelled(DownloadError):
-    """The owning operation cancelled a transfer."""
+    """Raised when a transfer is cancelled."""
 
 
 def reject_controls(value: str, label: str) -> None:
+    """Reject control characters and text that cannot be encoded as UTF-8."""
     try:
         value.encode("utf-8")
     except UnicodeError:
@@ -54,6 +55,7 @@ def literal_path(value) -> Path:
 
 
 def profile_name(value: str) -> str:
+    """Validate and return a local authentication profile name."""
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
         raise RemoteConfigurationError("Auth profile must match [A-Za-z0-9_-]{1,64}")
     return value
@@ -62,6 +64,7 @@ def profile_name(value: str) -> str:
 def ssh_host(value: str) -> str:
     # Aliases are not necessarily DNS names. Limit expansion tokens to characters
     # that cannot become shell syntax in a user's ProxyCommand/Match configuration.
+    """Validate an SSH hostname, configuration alias, or IPv6 address."""
     if ":" in value:
         if "%" in value:
             raise RemoteConfigurationError("Scoped IPv6 SSH hosts are unsupported")
@@ -75,6 +78,7 @@ def ssh_host(value: str) -> str:
 
 
 def ssh_user(value: str) -> str:
+    """Validate and return an SSH username."""
     if not isinstance(value, str) or not re.fullmatch(
         r"[A-Za-z0-9_][A-Za-z0-9_.-]*", value
     ):
@@ -84,7 +88,18 @@ def ssh_user(value: str) -> str:
 
 @dataclass(frozen=True)
 class RemoteEntry:
-    """A discovered file; absent attributes remain unknown without reading it."""
+    """
+    A discovered file and its available metadata.
+
+    Attributes:
+        path (str): Literal path relative to the dataset root.
+        size (int, optional): File size in bytes.
+        mtime (float, optional): Modification time reported by the server.
+        checksum_algorithm (str, optional): Published checksum algorithm.
+        checksum (str, optional): Published digest.
+
+    Unavailable metadata remains None; file contents are not read to fill it.
+    """
 
     path: str
     size: int | None = None
@@ -95,7 +110,21 @@ class RemoteEntry:
 
 @dataclass(frozen=True)
 class RemoteSpec:
-    """A parsed URL root; catalog paths appended to it are always literal."""
+    """
+    A parsed data-remote URL and optional local authentication profile.
+
+    Use ``parse`` to validate a URL. SSH roots are decoded once; catalog
+    paths appended to the root are treated as literal filenames.
+
+    Attributes:
+        url (str): Original source URL after trimming surrounding whitespace.
+        scheme (str): HTTP, HTTPS, SSH, or SFTP scheme in lowercase.
+        host (str): Hostname or SSH configuration alias.
+        root (str): Dataset root, decoded for SSH and SFTP.
+        user (str, optional): Explicit SSH username.
+        port (int, optional): Explicit port number.
+        auth (str, optional): Local SSH authentication profile name.
+    """
 
     url: str = field(repr=False)
     scheme: str
@@ -107,6 +136,19 @@ class RemoteSpec:
 
     @classmethod
     def parse(cls, url: str, auth: str | None = None) -> RemoteSpec:
+        """
+        Parse and validate a data-remote URL.
+
+        Args:
+            url (str): HTTP(S) URL or SSH/SFTP URL with an absolute dataset root.
+            auth (str, optional): Local SSH profile name. Unsupported for HTTP(S).
+
+        Returns:
+            RemoteSpec: Validated source description.
+
+        Raises:
+            RemoteConfigurationError: If the URL or profile reference is invalid.
+        """
         if not isinstance(url, str) or not url.strip():
             raise RemoteConfigurationError("Remote URL must be a non-empty string")
         reject_controls(url, "Remote URL")
@@ -166,9 +208,11 @@ class RemoteSpec:
         return cls(url, scheme, host, root, user, port, auth)
 
     def pathname(self, relative_path: str) -> str:
+        """Append a literal relative path to the dataset root."""
         return self.root.rstrip("/") + "/" + literal_path(relative_path).as_posix()
 
     def file_url(self, relative_path: str) -> str:
+        """Encode a literal catalog path as a URL beneath the dataset root."""
         path = literal_path(relative_path).as_posix() if relative_path else ""
         if relative_path.endswith("/") and path:
             path += "/"
@@ -180,31 +224,72 @@ class RemoteSpec:
 
     @property
     def display(self) -> str:
-        """Safe endpoint context without URL credentials, query, or local paths."""
+        """Source scheme and host, with credentials and paths omitted."""
         host = self.host if re.fullmatch(r"[A-Za-z0-9_.:-]+", self.host) else "remote"
         return f"{self.scheme}://{host}"
 
 
 class Transport:
-    """Internal behavior shared by transports; no configuration-driven imports."""
+    """
+    Common interface for internal data transports.
+
+    Args:
+        context (OperationContext): Resources and settings for this operation.
+    """
 
     def __init__(self, context):
         self.context = context
 
     def prepare(self):
+        """Check connection requirements before starting transfers."""
         pass
 
     def fetch(self, relative_path, destination, *, chunk_size=8192):
+        """
+        Transfer a file to a caller-managed temporary destination.
+
+        Args:
+            relative_path (str): Literal path relative to the dataset root.
+            destination (Path): Local file to write.
+            chunk_size (int): Read size for transports that support it.
+
+        Checksum verification and atomic replacement are handled by the downloader.
+        """
         raise NotImplementedError
 
     def list_entries(self):
+        """Return the relative paths from a recursive directory listing."""
         return [entry.path for entry in self.iter_entries()]
 
     def iter_entries(self, on_directory=None):
+        """
+        Yield file metadata from a recursive directory listing.
+
+        Args:
+            on_directory (callable, optional): Callback receiving directory paths
+                relative to the dataset root.
+
+        Raises:
+            CapabilityError: If the transport does not provide directory listings.
+        """
         raise CapabilityError("Recursive listing is unsupported by this transport")
 
     def read_text(self, relative_path, limit):
+        """
+        Read a remote metadata file within a byte limit.
+
+        Args:
+            relative_path (str): Metadata path relative to the dataset root.
+            limit (int): Maximum number of bytes to read.
+
+        Returns:
+            str: Decoded metadata text.
+
+        Raises:
+            CapabilityError: If the transport does not support metadata reads.
+        """
         raise CapabilityError("Reading metadata is unsupported by this transport")
 
     def close(self):
+        """Release connections and processes used by this transport."""
         pass

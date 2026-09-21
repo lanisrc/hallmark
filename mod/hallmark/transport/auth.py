@@ -1,4 +1,4 @@
-"""Strict local SSH settings; repository configuration stores references only."""
+"""Read local SSH settings for profile names stored in repository configuration."""
 
 from __future__ import annotations
 
@@ -18,6 +18,13 @@ from .base import (
 
 @dataclass(frozen=True)
 class SSHSettings:
+    """
+    Local SSH settings shared by the connections in one operation.
+
+    Timeouts are in seconds. ``transfer_timeout`` limits the total time
+    for each file, and ``max_sessions`` limits concurrent SFTP sessions.
+    Unset user, port, and identity values fall back to SSH configuration.
+    """
     user: str | None = None
     port: int | None = None
     identity_file: str | None = None
@@ -29,6 +36,7 @@ class SSHSettings:
 
 
 def _settings(values):
+    """Validate local SSH options and normalize identity-file paths."""
     allowed = {item.name for item in fields(SSHSettings)}
     if not isinstance(values, dict) or set(values) - allowed:
         raise RemoteConfigurationError("Unsupported local SSH settings fields")
@@ -64,7 +72,22 @@ def _settings(values):
 
 
 def resolve_settings(remote):
-    """Resolve settings once, before any worker or connection starts."""
+    """
+    Resolve local SSH settings before opening a connection.
+
+    URL user and port values override a host-bound profile, which overrides
+    global timeout and concurrency defaults. Remaining values use SSH config.
+
+    Args:
+        remote (RemoteSpec): Source URL and optional local profile name.
+
+    Returns:
+        SSHSettings: Validated settings, or defaults for an HTTP source.
+
+    Raises:
+        RemoteConfigurationError: If the auth file, settings, or host binding
+            is invalid, or a referenced profile is missing.
+    """
     settings = SSHSettings()
     if remote.scheme not in {"ssh", "sftp"}:
         return settings
@@ -92,7 +115,7 @@ def resolve_settings(remote):
     ):
         raise RemoteConfigurationError("Auth file must use version: 1")
     defaults = _settings(document.get("defaults", {}))
-    # Endpoint/identity defaults must always be host-bound through a profile.
+    # User, port, and identity settings require a profile bound to specific hosts.
     if set(defaults) & {"user", "port", "identity_file"}:
         raise RemoteConfigurationError("Global SSH defaults cannot select an identity")
     settings = replace(settings, **defaults)
@@ -123,7 +146,7 @@ def resolve_settings(remote):
                 f"Auth profile {remote.auth!r} is not bound to {remote.host}"
             )
         settings = replace(settings, **values)
-    # Profile user/port are defaults; hosts are endpoint constraints.
+    # URL user and port override profile defaults after checking the host binding.
     return replace(
         settings, user=remote.user or settings.user, port=remote.port or settings.port
     )

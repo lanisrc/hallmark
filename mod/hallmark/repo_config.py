@@ -27,12 +27,14 @@ def _update_remote_config(
     ) -> None:
     """
     Used by set_config.
-    Update the repository configuration with a new remote name and/or URL.
+    Update the repository data remote and its local profile reference.
 
     Args:
         config (dict): The repository configuration dictionary.
         remote_name (str, optional): New remote repository name.
         remote_url (str, optional): New remote repository URL.
+        remote_auth (str, optional): Local SSH profile name. An empty string
+            removes the reference; None leaves it unchanged.
 
     Raises:
         ValueError: If the remote configuration is invalid or if the specified
@@ -171,7 +173,7 @@ def normalize_remotes(remotes) -> list[dict]:
             profile_name(entry["auth"])
         if isinstance(entry.get("url"), str):
             reject_controls(entry["url"], "Remote URL")
-            # Names without URLs are allowed while configuring/building a catalog.
+            # allow names without URLs while configuring a data remote
             RemoteSpec.parse(entry["url"], entry.get("auth"))
         # for each required key ("name" and "url"), validate that it exists
         for key in ("name", "url"):
@@ -351,7 +353,8 @@ def set_config(
         fmt (str, optional): Filename format.
         remote_name (str, optional): Remote repository name.
         remote_url (str, optional): Remote repository URL.
-        remote_auth (str, optional): Local SSH profile; empty string removes it.
+        remote_auth (str, optional): Local SSH profile name. An empty string
+            removes the reference; None leaves it unchanged.
         encoding_updates (dict, optional): Encoding values to merge into
             the existing configuration.
 
@@ -433,7 +436,7 @@ def set_config(
         # update the first entry in the "data" list of the configuration
         config["data"][0] = updated_spec
 
-    # if a new remote name or URL is provided, update the remote configuration
+    # update the remote when its name, URL, or profile reference changes
     if remote_name is not None or remote_url is not None or remote_auth is not None:
         _update_remote_config(config, remote_name, remote_url, remote_auth)
 

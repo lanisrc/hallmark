@@ -1,4 +1,4 @@
-"""Transfer approval must authorize exactly the locally inspected catalog plan."""
+"""Test download planning and approval using local catalog metadata."""
 
 from dataclasses import FrozenInstanceError, replace
 from hashlib import sha256
@@ -20,6 +20,7 @@ from hallmark.downloader import (
 
 @pytest.fixture
 def catalog(tmp_path):
+    """Create a local catalog with known and unknown file metadata."""
     metadata = tmp_path / ".hm"
     metadata.mkdir()
     frame = pd.DataFrame([

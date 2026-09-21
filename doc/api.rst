@@ -108,7 +108,7 @@ The older ``build`` command remains a deprecated compatibility interface.
 Downloading remote data
 -----------------------
 
-Inspect the offline transfer plan and then confirm a download::
+Preview the selected files using the local catalog, then confirm a download::
 
    hallmark download --all --dry-run
    hallmark download --filter 'runs/**'
@@ -128,8 +128,8 @@ Python uses the same plan and requires explicit approval::
    result = repo.download(plan, approved=True, progress=True)
 
 Plans preserve their selected remote, destination and checksums even when
-repository configuration later changes. Size and time estimates remain unknown
-when metadata or a credible throughput estimate is unavailable.
+repository configuration later changes. Size estimates require recorded file
+sizes; duration estimates also require a supplied transfer rate.
 
 .. automodule:: hallmark.download_plan
    :members:

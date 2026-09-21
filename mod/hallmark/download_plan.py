@@ -11,7 +11,15 @@ from urllib.parse import urlsplit, urlunsplit
 
 @dataclass(frozen=True)
 class DownloadItem:
-    """A catalog file and the metadata available when a transfer was planned."""
+    """
+    A file and its catalog metadata at the time a download is planned.
+
+    Attributes:
+        relative_path (Path): File path relative to the data remote.
+        checksum (str | tuple, optional): Digest or (algorithm, digest) pair.
+        size_bytes (int, optional): Recorded file size; None if unknown.
+        mtime (str, optional): Recorded modification time; None if unknown.
+    """
 
     relative_path: Path
     checksum: Optional[Union[str, tuple[str, str]]] = None
@@ -19,6 +27,7 @@ class DownloadItem:
     mtime: Optional[str] = None
 
     def __post_init__(self) -> None:
+        """Normalize the path and validate optional file metadata."""
         object.__setattr__(self, "relative_path", Path(self.relative_path))
         if isinstance(self.checksum, list):
             object.__setattr__(self, "checksum", tuple(self.checksum))
@@ -40,10 +49,20 @@ class DownloadItem:
 
 @dataclass(frozen=True)
 class DownloadPlan:
-    """The exact files, source, and destination presented for approval.
+    """
+    An immutable selection of files, source, and destination for a download.
 
-    Sizes describe catalog metadata; they are estimates until the transfer ends.
-    A duration is available only when every size and a supplied rate are known.
+    Creating a plan does not approve a transfer. Sizes come from the catalog;
+    a duration estimate requires every file size and a supplied transfer rate.
+
+    Attributes:
+        items (tuple[DownloadItem]): Selected files and their metadata.
+        remote_url (str, optional): Data source URL; may be None for an empty plan.
+        output_path (Path): Absolute destination directory.
+        remote_auth (str, optional): Local SSH profile name.
+        remote_name (str, optional): Name of the selected data remote.
+        estimated_bytes_per_second (float, optional): Positive rate supplied
+            by the caller for duration estimates.
     """
 
     items: tuple[DownloadItem, ...]
@@ -54,6 +73,7 @@ class DownloadPlan:
     estimated_bytes_per_second: Optional[float] = None
 
     def __post_init__(self) -> None:
+        """Copy the selection and validate the source fields and rate."""
         object.__setattr__(self, "items", tuple(self.items))
         object.__setattr__(
             self, "output_path", Path(self.output_path).expanduser().absolute())
@@ -71,7 +91,7 @@ class DownloadPlan:
 
     @property
     def file_count(self) -> int:
-        """Number of files authorized if this plan is approved."""
+        """Number of files selected for download."""
         return len(self.items)
 
     @property
@@ -91,13 +111,19 @@ class DownloadPlan:
 
     @property
     def estimated_seconds(self) -> Optional[float]:
-        """Estimated duration from a supplied rate, never a network probe."""
+        """Estimated duration, or None when sizes or the transfer rate are unknown."""
         if self.total_bytes is None or self.estimated_bytes_per_second is None:
             return None
         return self.total_bytes / self.estimated_bytes_per_second
 
     def summary(self) -> str:
-        """Describe the planned transfer without hiding unavailable estimates."""
+        """
+        Describe the planned transfer, including unavailable estimates.
+
+        Returns:
+            str: File count, size and duration estimates, source, and destination.
+            URL credentials, query parameters, and fragments are omitted.
+        """
         size = f"{self.known_bytes:,} bytes"
         if self.unknown_size_count:
             size += f" known; {self.unknown_size_count} file(s) with unknown size"

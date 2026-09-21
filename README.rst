@@ -80,7 +80,7 @@ is used to share the history of the data index.
 For a private server, |hallmark|_ uses OpenSSH 9.6 or newer with a trusted
 host key and key-based authentication that does not require a prompt.
 
-Clone a remote directory to prepare its catalog, then approve selected downloads::
+Clone a remote directory to create its catalog, then select files to download::
 
     hallmark clone ssh://campus/srv/export/ campus --filter '**/*.h5'
     cd campus
@@ -92,7 +92,7 @@ ordinary browsable HTTPS directories, including DESI, use the same workflow.
 SSH discovery also works with SFTP-only accounts; no server shell or Python
 is required. Omit the filter to catalog everything beneath the supplied URL.
 
-Every dataset transfer requires confirmation. Python callers can inspect
+Every dataset transfer requires approval. Python callers can inspect
 ``repo.plan_download()`` and then execute ``repo.download(plan, approved=True)``.
 Optional authentication profiles remain local and can be selected with
 ``clone --auth PROFILE`` or ``set-config --remote-auth PROFILE``.

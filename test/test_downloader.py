@@ -308,7 +308,7 @@ def test_safe_remote_path_rejects_unsafe_and_reserved_paths(unsafe_path):
 
 
 def test_safe_remote_path_preserves_literal_whitespace():
-    """Catalog filenames are literal; significant spaces must survive download."""
+    """Test that catalog paths retain significant leading and trailing spaces."""
     assert _safe_remote_path("  nested/file.txt  ") == Path("  nested/file.txt  ")
 
 

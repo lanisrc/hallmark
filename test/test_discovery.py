@@ -11,6 +11,7 @@ from hallmark.transport.base import (
 
 
 class Source:
+    """Serve directory listings and record requests for discovery tests."""
     def __init__(self, pages, url="https://data.test/public/"):
         self.remote = RemoteSpec.parse(url)
         self.pages = pages
@@ -26,6 +27,7 @@ class Source:
 
 
 def index(*links):
+    """Render a small HTML directory index from the supplied links."""
     return '<title>Index of /</title>' + ''.join(
         f'<a href="{path}">{path}</a>' for path in links)
 

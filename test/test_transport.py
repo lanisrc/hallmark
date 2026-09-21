@@ -34,6 +34,7 @@ from hallmark.transport.ssh import SshTransport, batch_argument
 
 @pytest.fixture(autouse=True)
 def isolated_auth(monkeypatch, tmp_path):
+    """Isolate local authentication settings from the user environment."""
     monkeypatch.delenv("HALLMARK_AUTH_FILE", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
 
@@ -108,6 +109,7 @@ def test_controls_rejected_at_all_path_boundaries(path, tmp_path):
 
 
 def write_auth(monkeypatch, tmp_path, profiles, defaults=None):
+    """Write a local authentication file for a transport test."""
     path = tmp_path / "auth.yml"
     path.write_text(
         yaml.safe_dump({"version": 1, "profiles": profiles, "defaults": defaults or {}})
@@ -368,6 +370,7 @@ def test_real_sftp_parser_without_network(tmp_path, name):
 
 @pytest.fixture
 def fake_process(tmp_path):
+    """Create a local command for testing SSH process failures."""
     script = tmp_path / "fake.py"
     script.write_text("""import os, signal, subprocess, sys, time
 mode = sys.argv[1]

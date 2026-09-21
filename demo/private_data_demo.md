@@ -1,14 +1,14 @@
 # Private data demo: copyable instructions
 
-These are illustrative client-side instructions, not a record of a live VM run.
-The SSH alias retains the validation VM settings supplied for this demo. Use an
-existing export that you are authorized to read, and replace the example dataset
-root before running the commands. No remote fixture creation is required.
+Run these instructions on your local machine using an existing data export.
+The SSH alias uses the validation VM settings supplied for this demo. Replace
+the example dataset root with your export path; the commands below have not
+been run against that path on the VM.
 
 For a small walkthrough, the examples assume `runs/run_001.dat`,
 `runs/run_002.dat`, a `README.md`, and optionally a publisher-provided `SHA256SUMS`.
 The client needs this Hallmark checkout, Git, and OpenSSH `ssh`/`sftp` 9.6+.
-The server needs SFTP; a login shell, Python, Hallmark, and Git are unnecessary.
+The server needs SFTP, but does not require a login shell, Python, Hallmark, or Git.
 Run the Bash blocks in order in one local terminal.
 
 1. Install the checkout in your active Python environment.
@@ -21,7 +21,7 @@ hallmark clone --help
 ```
 
 2. Add or update this entry in `~/.ssh/config`, preserving your other entries.
-Replace the host, user, or identity if your approved server differs.
+Replace the host, user, or identity when using a different server.
 
 ```text
 Host lab-data
@@ -40,7 +40,7 @@ sftp -o BatchMode=yes -o StrictHostKeyChecking=yes -b /dev/null lab-data
 ```
 
 3. Set the exact export root and create an isolated local workspace. The example
-path is illustrative; it is not asserted to exist on the validation VM.
+path is illustrative and may not exist on the validation VM.
 
 ```bash
 export HM_DEMO_URL='ssh://lab-data/srv/exports/lab/'
@@ -83,15 +83,15 @@ cat ./client/.hm/data.tsv
 Expected for the illustrative export: two run rows, with sizes and modification
 times where available. Published manifest checksums are attached when present;
 missing checksums stay unknown. The data remote is `origin` with `auth: demo`.
-Only listing and catalog metadata are fetched. No run bodies are downloaded for
-hashing, and no remote commands or server Python are required.
+Only listings and catalog metadata are fetched. Dataset files are not read to
+compute checksums, and no remote commands or server Python are required.
 
 Omit `--fmt` to recursively catalog every file below the URL, including supporting
 files. Alternatively, `--filter '**/*.dat'` selects paths without defining
 parameters. Filters and formats never authorize downloads. Discovery reports
 completed directories and discovered files while its total remains unknown.
 
-5. Inspect the transfer plan before approving any payload.
+5. Inspect the transfer plan before approving a download.
 
 ```bash
 cd "$HM_DEMO_WORKSPACE/client"
@@ -101,7 +101,8 @@ hallmark download runs/run_001.dat --dry-run
 ```
 
 A dry run contacts no server. It reports count, known bytes, unknown-size count,
-source, and destination; duration is unknown without a credible rate estimate.
+source, and destination. The CLI reports duration as unknown; Python callers
+can estimate it from a supplied transfer rate when all file sizes are known.
 It does not validate credentials or remote-file existence. To download the
 selected run, inspect the displayed plan and answer `y` at the prompt:
 
@@ -165,16 +166,16 @@ PYTHON
 python ../download_subset.py
 ```
 
-The plan is immutable and pins its source, profile reference, destination, paths,
-and checksums. Later catalog/configuration changes do not redirect it. Without
+The plan fixes its source, profile reference, destination, paths, and checksums.
+Later catalog or configuration changes do not redirect it. Without
 `approved=True`, nonempty Python transfers fail before connecting. Check the
 returned `failed` count; successful files remain when another transfer fails.
 
 Files are written to temporary paths and published atomically after transfer and
 any checksum verification. Failed files preserve an existing destination and
 remove their temporary file. Repeating a download transfers the selection again.
-Cancellation closes Hallmark-owned connections and processes. Byte progress shows
-an ETA when a total is known; unknown totals stay indeterminate.
+Cancellation closes the connections and processes started for the download.
+Byte progress shows an ETA when a total is known; unknown totals stay indeterminate.
 
 8. Request an approved download during cloning, using either interface.
 The CLI prepares the catalog first and then displays its normal approval prompt:
@@ -274,9 +275,9 @@ separate from the data remote's `--auth` profile. Filtering an existing Git
 catalog preserves fetched history and adds a local filtered-catalog commit.
 
 `clone` downloads no dataset files by default, so `--no-fetch-data` is now only
-a compatibility alias. `init` creates a local repository; the old remote `build`
+a compatibility alias. `init` creates a local repository; the older remote `build`
 command is deprecated. Discovery uses no `--allow-remote-commands` or
-`--remote-hash` flag, and never reads dataset bodies to create checksums.
+`--remote-hash` flag, and does not read dataset files to compute checksums.
 For local `add`/`commit` experiments, use a separate compatible one-format
 repository; downloading a remote catalog does not populate the local object store.
 

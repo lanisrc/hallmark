@@ -1,7 +1,7 @@
-"""Read-only SFTP v3 metadata over an operation-owned OpenSSH subsystem.
+"""Read SFTP v3 metadata through an OpenSSH subsystem.
 
-OpenSSH owns authentication and encryption. This module only frames the small
-metadata protocol, so names and attributes never pass through shell/ls parsing.
+OpenSSH handles authentication and encryption. Names and attributes are read
+from binary protocol fields without parsing shell commands or ``ls`` output.
 """
 
 from __future__ import annotations
@@ -20,17 +20,20 @@ _KNOWN_ATTRIBUTES = 0x8000000F
 
 
 def _string(value):
+    """Encode a byte string or UTF-8 text as an SFTP string."""
     if isinstance(value, str):
         value = value.encode("utf-8")
     return struct.pack(">I", len(value)) + value
 
 
 class _Packet:
+    """Read and validate fields in an SFTP response packet."""
     def __init__(self, data):
         self.data = data
         self.offset = 0
 
     def take(self, size):
+        """Read the requested bytes, rejecting truncated packets."""
         end = self.offset + size
         if end > len(self.data):
             raise DownloadError("Truncated SFTP metadata packet")
@@ -39,22 +42,27 @@ class _Packet:
         return result
 
     def uint32(self):
+        """Read an unsigned 32-bit integer in network byte order."""
         return struct.unpack(">I", self.take(4))[0]
 
     def string(self):
+        """Read a length-prefixed byte string."""
         return self.take(self.uint32())
 
     def text(self):
+        """Read a UTF-8 filename from a length-prefixed string."""
         try:
             return self.string().decode("utf-8")
         except UnicodeError:
             raise DownloadError("SFTP filename must contain valid UTF-8") from None
 
     def finish(self):
+        """Reject unconsumed bytes after the expected fields."""
         if self.offset != len(self.data):
             raise DownloadError("Unexpected trailing SFTP metadata")
 
     def attributes(self):
+        """Read size, mode, and modification time; retain unknowns as None."""
         flags = self.uint32()
         if flags & ~_KNOWN_ATTRIBUTES:
             raise DownloadError("Unsupported SFTP attribute flags")
@@ -77,7 +85,15 @@ class _Packet:
 
 
 class SftpMetadata:
-    """One bounded, cancellable request at a time on a binary subsystem pipe."""
+    """
+    Read SFTP metadata through a dedicated OpenSSH subsystem process.
+
+    Requests run sequentially with size limits, timeouts, and cancellation
+    checks. Use this object as a context manager to close the process and pipes.
+
+    Args:
+        transport (SshTransport): Shared SSH connection and session limits.
+    """
 
     def __init__(self, transport):
         self.transport = transport
@@ -137,14 +153,17 @@ class SftpMetadata:
                 self._slot = False
 
     def _new_deadline(self):
+        """Start the timeout for one metadata request."""
         self.deadline = time.monotonic() + self.context.listing_timeout
 
     def _check(self):
+        """Check cancellation and the current request deadline."""
         self.context.check_cancelled()
         if time.monotonic() >= self.deadline:
             raise DownloadError("SFTP metadata request exceeded its time limit")
 
     def _pump(self):
+        """Buffer available output and report whether stdin is writable."""
         self._check()
         writable = False
         for key, events in self.selector.select(timeout=0.05):
@@ -168,6 +187,7 @@ class SftpMetadata:
         return writable
 
     def _send(self, payload):
+        """Write one size-limited packet while checking cancellation."""
         if len(payload) > _MAX_PACKET:
             raise DownloadError("SFTP metadata request exceeds its size limit")
         data = memoryview(struct.pack(">I", len(payload)) + payload)
@@ -187,6 +207,7 @@ class SftpMetadata:
             self.selector.unregister(self.process.stdin)
 
     def _read(self, size):
+        """Read the requested bytes within the current deadline."""
         while len(self.buffer) < size:
             self._pump()
             self.context.check_cancelled()
@@ -199,6 +220,7 @@ class SftpMetadata:
         return result
 
     def _receive(self):
+        """Read a response type and its validated packet body."""
         length = struct.unpack(">I", self._read(4))[0]
         if not 1 <= length <= _MAX_PACKET:
             raise DownloadError("Invalid or oversized SFTP metadata packet")
@@ -206,6 +228,7 @@ class SftpMetadata:
         return data[0], _Packet(data[1:])
 
     def _request(self, kind, data, expected, *, eof=False):
+        """Send a request and validate its response identifier and status."""
         self._new_deadline()
         self.request_id = (self.request_id + 1) % (2 ** 32)
         self._send(bytes([kind]) + struct.pack(">I", self.request_id) + data)
@@ -231,6 +254,7 @@ class SftpMetadata:
         return packet
 
     def realpath(self, path):
+        """Return the canonical path reported by the SFTP server."""
         packet = self._request(16, _string(path), 104)
         if packet.uint32() != 1:
             raise DownloadError("Invalid SFTP canonical path response")
@@ -241,12 +265,26 @@ class SftpMetadata:
         return result
 
     def lstat(self, path):
+        """Read file attributes without following a final symlink."""
         packet = self._request(7, _string(path), 105)
         result = packet.attributes()
         packet.finish()
         return result
 
     def iterdir(self, path):
+        """
+        Yield names and attributes from one remote directory.
+
+        Args:
+            path (str): Absolute directory path on the server.
+
+        Yields:
+            tuple: Filename and attribute dictionary. Missing sizes, modes,
+            and modification times are None.
+
+        Raises:
+            DownloadError: If the directory cannot be read or responses are invalid.
+        """
         packet = self._request(11, _string(path), 102)
         handle = packet.string()
         packet.finish()

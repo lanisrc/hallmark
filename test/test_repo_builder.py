@@ -60,7 +60,7 @@ def _inventory(monkeypatch, files):
     """
     calls = []
     def fake_list(base_url, **kwargs):
-        """create a fake list_remote_files list"""
+        """Return the configured inventory and record the requested URL."""
         calls.append(base_url)
         return dict(files)
     monkeypatch.setattr("hallmark.repo_builder.list_remote_files", fake_list)
@@ -184,11 +184,12 @@ def test_list_remote_files_partial_sibling_manifest_does_not_hide_files():
 
 
 def test_list_remote_files_does_not_probe_custom_checksum_payloads():
+    """Test that discovery reads only recognized checksum manifests."""
     server = MockServer(BASE_URL)
     server.add_directory("", [
         ("data-object", "data.tar"),
         ("data-object", "custom_checksum_manifest.log")])
-    # No payload is registered: fetching either body would fail the test.
+    # No file contents are registered, so fetching either file would fail the test.
     with _served(server):
         files = list_remote_files(server.base_url)
     assert files["data.tar"] == (None, None)
@@ -326,7 +327,7 @@ def test_list_remote_files_fetches_each_directory_once():
     requested_urls = []
     original_get = server.get
     def recording_get(url, timeout=None, **kwargs):
-        """A wrapper around the original server.get that records requested URLs."""
+        """Record requested URLs before returning their registered responses."""
         requested_urls.append(url)
         return original_get(url, timeout=timeout)
     server.get = recording_get
@@ -349,8 +350,7 @@ def test_list_remote_files_unavailable_manifest_does_not_hide_files():
         "", [("data-object", "data.tar"), ("data-object", "checksums.txt")])
     original_get = server.get
     def unavailable_manifest_get(url, timeout=None, **kwargs):
-        """A wrapper around the original server.get that simulates
-        an unavailable manifest."""
+        """Simulate a missing checksum manifest while serving other registered files."""
         if url.endswith("/checksums.txt"):
             response = requests.Response()
             response.status_code = 404
@@ -839,9 +839,9 @@ def test_build_repo_size_threshold_skips_large_unmatched_file(tmp_path):
 
 
 def test_build_repo_small_unmatched_file_is_not_downloaded(tmp_path):
+    """Test that even small unmatched files remain remote during catalog creation."""
     server = MockServer(BASE_URL)
     server.add_directory("", [("data-object", "README.md")])
-    # Even a tiny file stays remote until download approval.
     with _served(server):
         repo = build_repo(tmp_path / "repo.hm", "EHTC_TEST", fmt_entries=[])
     assert repo.state.config["data"] == [{"name": "readme", "file": "README.md"}]
@@ -849,6 +849,7 @@ def test_build_repo_small_unmatched_file_is_not_downloaded(tmp_path):
 
 def test_build_repo_defaults_to_generic_path_catalog_without_input(
         monkeypatch, tmp_path):
+    """Test that omitted formats produce a path catalog without prompting."""
     _inventory(monkeypatch, {
         "arbitrary.bin": (None, None), "nested/a.fits": (None, None)})
     monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("Unexpected prompt"))
@@ -861,6 +862,7 @@ def test_build_repo_defaults_to_generic_path_catalog_without_input(
 
 
 def test_build_repo_rejects_payload_hashing_before_network(monkeypatch, tmp_path):
+    """Test that remote hashing is rejected before opening a connection."""
     monkeypatch.setattr("hallmark.repo_builder.list_remote_files",
                         lambda *_: pytest.fail("Unexpected network access"))
     with pytest.raises(CapabilityError, match="remote_hash"):
@@ -1077,8 +1079,7 @@ def test_build_repo_empty_dataset_writes_valid_empty_data_config(monkeypatch, tm
 def test_build_repo_loads_formats_and_remotes_from_explicit_config(
     monkeypatch, tmp_path):
     """
-    If the user selects a config file that has formats and remotes, build_repo should
-    load those formats and remotes into the new repo's config
+    Test that build_repo loads formats and remotes from an explicit config file.
     Args:
         monkeypatch: A pytest fixture for safely patching builtins and other objects.
         tmp_path: A temporary directory provided by pytest for the test.
@@ -1109,8 +1110,7 @@ def test_build_repo_loads_formats_and_remotes_from_explicit_config(
 
 def test_build_repo_explicit_remotes_override_loaded_config(monkeypatch, tmp_path):
     """
-    If the user selects a config file that has remotes, but also provides explicit
-    remotes to build_repo, the explicit remotes should override the config remotes.
+    Test that explicit remotes override those loaded from a config file.
     Args:
         monkeypatch: A pytest fixture for safely patching builtins and other objects.
         tmp_path: A temporary directory provided by pytest for the test.
@@ -1138,8 +1138,7 @@ def test_build_repo_explicit_remotes_override_loaded_config(monkeypatch, tmp_pat
 
 def test_build_repo_explicit_config_requires_a_format(monkeypatch, tmp_path):
     """
-    If the user selects a config file that has no fmt entries, build_repo should raise
-    a ValueError indicating that no formats were found.
+    Test that a supplied config file must contain at least one filename format.
     Args:
         monkeypatch: A pytest fixture for safely patching builtins and other objects.
         tmp_path: A temporary directory provided by pytest for the test.
@@ -1157,8 +1156,7 @@ def test_build_repo_explicit_config_requires_a_format(monkeypatch, tmp_path):
 
 def test_build_repo_reuses_existing_formats_and_remotes(monkeypatch, tmp_path):
     """
-    If a repo already exists, build_repo should prompt to reuse its formats and remotes.
-    If user agrees, the existing formats and remotes should be preserved in the new repo
+    Test that an existing repository retains its formats and data remotes.
     Args:
         monkeypatch: A pytest fixture for safely patching builtins and other objects.
         tmp_path: A temporary directory provided by pytest for the test.
@@ -1187,6 +1185,7 @@ def test_build_repo_reuses_existing_formats_and_remotes(monkeypatch, tmp_path):
 
 
 def test_build_repo_reuses_existing_catalog_without_input(monkeypatch, tmp_path):
+    """Test that an existing catalog is refreshed without interactive input."""
     _inventory(monkeypatch, {"item_1.dat": (None, None)})
     path = tmp_path / "catalog"
     build_repo(path, "label", [{"fmt": "item_{number}.dat", "db": "data.tsv"}])
@@ -1388,6 +1387,7 @@ def test_build_repo_preserves_meta_file_checksum(monkeypatch, tmp_path):
 
 
 def test_build_repo_never_requests_static_checksum(monkeypatch, tmp_path):
+    """Test that missing static-file checksums do not trigger dataset downloads."""
     _inventory(monkeypatch, {"README.md": (None, None)})
     monkeypatch.setattr("hallmark.transport.requests.Session",
                         lambda: pytest.fail("Unexpected checksum request"))

@@ -1,4 +1,4 @@
-"""Supervised OpenSSH connection sharing and exact-file SFTP transfers."""
+"""Share an OpenSSH connection for SFTP transfers and metadata reads."""
 
 from __future__ import annotations
 
@@ -26,7 +26,18 @@ from .base import (
 
 
 def batch_argument(path):
-    """Encode one absolute SFTP argument (command quoting and optional globbing)."""
+    """
+    Escape an absolute path for a literal SFTP batch argument.
+
+    Args:
+        path (Path | str): Absolute local or remote path.
+
+    Returns:
+        str: Argument with command and glob characters escaped.
+
+    Raises:
+        RemoteConfigurationError: If the path is relative or contains controls.
+    """
     text = str(path)
     reject_controls(text, "SFTP path")
     if not text.startswith("/"):
@@ -38,9 +49,17 @@ def batch_argument(path):
 
 
 class SshTransport(Transport):
+    """
+    Share one OpenSSH connection for SFTP transfers and metadata requests.
+
+    Args:
+        context (OperationContext): Local settings and cancellation state.
+        ssh (list[str], optional): Internal command override for offline tests.
+        sftp (list[str], optional): Internal command override for offline tests.
+    """
     def __init__(self, context, *, ssh=None, sftp=None):
         super().__init__(context)
-        # Injection is internal, for offline process tests; never from repo YAML.
+        # Command overrides support offline tests and cannot come from repo YAML.
         self.ssh = ssh or ["ssh"]
         self.sftp = sftp or ["sftp"]
         self._injected = ssh is not None or sftp is not None
@@ -53,6 +72,7 @@ class SshTransport(Transport):
         self._slots = BoundedSemaphore(context.settings.max_sessions)
 
     def _options(self, *, master=False):
+        """Build noninteractive SSH options for the shared connection."""
         settings = self.context.settings
         policy = "yes" if settings.host_key_policy == "strict" else "accept-new"
         options = [
@@ -74,7 +94,7 @@ class SshTransport(Transport):
             "ControlMaster=yes" if master else "ControlMaster=no",
         ]
         if not master:
-            # If the owned master dies, never authenticate a replacement per file.
+            # A failed shared connection must not reauthenticate for each file.
             options.append("ProxyCommand=false")
         if settings.user is not None:
             options.append(f"User={settings.user}")
@@ -86,6 +106,7 @@ class SshTransport(Transport):
         return args
 
     def _spawn(self, argv, **kwargs):
+        """Start a client in a separate process group and track it for cleanup."""
         with self._process_lock:
             self.context.check_cancelled()
             try:
@@ -99,6 +120,7 @@ class SshTransport(Transport):
 
     def _stop(self, process):
         # Every owned client starts a new process group, including proxy children.
+        """Stop a client process group and wait for the child to exit."""
         def signal_group(signum):
             try:
                 os.killpg(process.pid, signum)
@@ -135,6 +157,12 @@ class SshTransport(Transport):
         capture_stderr=False,
         report_progress=False,
     ):
+        """
+        Run an OpenSSH command with output limits and a total time limit.
+
+        Optionally bound a downloaded metadata file's size or report received
+        dataset bytes. Always stop and reap the client before returning.
+        """
         output = bytearray()
         stderr_size = 0
         diagnostics = bytearray()
@@ -202,6 +230,7 @@ class SshTransport(Transport):
                 process.stderr.close()
 
     def prepare(self):
+        """Check client support and establish the shared SSH connection."""
         with self._prepare_lock:
             if self._master is not None:
                 if self._master.poll() is not None:
@@ -253,6 +282,7 @@ class SshTransport(Transport):
                 raise
 
     def _fetch(self, relative_path, destination, file_limit=None):
+        """Fetch one literal path within the session and transfer limits."""
         remote = batch_argument(self.context.remote.pathname(relative_path))
         local = batch_argument(destination)
         batch = f"get {remote} {local}\n".encode("utf-8")
@@ -273,9 +303,11 @@ class SshTransport(Transport):
             )
 
     def fetch(self, relative_path, destination, *, chunk_size=8192):
+        """Download one file over SFTP; OpenSSH controls the read size."""
         self._fetch(relative_path, destination)
 
     def read_text(self, relative_path, limit):
+        """Read UTF-8 metadata with size checks before and after transfer."""
         entry = self.stat(relative_path)
         if entry.size is not None and entry.size > limit:
             raise DownloadError("Remote text exceeds its size limit")
@@ -290,12 +322,13 @@ class SshTransport(Transport):
                 raise DownloadError("Remote manifest must contain UTF-8 text") from None
 
     def _metadata(self):
+        """Create an SFTP metadata session on the shared connection."""
         from .sftp import SftpMetadata
 
         return SftpMetadata(self)
 
     def stat(self, relative_path):
-        """Read attributes without fetching file contents or following symlinks."""
+        """Read regular-file attributes without fetching the file contents."""
         path = literal_path(relative_path).as_posix()
         with self._metadata() as session:
             attrs = session.lstat(self.context.remote.pathname(path))
@@ -305,7 +338,21 @@ class SshTransport(Transport):
         return RemoteEntry(path, attrs["size"], attrs["mtime"])
 
     def iter_entries(self, on_directory=None):
-        """Yield regular files recursively using only the SFTP subsystem."""
+        """
+        Yield regular files recursively using the SFTP subsystem.
+
+        Args:
+            on_directory (callable, optional): Callback receiving each directory
+                path relative to the dataset root.
+
+        Yields:
+            RemoteEntry: File path, size, and modification time when available.
+            Symlinks, special files, and repository metadata directories are skipped.
+
+        Raises:
+            DownloadError: If discovery fails or a path escapes the dataset root.
+            CapabilityError: If the server omits required file types.
+        """
         with self._metadata() as session:
             root = session.realpath(self.context.remote.root).rstrip("/") or "/"
             reject_controls(root, "SFTP root")
@@ -356,12 +403,14 @@ class SshTransport(Transport):
                     # Symlinks and special files are deliberately not traversed.
 
     def cancel(self):
+        """Stop the client process groups started by this transport."""
         with self._process_lock:
             processes = list(self._processes)
         for process in processes:
             self._stop(process)
 
     def close(self):
+        """Stop clients and remove the shared connection socket directory."""
         self.cancel()
         self._master = None
         if self._socket_dir is not None:

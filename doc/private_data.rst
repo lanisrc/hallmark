@@ -3,21 +3,21 @@
 Private data over SSH and SFTP
 ==============================
 
-Hallmark can discover a remote dataset, prepare a local catalog, and download
+|hallmark|_ can discover a remote dataset, prepare a local catalog, and download
 selected files after approval. ``clone`` accepts both an existing Hallmark
 catalog and an ordinary data directory. Its default result is a local ``.hm``
-with no dataset payloads. A **data remote** identifies the dataset location;
+with no dataset files. A **data remote** identifies the dataset location;
 it is separate from the Git remote used to share catalog history.
 
 The SSH examples use the alias ``lab-data`` and the absolute dataset root
 ``/srv/exports/lab/``. Replace the hostname, username, identity path and root
 with your own values. Run Hallmark locally. The server needs SFTP access, but
-neither Hallmark, Git, Python nor a login shell.
+does not require Hallmark, Git, Python or a login shell.
 
 1. Configure and check SSH access
 ---------------------------------
 
-Install this checkout with ``python -m pip install -e .``. The client requires
+Install the checkout with ``python -m pip install -e .``. The client requires
 system OpenSSH ``ssh`` and ``sftp`` version 9.6 or newer, with connection
 multiplexing available. Linux and macOS have integration-test jobs; Windows
 SSH transport is unsupported.
@@ -71,14 +71,14 @@ without defining parameters:
 Without ``--filter`` or ``--fmt``, discovery recursively covers every directory
 beneath the URL and catalogs all discovered files. A filter still traverses
 directories needed to find matching files. Discovery shows an indeterminate
-progress bar with completed directories and discovered files; it does not
-invent a percentage or completion time while the total is unknown.
+progress bar with counts of completed directories and discovered files.
+The percentage and completion time remain unknown until a total is available.
 
 Both URL schemes use structured SFTP directory enumeration and file transfers.
 SFTP-only accounts work for discovery as well as downloading. No
 ``--allow-remote-commands`` or ``--remote-hash`` option is needed. Discovery
-reads listings and published checksum manifests, never dataset bodies to
-manufacture a checksum. Missing digests stay unknown. For reproducible
+reads listings and published checksum manifests without reading dataset files
+to compute checksums. Missing checksums remain unknown. For reproducible
 catalogs, publish an immutable export with a SHA-256 manifest, for example
 ``<digest>  runs/run_001.h5`` records in ``SHA256SUMS``.
 
@@ -100,9 +100,10 @@ Continue from the same workspace:
    hallmark download runs/run_001.h5
 
 The dry run reads only the local catalog. It reports file count, known bytes,
-the number of unknown file sizes, destination and source. Duration stays
-unknown unless a credible transfer-rate estimate is available. The dry run
-does not test credentials, host trust or remote-file existence.
+the number of unknown file sizes, destination and source. The CLI reports
+duration as unknown. Python callers can supply a transfer rate to estimate
+duration when all file sizes are known. The dry run does not test credentials,
+host trust or remote-file existence.
 
 Every nonempty CLI download displays its plan and asks
 ``Download these files? [y/N]``. Answer ``y`` to authorize the displayed
@@ -121,7 +122,7 @@ Choose a scope from inside ``lab``:
 Explicit paths use their recorded catalog checksums when available, just like
 ``--tsv`` and ``--all``. A path absent from the catalog can be requested, but
 its size and checksum are unknown. Files without a usable publisher checksum
-can download; successful transfer alone does not establish catalog integrity.
+can be downloaded, but their contents cannot be checked against the catalog.
 
 ``--tsv`` can be repeated and combined with explicit paths; overlapping entries
 are deduplicated. ``--all`` cannot be combined with either selection mode.
@@ -193,7 +194,7 @@ an ordinary remote directory:
    hallmark download --remote origin --tsv data.tsv --dry-run
    hallmark clone 'ssh://lab-data/srv/exports/lab/' ../lab-profile --auth lab
 
-The new catalog's ``origin`` records ``auth: lab``. Clear a reference with
+The new catalog's ``origin`` remote records ``auth: lab``. Clear a reference with
 ``hallmark set-config --remote-name origin --remote-auth ''`` to use SSH
 configuration alone. ``--auth`` applies to data access; Git cloning uses Git's
 own authentication configuration.
@@ -201,7 +202,7 @@ own authentication configuration.
 ``hosts`` binds the profile to the URL's alias or literal hostname before
 ``HostName`` resolution. This example binds to ``lab-data``, not
 ``data.example.org``. Explicit URL user/port values override profile settings;
-unset values fall through to SSH configuration. Passwords, tokens and arbitrary
+unset values use SSH configuration. Passwords, tokens and arbitrary
 SSH options are not valid profile fields. ``transfer_timeout`` is the total
 per-file time budget in seconds, not an idle timeout. Effective SSH download
 concurrency is the smaller of ``--max-workers`` and local ``max_sessions``
@@ -227,7 +228,7 @@ discovers metadata without downloading dataset files:
    print(plan.summary())
    print(plan.items)  # Paths, checksums, optional size_bytes and mtime.
 
-Inspect the plan before making the explicit approval call:
+Inspect the plan, then approve the download:
 
 .. code-block:: python
 
@@ -237,7 +238,7 @@ Inspect the plan before making the explicit approval call:
 
 Without ``approved=True``, a nonempty transfer raises ``DownloadError`` before
 opening a connection. A plan freezes the selected files, source URL, profile
-reference and destination; later catalog or remote-config changes do not
+reference and destination; later catalog or remote configuration changes do not
 redirect it. ``plan_download(filter="**/*.h5")`` scopes the complete catalog;
 ``plan_download(output_path="subset", tsv_names=["data.tsv"])`` selects a TSV
 and destination. Planning makes no network requests. Known size totals and
@@ -246,7 +247,7 @@ unknown-size counts are available as ``known_bytes`` and
 are known and ``estimated_bytes_per_second`` was supplied when planning.
 
 For downloads during cloning, supply a callback that reviews the completed
-plan and returns the Boolean ``True`` to approve:
+plan and returns ``True`` to approve:
 
 .. code-block:: python
 
@@ -311,15 +312,17 @@ If a server supplies no usable listing, provide a published Hallmark catalog
 or a more specific browsable URL; Hallmark cannot
 infer hidden file URLs.
 
-Operational behavior and troubleshooting
-----------------------------------------
+.. _operational-behavior-and-troubleshooting:
+
+Download behavior and troubleshooting
+-------------------------------------
 
 Files are downloaded to temporary paths and published atomically after transfer
 and any recorded checksum verification. A failed transfer preserves an existing
 destination and removes its temporary file. Successful files remain available
 when another file fails; a multi-file download is not a single transaction.
-The CLI exits nonzero on transfer failures. Cancellation stops operation-owned
-work and closes Hallmark's SSH connections and processes.
+The CLI exits nonzero on transfer failures. Cancellation stops the active
+operation and closes the SSH connections and processes it started.
 
 .. list-table:: Common failures
    :header-rows: 1
@@ -327,7 +330,7 @@ work and closes Hallmark's SSH connections and processes.
 
    * - Symptom
      - Action
-   * - SSH connection preflight fails
+   * - SSH connection check fails
      - Check the trusted host key, loaded identity, username, server availability
        and OpenSSH version. For profile-only settings, pass the same
        identity/user/port to the manual SFTP check.
@@ -339,7 +342,7 @@ work and closes Hallmark's SSH connections and processes.
        SFTP account can enumerate the requested directories.
    * - Checksum mismatch
      - Check whether the export changed since catalog creation. Reconcile the
-       trusted catalog and source snapshot before retrying.
+       catalog and source against a trusted version before retrying.
    * - Transfer timeout or session limit
      - Adjust the local per-file time budget or lower concurrency to match
        the server's capacity.
@@ -353,9 +356,13 @@ destination symlinks; server permissions remain the access-control boundary.
 Discovered catalogs can use path rows and published catalogs can contain
 multiple TSVs. Existing local ``add``/``commit``/``checkout`` workflows still
 require a compatible one-format ``data.tsv`` repository; downloading does not
-seed the local object store. For local experiments, initialize a separate
+populate the local object store. For local experiments, initialize a separate
 repository, copy in the downloaded files, configure their filename format,
 then add and commit them.
 
 See :ref:`private-transport-reference` for profile settings, HTTP compatibility
 and disposable transport tests, and :doc:`api` for function signatures.
+
+..  |hallmark| replace:: ``hallmark``
+
+..  _hallmark: https://github.com/l6a/hallmark

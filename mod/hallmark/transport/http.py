@@ -1,4 +1,4 @@
-"""Requests transport, including its default .netrc/environment behavior."""
+"""HTTP transport using Requests with its normal .netrc and environment settings."""
 
 from __future__ import annotations
 
@@ -11,11 +11,13 @@ from .base import DownloadError, RemoteObjectMissing, Transport, reject_controls
 
 
 class HttpTransport(Transport):
+    """Transfer files and metadata using reusable Requests sessions."""
     def __init__(self, context):
         super().__init__(context)
         self.text_urls = {}
 
     def _get(self, path):
+        """Open a streaming response with the configured request timeout."""
         return self.context.session().get(
             getattr(self, "direct_url", None) or self.context.remote.file_url(path),
             stream=True,
@@ -24,6 +26,7 @@ class HttpTransport(Transport):
 
     def _error(self, exc):
         # Requests exceptions can embed credentials in their URL or response body.
+        """Describe an HTTP failure without exposing response contents."""
         status = getattr(getattr(exc, "response", None), "status_code", None)
         cls = RemoteObjectMissing if status == 404 else DownloadError
         detail = f"HTTP {status}" if isinstance(status, int) else type(exc).__name__
@@ -69,6 +72,7 @@ class HttpTransport(Transport):
         raise DownloadError("Metadata redirect limit exceeded")
 
     def fetch(self, relative_path, destination, *, chunk_size=8192):
+        """Stream a file to the destination, checking for cancellation."""
         try:
             with self._get(relative_path) as response:
                 response.raise_for_status()
@@ -83,6 +87,7 @@ class HttpTransport(Transport):
             raise self._error(exc) from None
 
     def read_text(self, relative_path, limit):
+        """Read metadata within the source root and byte limit."""
         content = bytearray()
         try:
             response, final_url = self._metadata_get(relative_path)

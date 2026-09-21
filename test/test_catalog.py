@@ -1,4 +1,4 @@
-"""Catalog cloning must never need dataset bodies or local content objects."""
+"""Test catalog cloning without downloading dataset files or stored objects."""
 
 from pathlib import Path
 
@@ -13,6 +13,7 @@ from hallmark.transport.base import DownloadError, RemoteObjectMissing
 
 @pytest.fixture
 def metadata_server(monkeypatch):
+    """Serve registered metadata and record each requested URL."""
     pages, reads = {}, []
 
     def read_text(context, path):

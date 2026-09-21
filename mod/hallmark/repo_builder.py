@@ -54,7 +54,7 @@ KNOWN_FIELD_VALUES: dict[str, tuple[str, ...]] = {
 
 
 def _remote_url(base_url: str, relative_path: str) -> str:
-    """Render a transport URL from a literal path, preserving directory slashes."""
+    """Construct a remote URL, preserving literal paths and directory slashes."""
     url = RemoteSpec.parse(base_url).file_url(relative_path)
     if relative_path.endswith("/") and not url.endswith("/"):
         url += "/"
@@ -378,7 +378,7 @@ def _drop_and_greedy_search(segments, rel_path):
 def _match_static_named_file_plain_only(rel_path: str, fmt_entries: list[dict]
                                         ) -> tuple[int, dict] | tuple[None, None]:
     """
-    Used by build_repo.
+    Used by _build_repo.
     Match a static named file against a list of fmt entries using only the plain parse.
 
     Args:
@@ -403,7 +403,7 @@ def _match_static_named_file_plain_only(rel_path: str, fmt_entries: list[dict]
 
 def _match_file_against_fmts(rel_path: str, fmt_entries: list[dict]):
     """
-    Used by build_repo.
+    Used by _build_repo.
     Find the best fmt entry for one file, across all of them at once.
 
     Args:
@@ -483,6 +483,7 @@ def _match_file_against_fmts(rel_path: str, fmt_entries: list[dict]):
     return best_index, best_parse
 
 def _record_checksum(checksums, path, algorithm, checksum):
+    """Keep the strongest checksum and reject conflicting digests."""
     previous_algorithm, previous = checksums.get(path, (None, None))
     if previous is not None and previous_algorithm == algorithm:
         if previous.lower() != checksum.lower():
@@ -496,7 +497,6 @@ def _record_checksum(checksums, path, algorithm, checksum):
 
 def _manifest_matches(text: str, algorithm: str) -> list[tuple[str, str]]:
     """
-    Used by list_remote_files.
     Parse a manifest text and return a list of (checksum, filename) tuples for each line
     in the manifest that has a valid checksum for the given algorithm.
 
@@ -520,7 +520,6 @@ def _manifest_matches(text: str, algorithm: str) -> list[tuple[str, str]]:
 
 def _resolve_manifest_path(filename: str, rel_dir: str) -> str:
     """
-    Used by list_remote_files.
     Resolve a manifest path relative to a given directory, ensuring it is valid.
 
     Args:
@@ -579,7 +578,6 @@ def _resolve_manifest_path(filename: str, rel_dir: str) -> str:
 
 def _normalize_index_href(href: str, *, is_directory: bool) -> str:
     """
-    Used by list_remote_files.
     Normalize an index href to ensure it is a valid relative path.
 
     Args:
@@ -622,7 +620,7 @@ def _normalize_index_href(href: str, *, is_directory: bool) -> str:
 
 def _normalize_fmt_entries(fmt_entries: list[dict]) -> list[dict]:
     """
-    Used by build_repo.
+    Used by _build_repo.
     Normalize the fmt entries to ensure they are valid and consistent.
 
     Args:
@@ -681,7 +679,22 @@ def _normalize_fmt_entries(fmt_entries: list[dict]) -> list[dict]:
 
 
 def list_remote_files(base_url: str, *, _context=None):
-    """Return a checksum inventory from an automatically detected remote listing."""
+    """
+    List remote files and their published checksums.
+
+    Args:
+        base_url (str): Exact URL root to search recursively.
+        _context (OperationContext, optional): Existing internal transport
+            context. Its remote is used when supplied.
+
+    Returns:
+        dict: Relative paths mapped to (algorithm, checksum) pairs.
+        Missing checksum values remain None.
+
+    Raises:
+        DownloadError: If discovery fails or checksum manifests conflict.
+        CapabilityError: If the source provides no supported listing.
+    """
     from .discovery import discover
 
     def inventory(context):
@@ -708,11 +721,44 @@ def build_repo(
     allow_remote_commands: bool = False,
     remote_hash: bool = False,
 ) -> "Repo":
-    """Compatibility wrapper for legacy catalog construction.
+    """
+    Build a remote catalog using the deprecated builder interface.
 
     Prefer ``Repo.clone(url, path)`` for remote catalogs and ``Repo.init(path)``
-    for local repositories. Discovery reads listings and published manifests only.
-    Missing formats default to a generic path catalog without prompting.
+    for local repositories. Discovery reads listings and published checksum
+    manifests without downloading dataset files.
+
+    Args:
+        repo_path (Path): Destination repository path.
+        dataset_name (str): Dataset name recorded in metadata and used for
+            the default CyVerse URL.
+        fmt_entries (list[dict], optional): Filename formats and TSV names.
+            If omitted, reuse existing formats or create a generic path catalog.
+        config_file (Path | str, optional): Configuration file or repository
+            directory supplying formats and, unless overridden, data remotes.
+            Cannot be combined with ``fmt_entries``.
+        remotes (list | dict | str, optional): Data remotes to record.
+            These do not change the discovery root.
+        overwrite (bool): Allow replacement of an existing destination.
+            Defaults to False; existing formats may be reused without it.
+        dataset_url (str, optional): Exact discovery root. Defaults to the
+            CyVerse curated-data directory for ``dataset_name``.
+        dataset_auth (str, optional): Local SSH profile for discovery.
+        index_format (str, optional): Obsolete listing option. None,
+            ``auto``, and ``cyverse-html`` are accepted; detection is automatic.
+        allow_remote_commands (bool): Obsolete option, ignored when supplied.
+        remote_hash (bool): Unsupported when True. Defaults to False;
+            discovery does not compute checksums from dataset contents.
+
+    Returns:
+        Repo: Repository containing the prepared catalog.
+
+    Raises:
+        ValueError: If the dataset name or catalog configuration is invalid.
+        FileExistsError: If the destination exists and cannot be reused.
+        FileNotFoundError: If the supplied configuration file is missing.
+        CapabilityError: If remote hashing or an unsupported index is requested.
+        DownloadError: If remote discovery fails.
     """
     warnings.warn(
         "build_repo is deprecated; use Repo.clone(url, path) or Repo.init(path)",
@@ -746,23 +792,27 @@ def _build_repo(
     source=None,
     ) -> "Repo":
     """
-    Build a hallmark repository from the given dataset and format entries.
-    Creates separate TSV files for each fmt, and one config.yml file with the manifest.
+    Build a catalog using a resolved data source.
 
     Args:
-        repo_path: Path where the hallmark repo will be created.
-        fmt_entries: dict entries with "fmt", "db", and optional "name" keys.
-         If None, preserve existing formats or create a generic path catalog.
-        config_file: Path to an existing config.yml file to load fmt entries from.
-        remotes: Optional list of remote repos to add to the repo. Each remote can be a
-         dict with "name" and "url" keys, or a str representing the name of the remote.
+        repo_path (Path): Destination repository path.
+        dataset_name (str): Dataset name recorded in metadata.
+        fmt_entries (list[dict], optional): Entries with ``fmt``, ``db``,
+            and optional ``name`` keys. Reuse existing formats or a generic
+            path format when omitted.
+        config_file (Path | str, optional): Configuration file or directory
+            supplying formats and data remotes.
+        remotes (list | dict | str, optional): Data remotes to record.
+        overwrite (bool): Allow replacement of the destination. Defaults
+            to False, except when reusing its existing catalog formats.
+        source (OperationContext): Resolved source supplied by ``build_repo``.
 
     Returns:
-        The initialized Repo object, sitting on the main branch.
+        Repo: Repository containing the prepared catalog.
     """
     # validate the dataset name to ensure it is a valid path component
     dataset_name = validate_path_component(dataset_name, label="dataset name")
-    # The wrapper has already resolved the exact URL, including the legacy default.
+    # build_repo resolves the source URL before calling this helper
     base_url = source.remote.url
 
     # Determine if remotes were provided by the user
@@ -816,9 +866,9 @@ def _build_repo(
     remote_files = None
     def _ensure_remote_files_listed():
         """
-        Used by build_repo.
-        Ensure that the remote files have been listed and checksums collected.
-        Defer network requests until destination and configuration validation pass.
+        List remote files after validating the destination and configuration.
+
+        Reuse the inventory on subsequent calls within this build.
         """
         # create nonlocal references to the outer variables so they can be modified
         nonlocal file_checksums, remote_files
@@ -835,7 +885,7 @@ def _build_repo(
         # sort the remote files by their relative paths for consistent ordering
         remote_files = sorted(file_checksums)
 
-    # Keep existing catalog formats when refreshing through the legacy wrapper.
+    # preserve existing formats when refreshing through the legacy builder
     reused_from_existing_repo = fmt_entries is None and bool(existing_fmt_entries)
     if reused_from_existing_repo:
         fmt_entries = existing_fmt_entries

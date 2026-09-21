@@ -1,4 +1,4 @@
-"""Discover remote file metadata without transferring dataset payloads."""
+"""Discover remote file metadata without downloading dataset contents."""
 
 from __future__ import annotations
 
@@ -41,11 +41,26 @@ def _glob_matches(path, pattern):
 
 @lru_cache(maxsize=128)
 def _format_parser(fmt):
+    """Compile and cache a case-sensitive filename format."""
     return parse.compile(fmt, case_sensitive=True)
 
 
 def path_matches(path: str, filter=None, fmt: str | None = None) -> bool:
-    """Match root-relative paths by glob(s), exact Hallmark format, or both."""
+    """
+    Match a relative path against globs and a filename format.
+
+    Args:
+        path (str): Path relative to the dataset root.
+        filter (str | list[str], optional): Globs to match. At least one
+            must match; ``**`` spans zero or more directories.
+        fmt (str, optional): Filename format that the complete path must match.
+
+    Returns:
+        bool: True when the path satisfies every supplied selector.
+
+    Raises:
+        ValueError: If the filter or format is invalid.
+    """
     path = str(path)
     parser = _format_parser(fmt) if fmt is not None else None
     if filter is not None:
@@ -122,6 +137,7 @@ class _IndexParser(HTMLParser):
 
 
 def _origin(url):
+    """Return connection fields used to compare directory-listing URLs."""
     return (url.scheme, url.hostname,
             url.port or (443 if url.scheme == "https" else 80),
             url.username, url.password)
@@ -135,7 +151,7 @@ def _index_link(root_url, directory, href, kind):
     resolved = urlsplit(urljoin(current, href))
     if _origin(resolved) != _origin(root):
         return None
-    # Sorting/navigation query links are not dataset objects.
+    # Sorting and navigation links do not identify dataset files.
     if resolved.query or resolved.fragment:
         return None
     root_path = unquote(root.path, errors="strict")
@@ -156,6 +172,7 @@ def _index_link(root_url, directory, href, kind):
 
 
 def _parse_index(text, root_url, directory):
+    """Extract file and directory metadata from a supported HTML index."""
     parser = _IndexParser()
     parser.feed(text)
     links = []
@@ -203,7 +220,7 @@ def _response_directory(context, requested):
 
 
 def _manifest_algorithm(path):
-    """Recognize conventional manifests; never guess from arbitrary substrings."""
+    """Identify checksum manifests by their conventional filenames."""
     name = PurePosixPath(path).name.lower()
     if re.fullmatch(r"checksums?(?:\.txt)?", name):
         return "unknown"
@@ -258,11 +275,29 @@ def _manifest_checksums(context, entries):
 
 
 def discover(context, *, filter=None, fmt=None, progress=False) -> list[RemoteEntry]:
-    """Recursively collect file metadata; formats and globs never authorize transfer.
+    """
+    Discover remote files and their published metadata recursively.
 
-    ``progress=True`` displays an indeterminate progress bar. A callable instead
-    receives dictionaries with ``directories``, ``files``, ``matched``, and
-    ``current`` keys, suitable for notebook or application rendering.
+    Directory listings and checksum manifests are read before filtering.
+    Dataset files are not downloaded to compute missing checksums.
+
+    Args:
+        context (OperationContext): Source connection and cancellation state.
+        filter (str | list[str], optional): Relative path glob or globs.
+        fmt (str, optional): Filename format that selected paths must match.
+        progress (bool | callable): True displays a progress bar with an
+            unknown total. A callback receives dictionaries containing
+            ``directories``, ``files``, ``matched``, and ``current``.
+            Defaults to False.
+
+    Returns:
+        list[RemoteEntry]: Matching files sorted by relative path.
+        Unavailable sizes, modification times, and checksums remain None.
+
+    Raises:
+        ValueError: If a filter or format is invalid.
+        CapabilityError: If the source provides no supported listing.
+        DownloadError: If discovery fails, paths are unsafe, or manifests conflict.
     """
     # Validate selectors before contacting the source, even for an empty index.
     path_matches("", filter=filter, fmt=fmt)

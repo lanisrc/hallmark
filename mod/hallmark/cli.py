@@ -116,7 +116,19 @@ def _report_download_results(results: dict) -> None:
 
 
 def _run_download(repo, plan, *, max_workers):
-    """Approve and execute exactly the plan displayed by clone or download."""
+    """
+    Display a download plan, request approval, and report the results.
+
+    Args:
+        repo: The hallmark repository object.
+        plan (DownloadPlan): Files, source, and destination to display.
+        max_workers (int): Maximum concurrent download workers.
+
+    Raises:
+        Abort: If a nonempty download is declined.
+        ClickException: If any file transfers fail.
+        DownloadError: If the download cannot be started.
+    """
     click.echo(plan.summary())
     if not plan.file_count:
         click.echo("No files selected for download.")
@@ -265,7 +277,8 @@ def add(repo, encoding, inputs):
 @click.option("--fmt")
 @click.option("--remote-name")
 @click.option("--remote-url")
-@click.option("--remote-auth", help="Local SSH profile; empty string removes it.")
+@click.option("--remote-auth",
+              help="Local SSH profile name. An empty string removes the reference.")
 @click.option("--encoding", "encodings", multiple=True)
 @click.pass_obj
 def set_config(repo, fmt, remote_name, remote_url, remote_auth, encodings):
@@ -362,27 +375,34 @@ def checkout(repo, target_branch):
         click.echo(f'Switched to branch "{target_branch}".')
 
 
-@hallmark.command(short_help="Plan and approve a dataset download.")
+@hallmark.command(short_help="Download files from the configured data remote.")
 @click.argument("files", nargs=-1)
 @click.option("--tsv", "tsv_names", multiple=True,
               help="Select a catalog TSV. May be repeated.")
 @click.option("--all", "download_all", is_flag=True,
               help="Select all cataloged files.")
 @click.option("--filter", "filters", multiple=True,
-              help="Relative path glob; ** matches recursively. May be repeated.")
-@click.option("--fmt", help="Select a parameterized filename template.")
-@click.option("--remote", "remote_name", help="Configured data remote name.")
+              help="Select paths matching a glob. ** matches recursively. "
+                   "May be repeated.")
+@click.option("--fmt", help="Select paths matching a filename format.")
+@click.option("--remote", "remote_name",
+              help="Name of the configured data remote to use.")
 @click.option("--output", type=click.Path(file_okay=False),
-              help="Output directory; defaults to the worktree.")
+              help="Output directory. Defaults to the repository worktree.")
 @click.option("--max-workers", type=click.IntRange(min=1), default=4,
               show_default=True)
 @click.option("--dry-run", is_flag=True,
-              help="Show the offline transfer plan without downloading.")
+              help="Show the download plan using only local catalog metadata.")
 @click.option("-y", "--yes", is_flag=True, hidden=True)
 @click.pass_obj
 def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
              output, max_workers, dry_run, yes):
-    """Inspect sizes and approve every nonempty dataset transfer."""
+    """
+    Download selected files from a configured data remote.
+
+    Preview the selection with --dry-run. Every nonempty download displays
+    its plan and asks for confirmation before transferring files.
+    """
     if download_all and (files or tsv_names):
         raise ClickException("--all cannot be combined with file paths or --tsv")
     if not files and not tsv_names and not download_all and not filters and not fmt:
@@ -411,20 +431,27 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
 @click.argument("path")
 @click.option("--auth", help="Optional local SSH authentication profile.")
 @click.option("--filter", "filters", multiple=True,
-              help="Relative path glob; ** matches recursively. May be repeated.")
-@click.option("--fmt", help="Parameterized filename template to catalog.")
+              help="Select paths matching a glob. ** matches recursively. "
+                   "May be repeated.")
+@click.option("--fmt",
+              help="Select paths and extract parameters using a filename format.")
 @click.option("--source-type", default="auto", show_default=True,
               type=click.Choice(["auto", "git", "directory", "catalog"]),
               help="Override automatic source detection.")
 @click.option("--download", "fetch_data", is_flag=True,
-              help="Plan and request approval for downloads after catalog creation.")
+              help="Request a download after catalog creation, with confirmation.")
 @click.option("--no-fetch-data", is_flag=True, hidden=True)
 @click.option("--max-workers", type=click.IntRange(min=1), default=4,
               show_default=True)
 @click.option("-y", "--yes", is_flag=True, hidden=True)
 def clone(url, path, auth, filters, fmt, source_type, fetch_data, no_fetch_data,
           max_workers, yes):
-    """Prepare local .hm metadata; dataset files are not downloaded by default."""
+    """
+    Clone a catalog or index a remote data directory at PATH.
+
+    Dataset files are not downloaded by default. Use --download to review
+    and approve a transfer after the catalog has been created.
+    """
     if fetch_data and no_fetch_data:
         raise ClickException("--download conflicts with --no-fetch-data")
     if yes:
@@ -457,19 +484,19 @@ def clone(url, path, auth, filters, fmt, source_type, fetch_data, no_fetch_data,
     "--config-file", "config_file",
     type=click.Path(exists=True, dir_okay=True, file_okay=True),
     help="Path to config.yml or a repository directory containing config.yml. "
-         "build_repo loads fmts (and remotes unless --remote is provided).")
+         "Load formats and, unless --remote is given, data remotes.")
 @click.option(
     "--fmt", "fmts", multiple=True,
-    help="A fmt entry to use directly, as FMT=DB (e.g. "
-         "'a{a}_i{i}.h5=data.tsv'). May be repeated for multiple fmts; "
-         "skips the prompt entirely.")
+    help="Filename format and TSV name, as FMT=DB (e.g. "
+         "'a{a}_i{i}.h5=data.tsv'). May be repeated for multiple formats.")
 @click.option(
     "--overwrite",
     is_flag=True,
     help="Replace the destination repository if it already exists.")
 @click.option("--dataset-url",
-              help="Exact crawl root, independent of recorded remotes.")
-@click.option("--dataset-auth", help="Local SSH profile for the crawl source.")
+              help="Exact dataset URL to search recursively. Recorded remotes "
+                   "do not change this root.")
+@click.option("--dataset-auth", help="Local SSH profile for the dataset source.")
 @click.option("--index-format", type=click.Choice(["cyverse-html"]), hidden=True)
 @click.option("--allow-remote-commands", is_flag=True,
               hidden=True, help="Deprecated; discovery uses SFTP.")
@@ -478,30 +505,18 @@ def clone(url, path, auth, filters, fmt, source_type, fetch_data, no_fetch_data,
 def build(directory, dataset_name, remotes, config_file, fmts, overwrite,
           dataset_url, dataset_auth, index_format, allow_remote_commands, remote_hash):
     """
-    Build a hallmark repository at DIRECTORY for the remote dataset DATASET_NAME.
+    Build a catalog at DIRECTORY/DATASET_NAME.hm.
 
-    The dataset is fetched from the remote index and stored in a new hallmark
-    repository at DIRECTORY. The remotes can be specified with
-    --remote NAME=URL or --remote NAME.
-    if no remotes are specified, the default remote from the dataset index will be used.
-    --config-file: Optional path to an existing config.yml to load fmts and remotes
-    --fmt: Optional fmt entries to use directly, specified as FMT=DB. May be repeated
-    for multiple fmts.
-    --overwrite: Optional flag to replace the destination repo if it already exists.
+    This command is deprecated. Use hallmark clone URL PATH for remote
+    datasets, or hallmark init PATH to create a local repository.
 
-    Arguments:
+    --dataset-url selects the exact discovery root; otherwise DATASET_NAME
+    identifies a dataset beneath the CyVerse curated-data directory.
+    --remote records data locations without changing the discovery root.
 
-        DIRECTORY: The file system path where the hallmark repository will be created.
-        DATASET_NAME: The name of the remote dataset to fetch.
-        --remote: Optional remote(s) to record, specified as NAME=URL or just NAME.
-        May be repeated for multiple remotes.
-        --config-file: Optional path to an existing config.yml to load fmts and remotes.
-        --fmt: Optional fmt entries to use directly, specified as FMT=DB.
-
-    Raises:
-        ClickException: If there is an error during the build process, such as
-        a network error, Git error, or invalid dataset name.
-
+    Supply filename formats with --fmt or --config-file. If neither is
+    provided, existing formats are reused or a generic path catalog is
+    created. Dataset files are not downloaded during catalog creation.
     """
     click.echo("build is deprecated; use hallmark clone URL PATH.", err=True)
     if config_file and fmts:

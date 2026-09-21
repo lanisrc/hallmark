@@ -34,9 +34,11 @@ class MockServer:
         return False
 
     def close(self):
+        """Provide the Requests session cleanup interface for tests."""
         pass
 
     def get(self, url, timeout=None, stream=False, allow_redirects=True):
+        """Return a registered response through the Requests session interface."""
         return self.fake_get(url, timeout=timeout)
 
     def head(self, url, timeout=None):

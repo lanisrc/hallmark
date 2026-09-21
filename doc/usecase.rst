@@ -153,8 +153,8 @@ automatically try another server if the download fails.
 Downloads are written to temporary files and checked against any
 checksums supplied with the selection before atomically replacing
 their destinations.
-The ``--tsv`` and ``--all`` options include catalog checksums; explicit
-paths alone do not look them up.
+The ``--tsv`` and ``--all`` options include catalog checksums. Explicit
+paths also use their recorded checksums when available.
 If a transfer or checksum check fails, the existing destination is
 preserved and the temporary file is removed.
 Files that have already downloaded successfully remain available.
@@ -164,8 +164,8 @@ SSH access and file paths
 
 The client requires OpenSSH ``ssh`` and ``sftp`` version 9.6 or newer
 with connection multiplexing enabled.
-Linux and macOS have integration-test jobs; check the macOS job's result
-before relying on that platform. Windows SSH transport is not supported.
+Linux and macOS have integration-test jobs. Windows SSH transport is
+not supported.
 HTTP downloads continue to use Requests, including its environment
 settings and ``.netrc`` authentication.
 
@@ -285,24 +285,26 @@ both discovery and downloads. Symlinks and special files are skipped.
 Authentication and permission failures stop discovery rather than producing
 an apparently complete catalog.
 
-The generated data ``origin`` records the source URL and optional profile name.
+The generated data remote ``origin`` records the source URL and optional
+profile name.
 Existing Git-hosted catalogs keep their recorded data remotes when cloned.
 A filter on an existing Git catalog creates a local metadata commit while
 preserving fetched history; it does not fetch the dataset's content objects.
 
-Published checksum manifests are retained. Missing checksums remain unknown;
-Hallmark never downloads files or hashes them on the server merely to finish
-a catalog. Downloads verify any available publisher checksum. No global
-five-minute crawl deadline or 100,000-entry cap limits the requested tree;
-individual requests remain bounded and discovery can be cancelled.
+Published manifest checksums are recorded in the catalog. Missing checksums
+remain unknown; |hallmark|_ does not read dataset files locally or on the
+server to compute them during discovery. Downloads verify any available
+publisher checksum. Discovery covers the requested tree without an overall
+time or entry limit. Individual requests have limits, and discovery can
+be cancelled.
 
 CyVerse and common HTTPS directory indexes are detected automatically::
 
     hallmark clone https://data.desi.lbl.gov/public/ desi --filter '**/*.fits'
 
-A server with no usable listing must provide a published catalog or file
-manifest through a supported adapter. Discovery cannot enumerate arbitrary
-hidden URLs. HTTP/SFTP catalog snapshots start local history; Git endpoints
+A server with no usable listing must provide a published Hallmark catalog.
+Discovery cannot find files whose URLs are absent from both the listing and
+catalog. HTTP/SFTP catalog snapshots start local history; Git endpoints
 supply catalog history. Use ``--source-type git`` for ambiguous Git URLs.
 
 Frank can also inspect and approve a transfer in Python::
@@ -319,7 +321,8 @@ sizes and duration estimates are reported as unknown. During transfer,
 progress reports bytes and estimates remaining time when possible.
 ``build`` and ``build_repo`` remain deprecated compatibility interfaces.
 Local ``add``, ``commit`` and ``checkout`` retain their existing format and
-local-object requirements; preparing a remote catalog does not materialize it.
+local-object requirements; preparing a remote catalog does not populate the
+local object store.
 
 Transport validation
 ~~~~~~~~~~~~~~~~~~~~
