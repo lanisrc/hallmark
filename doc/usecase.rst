@@ -67,14 +67,19 @@ worktree.
 
 Carol wants to manage data from multiple simultaneous observations
 without mixing data.
-She creates a new branch and attach a second worktree to it::
+She attaches a second worktree for a new branch, which is created from
+the current branch when it does not already exist::
 
-    hallmark branch obs2
-    hallmark worktree add remote:/data/obs obs2
+    hallmark worktree add /data/obs obs2
 
-She lists linked worktrees and continue on the new branch::
+The branch name is optional and defaults to the final component of the
+destination path, so ``hallmark worktree add /data/obs`` would attach a
+branch named ``obs`` instead.
+
+She lists linked worktrees and continues on the new branch::
 
     hallmark worktree list
+    cd /data/obs
     hallmark status
     hallmark add "{site}/{year:d}/{day:d}.fits"
     hallmark commit -m "Observation ingest on branch obs2"
