@@ -814,6 +814,71 @@ class Repo:
         # if checkout process completes successfully, return True to indicate success
         return True
 
+    def list_worktrees(self) -> list[dict[str, object]]:
+        '''
+        List the worktrees linked to this repository.
+
+        Each entry describes one linked ``.hm`` git worktree together with
+        the hallmark worktree (data directory) that it backs.
+
+        Returns:
+            list[dictionary[string, object]]: One entry per linked worktree,
+            containing:
+                - ``dothm`` (Path): the ``.hm`` directory tracked by git
+                - ``path`` (Path | None): the hallmark worktree, or ``None``
+                  for a bare repository with no data directory
+                - ``branch`` (string | None): the checked-out branch, or
+                  ``None`` when the worktree is detached
+                - ``current`` (boolean): whether this is the active worktree
+        '''
+        # "--porcelain" is the stable, line-oriented format; the human-readable
+        # listing is not guaranteed to stay parseable across git versions.
+        output = self.dothm.git.worktree("list", "--porcelain")
+
+        active = Path(self.dothm.path).resolve()
+        entries: list[dict[str, object]] = []
+        entry: dict[str, object] = {}
+
+        def flush() -> None:
+            """Emit the record built so far, if a worktree line started one."""
+            dothm_path = entry.get("dothm")
+            # records without a "worktree" line are incomplete, so skip them
+            if dothm_path is None:
+                return
+            entries.append({
+                "dothm": dothm_path,
+                "path": entry.get("path"),
+                "branch": entry.get("branch"),
+                "current": dothm_path.resolve() == active,
+            })
+            entry.clear()
+
+        for line in output.splitlines():
+            line = line.strip()
+            # blank lines separate records in the porcelain format
+            if not line:
+                flush()
+                continue
+
+            keyword, _, value = line.partition(" ")
+            if keyword == "worktree":
+                # a new record begins here, so emit whatever preceded it
+                flush()
+                dothm_path = Path(value)
+                entry["dothm"] = dothm_path
+                # a ".hm" directory lives inside its worktree; a "name.hm"
+                # repository is bare and has no data directory of its own
+                entry["path"] = (dothm_path.parent
+                                 if dothm_path.name == ".hm" else None)
+            elif keyword == "branch":
+                # "refs/heads/main" -> "main"
+                entry["branch"] = value.rpartition("/")[2] or None
+
+        # the final record is not followed by a blank line
+        flush()
+
+        return entries
+
     def add_worktree(self, target_branch: str) -> bool:
         '''
         Create or link a new worktree for a branch. Raises ValueError if branch name

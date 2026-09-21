@@ -24,7 +24,7 @@ from git import Repo as GitRepo
 from git.exc import GitError
 from types import SimpleNamespace
 
-from hallmark import ParaFrame
+from hallmark import ParaFrame, Repo
 from hallmark.cli import hallmark
 from hallmark.downloader import DownloadError, BULK_DOWNLOAD_WARNING_FILE_COUNT
 from hallmark.helper_functions import chdir
@@ -487,6 +487,40 @@ def test_cli_branch_lists_local_branches_and_marks_current():
                 f"Expected '* experiment' to mark current branch, got: {result.output}"
 
 
+def test_cli_worktree_list_marks_active_worktree():
+    """
+    Test the hallmark CLI 'worktree list' command. This test initializes a hallmark
+    repository, links a worktree for a second branch, and verifies that both worktrees
+    are listed with their branches and that the active one is marked.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with chdir("repo"):
+            Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "add first file"])
+            runner.invoke(hallmark, ["checkout", "experiment"])
+            runner.invoke(hallmark, ["commit", "-m", "experiment data"])
+            runner.invoke(hallmark, ["checkout", "main"])
+            Repo(".").add_worktree("experiment")
+
+            result = runner.invoke(hallmark, ["worktree", "list"])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for worktree list, got {result.exit_code}"
+            lines = [line for line in result.output.splitlines() if line.strip()]
+            assert len(lines) == 2, \
+                f"Expected two worktrees listed, got: {result.output}"
+            current = [line for line in lines if line.startswith("*")]
+            assert len(current) == 1, \
+                f"Expected exactly one worktree marked current, got: {result.output}"
+            assert "[main]" in current[0], \
+                f"Expected the active worktree to be on main, got: {current[0]}"
+            assert any("[experiment]" in line for line in lines), \
+                f"Expected the linked worktree on experiment, got: {result.output}"
+
+
 def test_cli_help_lists_commands():
     """
     Test that the hallmark CLI '--help' command lists all available commands.
@@ -521,6 +555,8 @@ def test_cli_help_lists_commands():
         f"Expected 'build' command in help output, got: {result.output}"
     assert "download" in result.output, \
         f"Expected 'download' command in help output, got: {result.output}"
+    assert "worktree" in result.output, \
+        f"Expected 'worktree' command in help output, got: {result.output}"
 
 
 ### clone tests ###

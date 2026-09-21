@@ -2246,6 +2246,62 @@ def test_add_worktree_rejects_invalid_data_config_before_creation(tmp_path):
         f"Expected destination {destination} to not exist, but it does."
 
 
+def test_list_worktrees_reports_only_the_active_worktree_initially(tmp_path):
+    """
+    Test that a freshly initialized repository lists exactly one worktree, its own.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+
+    entries = repo.list_worktrees()
+
+    assert len(entries) == 1, f"Expected exactly one worktree, got {len(entries)}"
+    entry = entries[0]
+    assert entry["current"] is True, "Expected the only worktree to be the active one."
+    assert entry["branch"] == "main", \
+        f"Expected branch 'main', got {entry['branch']}"
+    assert Path(entry["path"]).resolve() == Path(repo.worktree).resolve(), \
+        f"Expected path {repo.worktree}, got {entry['path']}"
+
+
+def test_list_worktrees_reports_linked_worktrees_and_their_branches(tmp_path):
+    """
+    Test that a linked worktree is reported with its own branch and data directory,
+    and that only the active worktree is marked as current.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    data_path = repo.worktree / "data_1.txt"
+    data_path.write_text("main contents\n", encoding="utf-8")
+    repo.add("data_{number}.txt")
+    repo.commit("main data")
+    repo.checkout("experiment")
+    data_path.write_text("experiment contents\n", encoding="utf-8")
+    repo.add(".")
+    repo.commit("experiment data")
+    repo.checkout("main")
+    repo.add_worktree("experiment")
+
+    entries = repo.list_worktrees()
+    by_branch = {entry["branch"]: entry for entry in entries}
+
+    assert set(by_branch) == {"main", "experiment"}, \
+        f"Expected branches main and experiment, got {sorted(by_branch)}"
+    assert by_branch["main"]["current"] is True, \
+        "Expected the main worktree to be the active one."
+    assert by_branch["experiment"]["current"] is False, \
+        "Expected the linked worktree to not be the active one."
+    # the reported path is the data directory, not the ".hm" directory git tracks
+    assert Path(by_branch["experiment"]["path"]).resolve() \
+        == (tmp_path / "experiment").resolve(), \
+        f"Expected path {tmp_path / 'experiment'}, " \
+        f"got {by_branch['experiment']['path']}"
+    assert Path(by_branch["experiment"]["dothm"]).name == ".hm", \
+        f"Expected a \".hm\" dothm path, got {by_branch['experiment']['dothm']}"
+
+
 def test_add_worktree_wraps_existing_branch_link_failure(monkeypatch, tmp_path):
     """
     Test that adding a worktree wraps a failure in the dothm.link method with a

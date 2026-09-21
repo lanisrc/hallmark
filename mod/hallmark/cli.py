@@ -400,6 +400,35 @@ def checkout(repo, target_branch):
         click.echo(f'Switched to branch "{target_branch}".')
 
 
+@hallmark.group(short_help="Manage hallmark worktrees.")
+def worktree():
+    """Manage the worktrees linked to this hallmark repository.
+
+    A worktree is a data directory backed by its own `.hm` git worktree,
+    so several branches can be checked out at the same time.
+    """
+
+
+@worktree.command("list", short_help="List linked hallmark worktrees.")
+@click.pass_obj
+def worktree_list(repo):
+    """List the worktrees linked to this hallmark repository.
+
+    The active worktree is marked with `*`.
+    """
+    # use the _translate_cli_errors context manager to handle specific exceptions
+    with _translate_cli_errors(*_REPO_READ_ERRORS):
+        entries = repo.list_worktrees()
+
+    for entry in entries:
+        prefix = "*" if entry["current"] else " "
+        # show the data directory when there is one; a bare repository has
+        # only its ".hm" path to report
+        location = entry["path"] or entry["dothm"]
+        branch = entry["branch"] or "(detached)"
+        click.echo(f"{prefix} {location}  [{branch}]")
+
+
 @hallmark.command(
     short_help="Download files from the configured data remote.")
 @click.argument("files", nargs=-1)
