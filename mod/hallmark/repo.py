@@ -1033,3 +1033,81 @@ class Repo:
                     f'"{target_branch}": {exc}') from exc
 
         return True
+    def remove_worktree(
+        self,
+        path: Union[Path, str],
+        force: bool = False,
+    ) -> bool:
+        '''
+        Remove a linked worktree and delete its data directory.
+
+        Args:
+            path (Path | string): The worktree to remove.
+            force (boolean): Remove the worktree even when it holds
+                uncommitted or untracked files.
+        Returns:
+            boolean: True if the worktree was removed.
+        Raises:
+            ValueError: If the path is the current or the main worktree.
+            FileNotFoundError: If the path is not a hallmark worktree.
+            RuntimeError: If the worktree is not clean and ``force`` is not
+                set, or if git fails to remove it.
+        '''
+        target = Path(path).expanduser().resolve()
+        # removing the worktree in use would delete the directory being worked in
+        if (self.worktree is not None
+                and target == Path(self.worktree).resolve()):
+            raise ValueError("cannot remove the current worktree")
+
+        target_dothm = target / ".hm"
+        if not target_dothm.is_dir():
+            raise FileNotFoundError(f'"{target}" is not a hallmark worktree')
+
+        # the main worktree owns the object store the linked ones share, so it is
+        # never a candidate for removal
+        main_dothm = Path(self.dothm.common_dir).resolve().parent
+        if target_dothm.resolve() == main_dothm:
+            raise ValueError("cannot remove the main worktree of the repository")
+
+        if not force:
+            # inspect the target on its own terms; its branch and its tracked
+            # files are independent of the worktree this call was made from
+            snapshot = Repo(target).status()
+            # untracked files count as unsaved work too, since the data directory
+            # is deleted wholesale below
+            unsaved = (
+                snapshot["worktree"]["modified"]
+                or snapshot["worktree"]["deleted"]
+                or snapshot["staged"]["state"]
+                or snapshot["untracked"])
+            if unsaved:
+                raise RuntimeError(
+                    f'worktree "{target}" has uncommitted or untracked files; '
+                    "commit them or use force to discard them")
+
+        try:
+            # "--force" here only tells git not to second-guess the checkout; the
+            # cleanliness decision was already made above
+            self.dothm.git.worktree("remove", "--force", str(target_dothm))
+        except GitCommandError as exc:
+            raise RuntimeError(
+                f'failed to remove worktree "{target}": {exc}') from exc
+
+        # git only owns the ".hm" directory, so the data directory it backed has
+        # to be cleaned up separately
+        rmtree(target, ignore_errors=True)
+        return True
+
+    def prune_worktrees(self) -> list[str]:
+        '''
+        Drop records of worktrees whose directories no longer exist.
+
+        Returns:
+            list[string]: The ``.hm`` paths whose records were dropped.
+        '''
+        # compare the listing either side of the prune so the caller can report
+        # exactly which stale records went away
+        before = {str(entry["dothm"]) for entry in self.list_worktrees()}
+        self.dothm.git.worktree("prune")
+        after = {str(entry["dothm"]) for entry in self.list_worktrees()}
+        return sorted(before - after)

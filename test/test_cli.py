@@ -19,6 +19,7 @@ import yaml
 import importlib
 import pytest
 from pathlib        import Path
+from shutil         import rmtree
 from click.testing  import CliRunner
 from git import Repo as GitRepo
 from git.exc import GitError
@@ -577,6 +578,97 @@ def test_cli_worktree_list_marks_active_worktree():
                 f"Expected the active worktree to be on main, got: {current[0]}"
             assert any("[experiment]" in line for line in lines), \
                 f"Expected the linked worktree on experiment, got: {result.output}"
+
+
+def test_cli_worktree_remove_deletes_the_worktree():
+    """
+    Test the hallmark CLI 'worktree remove' command. This test links a worktree,
+    removes it, and verifies that its directory is deleted and it stops being listed.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with chdir("repo"):
+            Path("a0_i0.h5").write_text("main contents\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "main data"])
+            runner.invoke(hallmark, ["worktree", "add", "../linked", "experiment"])
+            assert Path("../linked").is_dir(), "Expected the worktree to be created."
+
+            result = runner.invoke(hallmark, ["worktree", "remove", "../linked"])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for worktree remove, got {result.exit_code}: " \
+                f"{result.output}"
+            assert not Path("../linked").exists(), \
+                "Expected the worktree directory to be deleted."
+            listed = runner.invoke(hallmark, ["worktree", "list"])
+            assert "[experiment]" not in listed.output, \
+                f"Expected the worktree to stop being listed, got: {listed.output}"
+
+
+def test_cli_worktree_remove_requires_force_for_untracked_files():
+    """
+    Test that 'worktree remove' refuses a worktree holding untracked files unless
+    --force is given, since the whole directory would otherwise be deleted.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with chdir("repo"):
+            Path("a0_i0.h5").write_text("main contents\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "main data"])
+            runner.invoke(hallmark, ["worktree", "add", "../linked", "experiment"])
+            Path("../linked/notes.txt").write_text("scratch\n", encoding="utf-8")
+
+            refused = runner.invoke(hallmark, ["worktree", "remove", "../linked"])
+
+            assert refused.exit_code != 0, \
+                f"Expected a non-zero exit code, got {refused.exit_code}"
+            assert "uncommitted or untracked files" in refused.output, \
+                f"Expected an unsaved-files error, got: {refused.output}"
+            assert Path("../linked").exists(), \
+                "Expected the worktree to be preserved when the removal is refused."
+
+            forced = runner.invoke(
+                hallmark, ["worktree", "remove", "../linked", "--force"])
+
+            assert forced.exit_code == 0, \
+                f"Expected exit code 0 for a forced removal, got {forced.exit_code}: " \
+                f"{forced.output}"
+            assert not Path("../linked").exists(), \
+                "Expected a forced removal to delete the worktree."
+
+
+def test_cli_worktree_prune_reports_stale_records():
+    """
+    Test the hallmark CLI 'worktree prune' command. This test deletes a worktree
+    directory by hand and verifies that pruning clears the record it leaves behind.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with chdir("repo"):
+            Path("a0_i0.h5").write_text("main contents\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "main data"])
+            runner.invoke(hallmark, ["worktree", "add", "../linked", "experiment"])
+
+            empty = runner.invoke(hallmark, ["worktree", "prune"])
+            assert "No stale worktree records" in empty.output, \
+                f"Expected nothing to prune, got: {empty.output}"
+
+            rmtree(Path("../linked"))
+            result = runner.invoke(hallmark, ["worktree", "prune"])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for worktree prune, got {result.exit_code}"
+            assert "Pruned 1 stale worktree record" in result.output, \
+                f"Expected one pruned record, got: {result.output}"
+            listed = runner.invoke(hallmark, ["worktree", "list"])
+            assert "[experiment]" not in listed.output, \
+                f"Expected the stale record to be gone, got: {listed.output}"
 
 
 def test_cli_help_lists_commands():

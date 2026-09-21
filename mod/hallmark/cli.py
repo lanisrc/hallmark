@@ -450,6 +450,48 @@ def worktree_list(repo):
         click.echo(f"{prefix} {location}  [{branch}]")
 
 
+@worktree.command("remove", short_help="Remove a linked hallmark worktree.")
+@click.argument("path")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Remove the worktree even if it has uncommitted or untracked files.")
+@click.pass_obj
+def worktree_remove(repo, path, force):
+    """Remove the linked worktree at PATH and delete its data directory.
+
+    The branch the worktree was on is left alone; delete it separately if
+    you no longer want it.
+    """
+    # use the _translate_cli_errors context manager to handle specific exceptions
+    with _translate_cli_errors(*_REPO_READ_ERRORS):
+        repo.remove_worktree(path, force=force)
+
+    click.echo(f'Removed worktree at "{path}".')
+
+
+@worktree.command("prune", short_help="Drop stale worktree records.")
+@click.pass_obj
+def worktree_prune(repo):
+    """Drop records of worktrees whose directories no longer exist.
+
+    This cleans up after a worktree directory is deleted by hand rather
+    than with `hallmark worktree remove`.
+    """
+    # use the _translate_cli_errors context manager to handle specific exceptions
+    with _translate_cli_errors(*_REPO_READ_ERRORS):
+        pruned = repo.prune_worktrees()
+
+    if not pruned:
+        click.echo("No stale worktree records to prune.")
+        # bail out early since there is nothing to report
+        return
+
+    click.echo(f"Pruned {len(pruned)} stale worktree record(s):")
+    for dothm_path in pruned:
+        click.echo(f"  {dothm_path}")
+
+
 @hallmark.command(
     short_help="Download files from the configured data remote.")
 @click.argument("files", nargs=-1)

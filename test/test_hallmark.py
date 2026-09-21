@@ -1,4 +1,5 @@
 from pathlib import Path
+from shutil import rmtree
 
 import pandas as pd
 import pytest
@@ -2391,6 +2392,121 @@ def test_add_worktree_rejects_a_destination_that_is_already_a_worktree(tmp_path)
     with pytest.raises(DestinationExistsError,
                        match="is already a Hallmark worktree"):
         repo.add_worktree("main", path=destination)
+
+
+def test_remove_worktree_deletes_the_data_directory_and_keeps_the_branch(tmp_path):
+    """
+    Test that removing a clean worktree deletes its data directory and drops it from
+    the listing, while leaving the branch it was on intact.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_with_second_branch(tmp_path)
+    destination = tmp_path / "linked"
+    repo.add_worktree("experiment", path=destination)
+
+    assert repo.remove_worktree(destination) is True, \
+        "Expected remove_worktree to report success."
+    assert not destination.exists(), \
+        f"Expected {destination} to be deleted, but it still exists."
+    listed = {entry["branch"] for entry in repo.list_worktrees()}
+    assert listed == {"main"}, f"Expected only main to remain, got {listed}"
+    # the branch itself is a separate object and must survive the removal
+    assert "experiment" in {head.name for head in repo.dothm.heads}, \
+        "Expected the experiment branch to survive worktree removal."
+
+
+@pytest.mark.parametrize("unsaved", ["modified", "untracked"])
+def test_remove_worktree_refuses_to_discard_unsaved_files(tmp_path, unsaved):
+    """
+    Test that removing a worktree holding modified or untracked files is refused,
+    since the whole data directory would otherwise be deleted.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+        unsaved: which kind of unsaved file to leave in the worktree.
+    """
+    repo = _repo_with_second_branch(tmp_path)
+    destination = tmp_path / "linked"
+    repo.add_worktree("experiment", path=destination)
+    if unsaved == "modified":
+        (destination / "data_1.txt").write_text("edited\n", encoding="utf-8")
+    else:
+        (destination / "notes.txt").write_text("scratch\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="uncommitted or untracked files"):
+        repo.remove_worktree(destination)
+    assert destination.exists(), \
+        f"Expected {destination} to be preserved, but it was removed."
+    # force discards them deliberately
+    assert repo.remove_worktree(destination, force=True) is True, \
+        "Expected a forced removal to succeed."
+    assert not destination.exists(), \
+        f"Expected {destination} to be deleted by a forced removal."
+
+
+def test_remove_worktree_refuses_the_current_and_main_worktrees(tmp_path):
+    """
+    Test that neither the worktree in use nor the main worktree can be removed.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_with_second_branch(tmp_path)
+    destination = tmp_path / "linked"
+    repo.add_worktree("experiment", path=destination)
+
+    with pytest.raises(ValueError, match="cannot remove the current worktree"):
+        repo.remove_worktree(repo.worktree)
+    # the main worktree is off limits even when asked from a linked one
+    linked = Repo(destination)
+    with pytest.raises(ValueError, match="cannot remove the main worktree"):
+        linked.remove_worktree(tmp_path / "repo")
+    assert (tmp_path / "repo").exists(), \
+        "Expected the main worktree to be preserved."
+
+
+def test_remove_worktree_rejects_a_path_that_is_not_a_worktree(tmp_path):
+    """
+    Test that removing a path which is not a hallmark worktree raises rather than
+    deleting whatever happens to be there.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    (unrelated / "keep.txt").write_text("keep\n", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="is not a hallmark worktree"):
+        repo.remove_worktree(unrelated)
+    assert (unrelated / "keep.txt").exists(), \
+        "Expected unrelated files to be left untouched."
+
+
+def test_prune_worktrees_drops_records_for_deleted_directories(tmp_path):
+    """
+    Test that pruning reports and clears records for worktrees whose directories
+    were deleted by hand, and is a no-op when there are none.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_with_second_branch(tmp_path)
+    destination = tmp_path / "linked"
+    repo.add_worktree("experiment", path=destination)
+    assert repo.prune_worktrees() == [], \
+        "Expected nothing to prune while the worktree is intact."
+
+    rmtree(destination)
+    # the record outlives the directory until it is pruned
+    assert len(repo.list_worktrees()) == 2, \
+        "Expected the stale record to still be listed before pruning."
+
+    pruned = repo.prune_worktrees()
+
+    assert len(pruned) == 1, f"Expected one pruned record, got {pruned}"
+    assert pruned[0].endswith(".hm"), \
+        f"Expected the pruned record to name a .hm path, got {pruned[0]}"
+    assert len(repo.list_worktrees()) == 1, \
+        "Expected only the main worktree to remain listed."
 
 
 def test_add_worktree_wraps_existing_branch_link_failure(monkeypatch, tmp_path):
