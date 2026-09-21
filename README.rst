@@ -46,7 +46,7 @@ Features:
 -------------
 
 Examples of using ``ParaFrame`` with Python API or Command Line Interface (CLI)
-can be found in the Jupyter Notebook tutorials in the ``demos`` folder.
+can be found in the Jupyter Notebook tutorials in the ``demo`` folder.
 
 ``Installation``
 -----------------
@@ -101,3 +101,8 @@ deprecated in favor of ``clone``.
 
 Examples and configuration details are described in
 `Private data over SSH and SFTP <doc/private_data.rst>`_.
+
+For workflows with real EHT, DESI, Roman–Rubin simulation, and DES data,
+see the `scientific CLI guide <demo/scientific_workflows_cli.md>`_ and
+`Python notebook <demo/scientific_workflows_python.ipynb>`_. Both include
+small-data alternatives and explicit download approval.
