@@ -409,6 +409,27 @@ def worktree():
     """
 
 
+@worktree.command("add", short_help="Link a new worktree for a branch.")
+@click.argument("path")
+@click.argument("branch", required=False)
+@click.pass_obj
+def worktree_add(repo, path, branch):
+    """Create a worktree at PATH checked out to BRANCH.
+
+    BRANCH defaults to the last component of PATH, as `git worktree add`
+    does. If the branch does not exist it is created from the current
+    branch. PATH is populated with that branch's data from the object
+    store.
+    """
+    # default the branch to the destination's own name, the way git does
+    branch = branch or Path(path).expanduser().name
+    # use the _translate_cli_errors context manager to handle specific exceptions
+    with _translate_cli_errors(*_REPO_READ_ERRORS):
+        repo.add_worktree(branch, path=path)
+
+    click.echo(f'Worktree for branch "{branch}" created at "{path}".')
+
+
 @worktree.command("list", short_help="List linked hallmark worktrees.")
 @click.pass_obj
 def worktree_list(repo):

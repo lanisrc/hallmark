@@ -2200,6 +2200,55 @@ def test_add_worktree_rejects_current_worktree_destination(tmp_path):
         repo.add_worktree("repo")
 
 
+def test_add_worktree_accepts_an_explicit_destination_path(tmp_path):
+    """
+    Test that an explicit destination path is honored, including one that is neither
+    a sibling of the current worktree nor named after the branch.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    data_path = repo.worktree / "data_1.txt"
+    data_path.write_text("main contents\n", encoding="utf-8")
+    repo.add("data_{number}.txt")
+    repo.commit("main data")
+    repo.checkout("experiment")
+    data_path.write_text("experiment contents\n", encoding="utf-8")
+    repo.add(".")
+    repo.commit("experiment data")
+    repo.checkout("main")
+
+    destination = tmp_path / "nested" / "chosen-name"
+    repo.add_worktree("experiment", path=destination)
+
+    linked_file = destination / "data_1.txt"
+    assert linked_file.read_text(encoding="utf-8") == "experiment contents\n", \
+        f"Expected 'experiment contents\\n', got " \
+        f"{linked_file.read_text(encoding='utf-8')}"
+    # the default sibling destination must not have been created as well
+    assert not (tmp_path / "experiment").exists(), \
+        f"Expected no worktree at {tmp_path / 'experiment'}, but one exists."
+
+
+@pytest.mark.parametrize("destination", ["inside", "inside/deeper"])
+def test_add_worktree_rejects_destination_nested_in_current_worktree(
+        tmp_path, destination):
+    """
+    Test that a destination inside the current worktree is rejected, since the outer
+    worktree would otherwise index the nested worktree's data files.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+        destination: relative destination path inside the current worktree.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    nested = repo.worktree / destination
+
+    with pytest.raises(ValueError, match="nested inside the current worktree"):
+        repo.add_worktree("experiment", path=nested)
+    assert not nested.exists(), \
+        f"Expected nested directory {nested} to not exist, but it does."
+
+
 def test_add_worktree_preserves_unrelated_existing_destination(tmp_path):
     """
     Test that adding a worktree to an existing directory that is not a worktree

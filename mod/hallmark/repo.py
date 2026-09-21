@@ -879,7 +879,11 @@ class Repo:
 
         return entries
 
-    def add_worktree(self, target_branch: str) -> bool:
+    def add_worktree(
+        self,
+        target_branch: str,
+        path: Optional[Union[Path, str]] = None,
+    ) -> bool:
         '''
         Create or link a new worktree for a branch. Raises ValueError if branch name
         is invalid.
@@ -887,6 +891,8 @@ class Repo:
 
         Args:
             target_branch (string): Name of the branch to attach.
+            path (Path | string | None): Destination for the new worktree. When
+                omitted, a sibling directory named after the branch is used.
         Returns:
             boolean: True if the worktree was successfully created.
         '''
@@ -899,11 +905,23 @@ class Repo:
 
         # source is the current worktree path, target is the new worktree path
         source = Path(self.worktree).resolve()
-        target = resolve_contained_path(source.parent, target_branch,
-                                        label="worktree destination")
+        if path is None:
+            # the default destination is a sibling named after the branch, so it is
+            # constrained to stay beside the current worktree
+            target = resolve_contained_path(source.parent, target_branch,
+                                            label="worktree destination")
+        else:
+            # an explicit destination is the caller's own choice and may live
+            # anywhere; only the checks below still apply to it
+            target = Path(path).expanduser().resolve()
         # if the target path is the same as the source, raise a ValueError
         if target == source:
             raise ValueError("worktree destination cannot be the current worktree")
+        # a worktree nested inside another would have its data indexed by the outer
+        # one, so refuse either direction of nesting
+        if source in target.parents or target in source.parents:
+            raise ValueError(
+                "worktree destination cannot be nested inside the current worktree")
         # the dothm path for the target worktree is the ".hm" directory
         target_dothm = target / ".hm"
         # if the target path exists and is not a hallmark worktree, raise an error

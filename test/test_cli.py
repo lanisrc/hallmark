@@ -487,6 +487,64 @@ def test_cli_branch_lists_local_branches_and_marks_current():
                 f"Expected '* experiment' to mark current branch, got: {result.output}"
 
 
+def test_cli_worktree_add_creates_worktree_at_explicit_path():
+    """
+    Test the hallmark CLI 'worktree add' command. This test initializes a hallmark
+    repository with a second branch, links a worktree for it at a chosen path, and
+    verifies that the branch's data is restored there and that it is listed.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with chdir("repo"):
+            Path("a0_i0.h5").write_text("main contents\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "main data"])
+            runner.invoke(hallmark, ["checkout", "experiment"])
+            Path("a0_i0.h5").write_text("experiment contents\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "."])
+            runner.invoke(hallmark, ["commit", "-m", "experiment data"])
+            runner.invoke(hallmark, ["checkout", "main"])
+
+            result = runner.invoke(
+                hallmark, ["worktree", "add", "../chosen-name", "experiment"])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for worktree add, got {result.exit_code}: " \
+                f"{result.output}"
+            linked_file = Path("../chosen-name/a0_i0.h5")
+            assert linked_file.read_text(encoding="utf-8") == "experiment contents\n", \
+                f"Expected 'experiment contents\\n', got " \
+                f"{linked_file.read_text(encoding='utf-8')}"
+
+            listed = runner.invoke(hallmark, ["worktree", "list"])
+            assert "[experiment]" in listed.output, \
+                f"Expected the new worktree listed on experiment, got: {listed.output}"
+
+
+def test_cli_worktree_add_defaults_branch_to_destination_name():
+    """
+    Test that 'worktree add' without a BRANCH argument creates and checks out a branch
+    named after the destination directory, the way 'git worktree add' does.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with chdir("repo"):
+            Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "main data"])
+
+            result = runner.invoke(hallmark, ["worktree", "add", "../scratch-run"])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for worktree add, got {result.exit_code}: " \
+                f"{result.output}"
+            branches = runner.invoke(hallmark, ["branch"])
+            assert "scratch-run" in branches.output, \
+                f"Expected a 'scratch-run' branch, got: {branches.output}"
+
+
 def test_cli_worktree_list_marks_active_worktree():
     """
     Test the hallmark CLI 'worktree list' command. This test initializes a hallmark
