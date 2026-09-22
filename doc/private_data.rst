@@ -152,13 +152,11 @@ Declining keeps the new catalog available; an empty selection needs no approval:
        --filter 'runs/run_001.h5' --with-download
 
 An existing catalog can be cloned from a local path, a Git endpoint, or an
-HTTP/SFTP directory containing its metadata:
+HTTP/SFTP directory containing its metadata. For example, copy this catalog:
 
 .. code-block:: bash
 
    hallmark clone ./.hm ../lab-copy
-   hallmark clone 'https://git.example.org/team/lab.git' ../lab-history
-   hallmark clone 'https://data.example.org/catalogs/lab.hm/' ../lab-snapshot
 
 Git endpoints preserve the complete catalog and history. Published HTTP/SFTP
 snapshots start new local history. A snapshot URL may name the metadata
@@ -171,7 +169,7 @@ connection failures and malformed snapshots are reported rather than treated
 as dataset directories. Use ``init --from`` for raw datasets.
 
 Clone filters and formats select files to download, leaving the full catalog
-and Git HEAD unchanged. They require ``--with-download`` (the older
+and its history unchanged. They require ``--with-download`` (the older
 ``--download`` spelling remains an alias):
 
 .. code-block:: bash
@@ -180,8 +178,8 @@ and Git HEAD unchanged. They require ``--with-download`` (the older
        --filter 'runs/run_001.h5' --with-download
 
 ``--no-fetch-data`` remains a compatibility alias for the default behavior
-without payload downloads. Git authentication and data authentication are
-independent; cloning a catalog does not require its payload credentials.
+without dataset downloads. Git authentication and data authentication are
+independent; cloning a catalog does not require credentials for its data.
 
 4. Use a local authentication profile
 -------------------------------------
@@ -267,7 +265,8 @@ Inspect the plan, then approve the download:
 Without ``approved=True``, a nonempty transfer raises ``DownloadError`` before
 opening a connection. A plan freezes the selected files, source URL, profile
 reference, backend, backend options and destination. Later catalog or remote
-configuration changes do not redirect it. ``plan_download(filter="**/*.h5")`` scopes the complete catalog;
+configuration changes do not redirect it. ``plan_download(filter="**/*.h5")``
+selects matching files from the catalog;
 ``plan_download(output_path="subset", tsv_names=["data.tsv"])`` selects a TSV
 and destination. Planning makes no network requests. Known size totals and
 unknown-size counts are available as ``known_bytes`` and
@@ -303,9 +302,11 @@ such as DESI. No CyVerse-specific index option is required:
 .. code-block:: bash
 
    hallmark init ./cyverse --from \
-       'https://data.cyverse.org/dav-anon/iplant/commons/cyverse_curated/EHTC_FirstM87Results_Apr2019/' \
-       --filter '**/*.uvfits'
-   hallmark init ./desi --from 'https://data.desi.lbl.gov/public/' --filter '**/*.fits'
+       'https://data.cyverse.org/dav-anon/iplant/commons/cyverse_curated/EHTC_FirstM87Results_Apr2019/uvfits/' \
+       --filter 'SR1_M87_2017_095_lo_hops_netcal_StokesI.uvfits'
+   hallmark init ./desi --from \
+       'https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/23040/' \
+       --filter 'redrock-main-dark-23040.fits'
 
 Each URL is the full recursive discovery root. A broad root can require many
 listing requests even with a file filter; use a specific subtree when that is
@@ -322,18 +323,19 @@ without ``--dry-run``. Python follows the same steps:
    cyverse = Repo.init(
        "cyverse-python",
        from_url="https://data.cyverse.org/dav-anon/iplant/commons/"
-                "cyverse_curated/EHTC_FirstM87Results_Apr2019/",
-       filter="**/*.uvfits", progress=True,
+                "cyverse_curated/EHTC_FirstM87Results_Apr2019/uvfits/",
+       filter="SR1_M87_2017_095_lo_hops_netcal_StokesI.uvfits", progress=True,
    )
    desi = Repo.init(
-       "desi-python", from_url="https://data.desi.lbl.gov/public/",
-       filter="**/*.fits", progress=True,
+       "desi-python",
+       from_url="https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/"
+                "healpix/main/dark/230/23040/",
+       filter="redrock-main-dark-23040.fits", progress=True,
    )
-   plan = desi.plan_download(filter="dr1/**/selected-file.fits")
+   plan = desi.plan_download(all_files=True)
    print(plan.summary())
-   # Replace the illustrative pattern with an actual catalog path, inspect,
-   # and authorize only the intended selection:
-   # result = desi.download(plan, approved=True, progress=True)
+
+Inspect this plan and approve it as in the Python download example above.
 
 HTTP provides file transfer but does not define directory enumeration. Hallmark
 recognizes supported HTML indexes and directory landing pages automatically.
@@ -344,7 +346,7 @@ API. Hallmark cannot infer hidden file URLs.
 7. Host catalogs separately from their data
 -------------------------------------------
 
-A catalog's location does not set its payload location. For example, a team
+A catalog's location does not set its data location. For example, a team
 can push the Git repository in ``.hm`` to GitHub while its data remote still
 points to ``ssh://lab-data/srv/exports/lab/`` with ``auth: lab``. Collaborators
 clone the existing metadata using their Git credentials:
@@ -377,13 +379,13 @@ Then clone the snapshot:
 
    hallmark clone 'https://catalogs.example.org/lab/' ./snapshot-lab
 
-Snapshot authentication uses the metadata server's settings. The SSH payload
+Snapshot authentication uses the metadata server's settings. The SSH data
 URL and ``lab`` reference are preserved without resolving that profile during
 cloning. For an SFTP snapshot, ``clone --auth catalog-reader`` selects its
 metadata profile; it does not replace a data remote's profile. Snapshot
 imports start local Git history and have no upstream Git history to pull.
 These examples retain the usual local ``PATH/.hm`` layout while keeping
-catalog hosting independent of payload hosting.
+catalog hosting independent of data hosting.
 
 .. _operational-behavior-and-troubleshooting:
 

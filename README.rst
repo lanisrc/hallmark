@@ -112,6 +112,10 @@ See `Data backends <doc/backends.rst>`_ for configuration and an extension examp
 Examples and configuration details are described in
 `Private data over SSH and SFTP <doc/private_data.rst>`_.
 
-For a sequential CLI and Python walkthrough, see the
+For a sequential CLI walkthrough, see the
 `private data demo <demo/private_data_demo.md>`_. It includes catalog
-initialization, local authentication profiles and explicit download approval.
+initialization, SSH configuration and explicit download approval.
+
+The `scientific CLI workflows <demo/scientific_workflows_cli.md>`_ and
+`scientific Python notebook <demo/scientific_workflows_python.ipynb>`_
+follow four examples using EHT, DESI, Roman–Rubin and local DES data.

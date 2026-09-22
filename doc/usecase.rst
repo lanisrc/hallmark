@@ -38,46 +38,48 @@ Dataset files are represented through staged ``sha1`` column in
 associated with each file in different rows.
 
 
-2. CLI: Bare Repository with Worktree Ingest
---------------------------------------------
+2. CLI: Bare Repository with Explicit Downloads
+-----------------------------------------------
 
-Bob prefers managing a bare hallmark repository for storage and
-staging data from a linked worktree.
-He initialized the bare repository and verify its mode::
+Bob prefers keeping the data index separate from downloaded files.
+He initializes a bare |hallmark|_ catalog from a simulation export and
+verifies its location::
 
-    hallmark init --bare sim.hm
+    hallmark init sim.hm --from ssh://campus/srv/export/ \
+        --fmt 'run{run:d}/frame{frame:d}.h5'
     cd sim.hm
     hallmark info
 
-He then attaches a worktree, stages discovered files, and commits::
+The ``.hm`` suffix selects a bare catalog without a data worktree.
+Bob reviews the selection and approves downloading to an explicit directory::
 
-    hallmark worktree add /data/outputs
-    cd /data/outputs
-    hallmark add "run{run:d}/frame{frame:d}.h5"
-    hallmark status
-    hallmark diff
-    hallmark commit -m "Simulation snapshots"
+    hallmark download --all --output ../outputs --dry-run
+    hallmark download --all --output ../outputs
 
-The commit updates the same bare repository that owns the linked
-worktree.
+The catalog stays in ``sim.hm``; the downloaded files go to ``outputs``.
+For local ingest and versioning, Bob can initialize ``outputs`` as a
+standard repository and follow Alice's workflow.
 
 
-3. CLI: Branch-Isolated Analysis with Multiple Worktrees
---------------------------------------------------------
+3. Python: Branch-Isolated Analysis with Multiple Worktrees
+-----------------------------------------------------------
 
 Carol wants to manage data from multiple simultaneous observations
 without mixing data.
-She creates a new branch and attach a second worktree to it::
+Starting from a committed standard repository, she creates a new branch
+and attaches a second worktree through the Python API::
 
-    hallmark branch obs2
-    hallmark worktree add remote:/data/obs obs2
+    from hallmark import Repo
 
-She lists linked worktrees and continue on the new branch::
+    repo = Repo("obs")
+    repo.add_worktree("obs2")
+    second = Repo(repo.worktree.parent / "obs2")
 
-    hallmark worktree list
-    hallmark status
-    hallmark add "{site}/{year:d}/{day:d}.fits"
-    hallmark commit -m "Observation ingest on branch obs2"
+After adding observation files beneath ``obs2``, she stages and commits
+them in that worktree::
+
+    second.add("{site}/{year:d}/{day:d}.fits")
+    second.commit("Observation ingest on branch obs2")
 
 Each worktree stays isolated by branch, so staged state and commits do
 not interfere.
@@ -91,12 +93,10 @@ repository::
 
     from hallmark import Repo
 
-    repo = Repo.open("obs")
-    info = repo.info()
-    print(info.local_path, info.worktree_path)
+    repo = Repo("obs")
+    print(repo.dothm.path, repo.worktree)
 
-    for y in range(2000,2026,5):
-        repo.add(f"{{site}}/{y}/{{day:d}}.fits")  # escape {{ and }}
+    repo.add("{site}/{year:d}/{day:d}.fits")
     repo.commit("Nightly ingest")
 
 This workflow is suitable for finer control of data ingest.
@@ -105,16 +105,17 @@ This workflow is suitable for finer control of data ingest.
 5. Python: In-Memory State Workflows
 ------------------------------------
 
-Emma can use an memory-backed facade for data transformations that do
-not require git operations::
+Emma can use ``ParaFrame`` to discover and select files without
+creating a Git repository::
 
-    from hallmark import Repo
+    from hallmark import ParaFrame
 
-    repo = Repo()
-    repo.add("data/{site}/{year:d}/{day:d}.fits")
-    repo.worktree("data_transformed/{year:d}/{day:d}/{site}.fits")
+    data = ParaFrame.parse("{site}/{year:d}/{day:d}.fits", base_path="data")
+    selected = data.filter(year=2025)
+    print(selected)
 
-This is especially useful for data (re-)organization.
+This keeps the file index in memory. Emma can pass the selected paths to
+her analysis tools; filtering the index does not modify the data files.
 
 
 ..  |hallmark| replace:: ``hallmark``
@@ -289,7 +290,7 @@ The generated data remote ``origin`` records the source URL and optional
 profile name.
 Existing Git-hosted catalogs keep their complete catalog, history and
 recorded data remotes when cloned. Clone filters select optional downloads
-and require ``--with-download``; they leave Git HEAD and catalog rows unchanged.
+and require ``--with-download``; they leave the catalog and history unchanged.
 The Git catalog can be hosted separately from its data servers.
 
 Published manifest checksums are recorded in the catalog. Missing checksums
@@ -301,12 +302,15 @@ be cancelled.
 
 CyVerse and common HTTPS directory indexes are detected automatically::
 
-    hallmark init desi --from https://data.desi.lbl.gov/public/ --filter '**/*.fits'
+    hallmark init desi --from \
+        https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/23040/ \
+        --filter 'redrock-main-dark-23040.fits'
 
 A server with no usable listing needs a published Hallmark catalog or a
 backend plugin that understands its API. See :doc:`backends` for the shared
-interface and registration. Discovery cannot infer hidden file URLs. HTTP/SFTP catalog snapshots start local history; Git endpoints
-supply catalog history. Use ``--source-type git`` for ambiguous Git URLs.
+interface and registration. Discovery cannot infer hidden file URLs.
+HTTP/SFTP catalog snapshots start local history; Git endpoints supply catalog
+history. Use ``--source-type git`` for ambiguous Git URLs.
 
 Frank can also inspect and approve a transfer in Python::
 
@@ -315,7 +319,12 @@ Frank can also inspect and approve a transfer in Python::
     repo = Repo('lab')
     plan = repo.plan_download(filter='runs/run_1.h5')
     print(plan.summary())
+
+After reviewing the plan, he approves the download and checks for failures::
+
     result = repo.download(plan, approved=True, progress=True)
+    if result['failed']:
+        raise RuntimeError('\n'.join(result['errors']))
 
 Plans are built from local metadata without contacting the server. Missing
 sizes and duration estimates are reported as unknown. During transfer,

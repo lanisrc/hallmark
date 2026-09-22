@@ -97,7 +97,9 @@ Create a local repository::
 
 Initialize a catalog from a remote dataset without downloading dataset files::
 
-   hallmark init ./desi --from https://data.desi.lbl.gov/public/ --filter '**/*.fits'
+   hallmark init ./desi --from \
+       https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/23040/ \
+       --filter 'redrock-main-dark-23040.fits'
    hallmark init ./lab --from ssh://lab-data/srv/data/ --fmt 'run{run:d}.h5'
 
 Use ``hallmark clone SOURCE PATH`` for an existing Hallmark Git repository
@@ -117,23 +119,29 @@ Preview the selected files using the local catalog, then confirm a download::
 Explicit paths and ``--tsv data.tsv`` also select files. Every nonempty transfer
 requires interactive confirmation, including transfers requested through
 ``init --with-download`` or ``clone --with-download``. Clone accepts its older
-``--download`` alias. Clone filters and formats require download intent and
-leave the complete catalog unchanged. The old ``--yes`` option no longer
+``--download`` alias. Clone filters and formats require ``--with-download``
+and leave the complete catalog unchanged. The old ``--yes`` option no longer
 bypasses approval.
 A filter or filename format never authorizes a transfer.
 
-Python uses the same plan and requires explicit approval::
+Python uses the same plan. First inspect the selected files::
 
    from hallmark import Repo
 
    repo = Repo.init('lab', from_url='ssh://lab-data/srv/data/', progress=True)
    plan = repo.plan_download(filter='runs/**')
    print(plan.summary())
-   result = repo.download(plan, approved=True, progress=True)
 
-Plans preserve their selected remote, backend settings, destination and checksums even when
-repository configuration later changes. Size estimates require recorded file
-sizes; duration estimates also require a supplied transfer rate.
+After reviewing the plan, approve the download and check for failures::
+
+   result = repo.download(plan, approved=True, progress=True)
+   if result['failed']:
+       raise RuntimeError('\n'.join(result['errors']))
+
+Plans preserve their selected remote, backend settings, destination and
+checksums even when repository configuration later changes. Size estimates
+require recorded file sizes; duration estimates also require a supplied
+transfer rate.
 
 .. automodule:: hallmark.download_plan
    :members:
