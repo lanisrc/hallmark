@@ -10,7 +10,7 @@ from threading import Event, Lock, local
 import requests
 
 from .auth import resolve_settings
-from .base import RemoteEntry, RemoteSpec, TransferCancelled
+from .base import DataBackend, RemoteEntry, RemoteSpec, TransferCancelled
 
 
 class OperationContext:
@@ -40,14 +40,16 @@ class OperationContext:
         self._local = local()
         self._lock = Lock()
         self._sessions = []
-        if remote.scheme in {"http", "https"}:
-            from .http import HttpTransport
+        from ..backends import get_backend
 
-            self.transport = HttpTransport(self)
-        else:
-            from .ssh import SshTransport
-
-            self.transport = SshTransport(self)
+        try:
+            self.transport = get_backend(remote.backend)(self)
+        except BaseException:
+            self.cancelled.set()
+            for session in self._sessions:
+                session.close()
+            raise
+        self.backend = self.transport
 
     @contextmanager
     def executor(self, max_workers):
@@ -99,13 +101,15 @@ class OperationContext:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if exc_type is not None:
-            self.cancel()
         try:
-            self.transport.close()
+            if exc_type is not None:
+                self.cancel()
         finally:
-            for session in self._sessions:
-                session.close()
+            try:
+                self.transport.close()
+            finally:
+                for session in self._sessions:
+                    session.close()
 
 
-__all__ = ["OperationContext", "RemoteEntry", "RemoteSpec"]
+__all__ = ["DataBackend", "OperationContext", "RemoteEntry", "RemoteSpec"]

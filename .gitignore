@@ -19,6 +19,7 @@ _build/
 
 /demo/*
 !/demo/private_data_demo.md
+!/demo/multi_server_backend.py
 !/demo/scientific_workflows_cli.md
 !/demo/scientific_workflows_python.ipynb
 /cli_test_repos/

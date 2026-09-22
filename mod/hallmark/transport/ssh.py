@@ -19,7 +19,7 @@ from .base import (
     DownloadError,
     RemoteConfigurationError,
     RemoteEntry,
-    Transport,
+    DataBackend,
     literal_path,
     reject_controls,
 )
@@ -48,7 +48,7 @@ def batch_argument(path):
     return "".join("\\" + char if char in special else char for char in text)
 
 
-class SshTransport(Transport):
+class SshBackend(DataBackend):
     """
     Share one OpenSSH connection for SFTP transfers and metadata requests.
 
@@ -59,6 +59,8 @@ class SshTransport(Transport):
     """
     def __init__(self, context, *, ssh=None, sftp=None):
         super().__init__(context)
+        if context.remote.scheme not in {"ssh", "sftp"}:
+            raise RemoteConfigurationError("SSH backends require an SSH/SFTP URL")
         # Command overrides support offline tests and cannot come from repo YAML.
         self.ssh = ssh or ["ssh"]
         self.sftp = sftp or ["sftp"]
@@ -416,3 +418,6 @@ class SshTransport(Transport):
         if self._socket_dir is not None:
             self._socket_dir.cleanup()
             self._socket_dir = None
+
+
+SshTransport = SshBackend

@@ -95,15 +95,16 @@ Create a local repository::
 
    hallmark init ./local-project
 
-Clone a remote dataset without downloading dataset files::
+Initialize a catalog from a remote dataset without downloading dataset files::
 
-   hallmark clone https://data.desi.lbl.gov/public/ ./desi --filter '**/*.fits'
-   hallmark clone ssh://lab-data/srv/data/ ./lab --fmt 'run{run:d}.h5'
+   hallmark init ./desi --from https://data.desi.lbl.gov/public/ --filter '**/*.fits'
+   hallmark init ./lab --from ssh://lab-data/srv/data/ --fmt 'run{run:d}.h5'
 
-An existing Hallmark Git repository is cloned with its history. A published
-HTTP/SFTP catalog snapshot starts new local history. Use ``--source-type git``
-for a Git endpoint whose URL cannot be distinguished from a directory URL.
-The older ``build`` command remains a deprecated compatibility interface.
+Use ``hallmark clone SOURCE PATH`` for an existing Hallmark Git repository
+or published HTTP/SFTP snapshot. Git clones retain the full catalog and its
+history; snapshots start new local history. Use ``--source-type git`` or
+``--source-type catalog`` to override automatic detection. The older ``build``
+command remains available but is deprecated in favor of ``init --from``.
 
 Downloading remote data
 -----------------------
@@ -115,24 +116,38 @@ Preview the selected files using the local catalog, then confirm a download::
 
 Explicit paths and ``--tsv data.tsv`` also select files. Every nonempty transfer
 requires interactive confirmation, including transfers requested through
-``clone --download``. The old ``--yes`` option no longer bypasses approval.
+``init --with-download`` or ``clone --with-download``. Clone accepts its older
+``--download`` alias. Clone filters and formats require download intent and
+leave the complete catalog unchanged. The old ``--yes`` option no longer
+bypasses approval.
 A filter or filename format never authorizes a transfer.
 
 Python uses the same plan and requires explicit approval::
 
    from hallmark import Repo
 
-   repo = Repo.clone('ssh://lab-data/srv/data/', 'lab', progress=True)
+   repo = Repo.init('lab', from_url='ssh://lab-data/srv/data/', progress=True)
    plan = repo.plan_download(filter='runs/**')
    print(plan.summary())
    result = repo.download(plan, approved=True, progress=True)
 
-Plans preserve their selected remote, destination and checksums even when
+Plans preserve their selected remote, backend settings, destination and checksums even when
 repository configuration later changes. Size estimates require recorded file
 sizes; duration estimates also require a supplied transfer rate.
 
 .. automodule:: hallmark.download_plan
    :members:
+
+Data backends
+-------------
+
+See :doc:`backends` for registration, installed plugins and the transfer
+contract. Backend classes are also exported from ``hallmark``. Existing
+``hallmark.transport`` imports remain compatibility aliases.
+
+.. automodule:: hallmark.backends
+   :members:
+   :show-inheritance:
 
 Dataset builders and data remotes
 ---------------------------------

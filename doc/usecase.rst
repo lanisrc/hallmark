@@ -263,12 +263,12 @@ The local profile or defaults may use ``host_key_policy: accept-new``
 to accept a host key on first contact. Changed host keys still cause
 an error. Repository configuration cannot enable this setting.
 
-Clone a private catalog
-~~~~~~~~~~~~~~~~~~~~~~~
+Initialize a private catalog
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Frank can prepare a catalog directly from the files on the server::
 
-    hallmark clone ssh://campus/srv/export/ lab \
+    hallmark init lab --from ssh://campus/srv/export/ \
       --auth campus --fmt 'runs/run_{i:d}.h5'
     cd lab
     hallmark download --all --dry-run
@@ -276,7 +276,7 @@ Frank can prepare a catalog directly from the files on the server::
 
 This creates ``lab/.hm`` with only the matching run files in ``data.tsv``.
 Without a filter or format, the catalog contains all discovered files below
-the supplied URL. No dataset contents are downloaded while cloning.
+the supplied URL. Initialization downloads no dataset contents.
 The final command displays the transfer plan and asks Frank for confirmation.
 
 Both SSH and SFTP sources use structured SFTP directory enumeration. The server
@@ -287,9 +287,10 @@ an apparently complete catalog.
 
 The generated data remote ``origin`` records the source URL and optional
 profile name.
-Existing Git-hosted catalogs keep their recorded data remotes when cloned.
-A filter on an existing Git catalog creates a local metadata commit while
-preserving fetched history; it does not fetch the dataset's content objects.
+Existing Git-hosted catalogs keep their complete catalog, history and
+recorded data remotes when cloned. Clone filters select optional downloads
+and require ``--with-download``; they leave Git HEAD and catalog rows unchanged.
+The Git catalog can be hosted separately from its data servers.
 
 Published manifest checksums are recorded in the catalog. Missing checksums
 remain unknown; |hallmark|_ does not read dataset files locally or on the
@@ -300,11 +301,11 @@ be cancelled.
 
 CyVerse and common HTTPS directory indexes are detected automatically::
 
-    hallmark clone https://data.desi.lbl.gov/public/ desi --filter '**/*.fits'
+    hallmark init desi --from https://data.desi.lbl.gov/public/ --filter '**/*.fits'
 
-A server with no usable listing must provide a published Hallmark catalog.
-Discovery cannot find files whose URLs are absent from both the listing and
-catalog. HTTP/SFTP catalog snapshots start local history; Git endpoints
+A server with no usable listing needs a published Hallmark catalog or a
+backend plugin that understands its API. See :doc:`backends` for the shared
+interface and registration. Discovery cannot infer hidden file URLs. HTTP/SFTP catalog snapshots start local history; Git endpoints
 supply catalog history. Use ``--source-type git`` for ambiguous Git URLs.
 
 Frank can also inspect and approve a transfer in Python::
@@ -319,7 +320,8 @@ Frank can also inspect and approve a transfer in Python::
 Plans are built from local metadata without contacting the server. Missing
 sizes and duration estimates are reported as unknown. During transfer,
 progress reports bytes and estimates remaining time when possible.
-``build`` and ``build_repo`` remain deprecated compatibility interfaces.
+``build`` and ``build_repo`` remain available but are deprecated in favor of
+``init --from``.
 Local ``add``, ``commit`` and ``checkout`` retain their existing format and
 local-object requirements; preparing a remote catalog does not populate the
 local object store.

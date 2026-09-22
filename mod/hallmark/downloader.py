@@ -898,8 +898,11 @@ def plan_download(
     if items and (remote is None or not remote.get("url")):
         raise DownloadError("No remote URL is configured in config.yml")
     remote = remote or {}
+    source = None
     if remote.get("url"):
-        RemoteSpec.parse(remote["url"], remote.get("auth"))
+        source = RemoteSpec.parse(
+            remote["url"], remote.get("auth"), backend=remote.get("backend"),
+            backend_options=remote.get("backend_options"))
     for item in items:
         try:
             resolve_contained_path(output_root, item.relative_path,
@@ -909,7 +912,9 @@ def plan_download(
     return DownloadPlan(
         tuple(items), remote.get("url"), output_root,
         remote_auth=remote.get("auth"), remote_name=remote.get("name"),
-        estimated_bytes_per_second=estimated_bytes_per_second)
+        estimated_bytes_per_second=estimated_bytes_per_second,
+        remote_backend=source.backend if source is not None else None,
+        backend_options=remote.get("backend_options"))
 
 
 def execute_download_plan(
@@ -949,7 +954,9 @@ def execute_download_plan(
         return {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
     if plan.output_path.resolve() != plan.output_path:
         raise DownloadError("Download destination changed since planning")
-    remote = RemoteSpec.parse(plan.remote_url, plan.remote_auth)
+    remote = RemoteSpec.parse(
+        plan.remote_url, plan.remote_auth, backend=plan.remote_backend,
+        backend_options=plan.backend_options)
     return _download_selected(
         remote, plan.output_path,
         [(item.relative_path, item.checksum) for item in plan.items],
@@ -1020,7 +1027,9 @@ def download_remote_data(
     # if the remote URL is not configured, raise a DownloadError to indicate the issue
     if not remote_url:
         raise DownloadError("Remote URL not configured in config.yml")
-    remote_spec = RemoteSpec.parse(remote_url, remote_config.get("auth"))
+    remote_spec = RemoteSpec.parse(
+        remote_url, remote_config.get("auth"), backend=remote_config.get("backend"),
+        backend_options=remote_config.get("backend_options"))
     # If there are still no files selected for download
     if not selected_files:
         # return the results without attempting any downloads

@@ -176,16 +176,59 @@ class Repo:
         pf["sha1"] = [checksums[path] for path in full_paths]
 
     @classmethod
-    def init(cls, path: Union[Path, str]) -> "Repo":
-        '''
-        Initialize a new hallmark repository.
+    def init(cls, path: Union[Path, str], *, from_url=None, backend=None,
+             backend_options=None, auth=None, filter=None, fmt=None,
+             download=False, approve=None, progress=False, max_workers=4) -> "Repo":
+        """
+        Initialize a local repository, optionally discovering a remote dataset.
+
+        Remote discovery reads listings and published checksums without fetching
+        payloads. Existing destination files are preserved; an existing ``.hm``
+        is rejected before contacting the remote dataset.
 
         Args:
-            paht(paht|string): path to initialize a worktree or ``.hm`` repository.
+            path (Path | str): Worktree or bare ``.hm`` repository destination.
+            from_url (str, optional): Raw remote dataset to discover.
+            backend (str, optional): Registered data backend name.
+            backend_options (dict, optional): Backend-specific configuration.
+            auth (str, optional): Local authentication profile for data access.
+            filter (str | list[str], optional): Relative path glob or globs.
+            fmt (str, optional): Filename format for selection and parameters.
+            download (bool): Request approved downloads after discovery.
+            approve (callable, optional): Callback returning True to approve a plan.
+            progress (bool | callable): Discovery and download progress display.
+            max_workers (int): Maximum download workers. Defaults to 4.
 
         Returns:
-            Repo: newly created repository instance
-        '''
+            Repo: Initialized repository, retained if download approval is declined.
+
+        Raises:
+            DestinationExistsError: If remote initialization would replace a catalog.
+            ValueError: If remote options are supplied without ``from_url``.
+            DownloadError: If discovery fails or download approval is unavailable.
+        """
+        from .catalog import initialize_remote
+        from .downloader import DownloadError, _require_positive_integer
+
+        _require_positive_integer(max_workers, label="max_workers")
+        if from_url is not None:
+            if download and not callable(approve):
+                raise DownloadError(
+                    "Downloading during init requires an approve(plan) callback")
+            if download and cls.lwpaths(path)[1] is None:
+                raise DownloadError(
+                    "Initialize a worktree to download; "
+                    "bare catalogs need an output path")
+            repo = initialize_remote(
+                cls, path, from_url, backend=backend, backend_options=backend_options,
+                auth=auth, filter=filter, fmt=fmt, progress=progress)
+            if download:
+                repo._download_after_creation(
+                    approve=approve, max_workers=max_workers, progress=progress)
+            return repo
+        if any(value is not None for value in
+               (backend, backend_options, auth, filter, fmt, approve)) or download:
+            raise ValueError("Remote initialization options require from_url")
         dothm_path, worktree_path = cls.lwpaths(path)
         dothm = Dothm.init(dothm_path)
         (dothm.path / "config.yml").write_text(Dothm.config_template(),
@@ -196,6 +239,21 @@ class Repo:
         if worktree_path is not None:
             Worktree.init(worktree_path)
         return cls(path)
+
+    def _download_after_creation(self, *, approve, max_workers, progress,
+                                 filter=None, fmt=None):
+        """Run an approved transfer after catalog creation has completed."""
+        from .downloader import DownloadError
+
+        plan = self.plan_download(filter=filter, fmt=fmt)
+        if plan.file_count and approve(plan) is True:
+            self.download_result = self.download(
+                plan, approved=True, max_workers=max_workers, progress=progress)
+            if self.download_result["failed"]:
+                details = "\n".join(self.download_result["errors"][:5])
+                raise DownloadError(
+                    f"Failed to download {self.download_result['failed']} "
+                    f"file(s):\n{details}")
 
     @classmethod
     def clone(
@@ -215,25 +273,25 @@ class Repo:
         show_progress: Optional[bool] = None,
     ) -> "Repo":
         """
-        Clone a Hallmark catalog or index a remote data directory.
+        Clone an existing Hallmark Git catalog or published snapshot.
 
-        Git sources retain their history. Published catalog snapshots and
-        discovered directories start new local history. Dataset files are
+        Git sources retain their history. Published catalog snapshots
+        start new local history. Dataset files are
         downloaded only when requested and approved after catalog creation.
         Declining approval leaves the catalog available without dataset files.
 
         Args:
-            url (str): Catalog location or URL of the dataset directory.
+            url (str): Existing Git catalog or published snapshot location.
             path (Path | str): New worktree or bare ``.hm`` repository path.
-            auth (str, optional): Local SSH profile for data access. Git
-                sources use Git's authentication configuration instead.
-            filter (str | list[str], optional): Relative path glob or globs.
-                A path must match at least one glob when provided.
-            fmt (str, optional): Filename format used to select paths and
-                extract parameters when discovering a directory.
-            source_type (str): ``auto``, ``git``, ``directory``, or ``catalog``.
+            auth (str, optional): Local profile for snapshot metadata access.
+                Git sources use Git's authentication configuration instead.
+            filter (str | list[str], optional): Download selection globs.
+                Requires ``download=True``; the catalog remains complete.
+            fmt (str, optional): Filename format used to select downloads.
+                Requires ``download=True``.
+            source_type (str): ``auto``, ``git``, or ``catalog``.
                 Defaults to automatic source detection.
-            progress (bool): Show discovery and download progress. Defaults
+            progress (bool): Show download progress. Defaults
                 to False.
             download (bool): Request downloads after preparing the catalog.
                 Defaults to False and requires an approval callback when True.
@@ -251,10 +309,11 @@ class Repo:
             DestinationExistsError: If the destination already exists.
             CloneError: If a requested catalog is missing or invalid.
             ValueError: If source options are invalid or conflict.
-            DownloadError: If discovery or downloading fails, or a download
+            DownloadError: If metadata access or downloading fails, or a download
                 is requested without a callback or worktree destination.
         """
         from .catalog import clone_catalog
+        from .discovery import path_matches
         from .downloader import DownloadError, _require_positive_integer
 
         _require_positive_integer(max_workers, label="max_workers")
@@ -264,24 +323,21 @@ class Repo:
             download = fetch_data
         if show_progress is not None:
             progress = show_progress
+        if (filter is not None or fmt is not None) and not download:
+            raise ValueError("clone filter and fmt require download=True; "
+                             "use init(from_url=...) to select a new catalog")
         if download and not callable(approve):
             raise DownloadError(
                 "Downloading during clone requires an approve(plan) callback")
         if download and cls.lwpaths(path)[1] is None:
             raise DownloadError(
                 "Clone a worktree to download; bare catalogs need an output path")
-        repo = clone_catalog(cls, url, path, auth=auth, filter=filter, fmt=fmt,
-                             source_type=source_type, progress=progress)
+        path_matches("validation", filter=filter, fmt=fmt)
+        repo = clone_catalog(cls, url, path, auth=auth, source_type=source_type)
         if download:
-            plan = repo.plan_download()
-            if plan.file_count and approve(plan) is True:
-                repo.download_result = repo.download(
-                    plan, approved=True, max_workers=max_workers, progress=progress)
-                if repo.download_result["failed"]:
-                    details = "\n".join(repo.download_result["errors"][:5])
-                    raise DownloadError(
-                        f"Failed to download {repo.download_result['failed']} "
-                        f"file(s):\n{details}")
+            repo._download_after_creation(
+                approve=approve, max_workers=max_workers, progress=progress,
+                filter=filter, fmt=fmt)
         return repo
 
     def plan_download(self, output_path=None, *, file_paths=None, tsv_names=None,
@@ -407,6 +463,8 @@ class Repo:
         remote_url: Optional[str] = None,
         encoding_updates: Optional[Dict[str, str]] = None,
         remote_auth: Optional[str] = None,
+        remote_backend: Optional[str] = None,
+        remote_backend_options: Optional[dict] = None,
     ) -> dict:
         """
         Update repository configuration values.
@@ -417,6 +475,8 @@ class Repo:
             remote_url (str, optional): URL of the remote repository.
             remote_auth (str, optional): Local SSH profile name. An empty string
                 removes the reference; None leaves it unchanged.
+            remote_backend (str, optional): Registered data backend name.
+            remote_backend_options (dict, optional): Backend-specific configuration.
             encoding_updates (dict[str, str], optional): Updates to encoding rules.
 
         Returns:
@@ -428,7 +488,11 @@ class Repo:
             remote_name=remote_name,
             remote_url=remote_url,
             encoding_updates=encoding_updates,
-            **({"remote_auth": remote_auth} if remote_auth is not None else {}))
+            **({"remote_auth": remote_auth} if remote_auth is not None else {}),
+            **({"remote_backend": remote_backend}
+               if remote_backend is not None else {}),
+            **({"remote_backend_options": remote_backend_options}
+               if remote_backend_options is not None else {}))
         self.dothm.dump(self.state)
         return self.state.config
 

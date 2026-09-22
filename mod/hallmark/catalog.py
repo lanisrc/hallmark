@@ -1,4 +1,4 @@
-"""Create local catalogs from Git repositories and remote data directories."""
+"""Initialize remote datasets and clone existing Hallmark catalogs."""
 
 from __future__ import annotations
 
@@ -18,7 +18,8 @@ from .error import CloneError, DestinationExistsError
 from .helper_functions import as_list_of_dicts
 from .repo_config import fmt_fields, normalize_remotes, normalize_tsv_name, row_to_path
 from .transport import OperationContext, RemoteSpec
-from .transport.base import RemoteObjectMissing, literal_path
+from .transport.base import (RemoteObjectMissing, literal_path,
+                             thaw_backend_options)
 from .worktree import Worktree
 
 
@@ -81,8 +82,8 @@ def _snapshot(context):
     """
     Read and validate a published catalog without fetching dataset files.
 
-    Return None when required catalog files are absent or ``config.yml``
-    does not describe a catalog. Invalid tables and metadata raise CloneError.
+    Return None when ``config.yml`` is absent. Once present, incomplete or
+    malformed catalog metadata raises CloneError rather than triggering fallback.
     """
     try:
         config_text = context.read_text("config.yml")
@@ -90,15 +91,16 @@ def _snapshot(context):
         return None
     try:
         config = yaml.safe_load(config_text)
-    except yaml.YAMLError:
-        return None
+    except yaml.YAMLError as exc:
+        raise CloneError("Invalid published catalog config.yml") from exc
     if not isinstance(config, dict) or "data" not in config:
-        return None
+        raise CloneError("Published catalog config.yml must contain a data mapping")
     try:
         meta_text = context.read_text("meta.yml")
         data_text = context.read_text("data.tsv")
-    except RemoteObjectMissing:
-        return None
+    except RemoteObjectMissing as exc:
+        raise CloneError(
+            "Published Hallmark catalog is missing required metadata") from exc
     try:
         meta = yaml.safe_load(meta_text)
     except yaml.YAMLError as exc:
@@ -120,31 +122,6 @@ def _metadata_commit(repo, files, message):
     if repo.dothm.index.diff("HEAD"):
         repo.dothm.index.commit(message)
     repo.state = repo.dothm.load()
-
-
-def _filter_catalog(repo, *, filter=None, fmt=None):
-    """Filter catalog tables and file entries, then commit the selection."""
-    if filter is None and fmt is None:
-        return
-    config = repo.state.config
-    names = _catalog_names(config)
-    for name in names:
-        frame = repo.dothm.load_tsv(name)
-        formats = _catalog_formats(config, name)
-        keep = []
-        for _, row in frame.iterrows():
-            path = _row_path(row, formats)
-            keep.append(path_matches(path, filter=filter, fmt=fmt))
-        repo.dothm.dump_tsv(frame.loc[keep], name)
-    for section in ("data", "meta"):
-        values = as_list_of_dicts(config.get(section, []))
-        if values is None:
-            continue
-        config[section] = [entry for entry in values
-                           if not entry.get("file") or path_matches(
-                               entry["file"], filter=filter, fmt=fmt)]
-    repo.dothm.dump_yml(config, "config")
-    _metadata_commit(repo, [*names, "config.yml"], "Filter local catalog")
 
 
 def _write_inventory(repo, source, entries, fmt):
@@ -169,11 +146,68 @@ def _write_inventory(repo, source, entries, fmt):
     remote = {"name": "origin", "url": source.url}
     if source.auth:
         remote["auth"] = source.auth
+    if source.backend:
+        remote["backend"] = source.backend
+    if source.backend_options:
+        remote["backend_options"] = thaw_backend_options(source.backend_options)
     repo.dothm.dump_yml({"data": [data_spec], "remote": [remote]}, "config")
     repo.dothm.dump_yml({"source": source.url}, "meta")
     repo.dothm.dump_tsv(frame, "data", na_rep="")
     _metadata_commit(repo, ["config.yml", "meta.yml", "data.tsv"],
                      "Discover remote catalog")
+
+
+def initialize_remote(cls, path, url, *, backend=None, backend_options=None,
+                      auth=None, filter=None, fmt=None, progress=False):
+    """Discover a dataset and initialize its catalog without replacing local files."""
+    destination = Path(path).expanduser().absolute()
+    if destination.is_symlink():
+        raise DestinationExistsError(f"Destination is a symbolic link: {path}")
+    dothm_path, _ = cls.lwpaths(destination)
+    if dothm_path.exists() or dothm_path.is_symlink():
+        raise DestinationExistsError(
+            f"Hallmark repository already exists: {dothm_path}")
+    if destination.exists() and not destination.is_dir():
+        raise NotADirectoryError(f"Destination is not a directory: {path}")
+    path_matches("validation", filter=filter, fmt=fmt)
+    source = RemoteSpec.parse(str(url), auth, backend=backend,
+                              backend_options=backend_options)
+    # Claim only the metadata directory. On failure, existing dataset files stay put.
+    missing_parents = []
+    parent = dothm_path.parent
+    while not parent.exists():
+        missing_parents.append(parent)
+        parent = parent.parent
+    created_parents = []
+    owns_metadata = False
+    try:
+        for parent in reversed(missing_parents):
+            try:
+                parent.mkdir()
+                created_parents.append(parent)
+            except FileExistsError:
+                if not parent.is_dir():
+                    raise
+        try:
+            dothm_path.mkdir()
+            owns_metadata = True
+        except FileExistsError as exc:
+            raise DestinationExistsError(
+                f"Hallmark repository already exists: {dothm_path}") from exc
+        with OperationContext(source) as context:
+            entries = discover(context, filter=filter, fmt=fmt, progress=progress)
+        repo = cls.init(destination)
+        _write_inventory(repo, source, entries, fmt)
+        return repo
+    except BaseException:
+        if owns_metadata:
+            rmtree(dothm_path, ignore_errors=True)
+        for parent in reversed(created_parents):
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+        raise
 
 
 def _git_source(url, source_type):
@@ -183,33 +217,46 @@ def _git_source(url, source_type):
     if source_type != "auto":
         return False
     parsed = urlsplit(url)
-    return (not parsed.scheme or parsed.scheme in {"git", "file"}
-            or bool(re.match(r"^[^/]+@[^/]+:", url))
+    scp_style = "://" not in url and re.match(r"^(?:[^/@:]+@)?[^/:]+:.+", url)
+    return (not parsed.scheme or parsed.scheme in {"git", "file", "ssh"}
+            or bool(scp_style)
             or (parsed.scheme != "sftp" and parsed.path.rstrip("/").endswith(".git")))
 
 
-def clone_catalog(cls, url, path, *, auth=None, filter=None, fmt=None,
-                  source_type="auto", progress=False):
-    """
-    Create a local catalog from Git, a published snapshot, or a data directory.
+def _clone_git(cls, url, destination, display_path, auth):
+    """Clone a catalog's Git history without modifying its tracked metadata."""
+    if auth is not None:
+        raise ValueError("Git cloning uses Git/SSH authentication, not auth profiles")
+    dothm_path, worktree_path = cls.lwpaths(destination)
+    local = Path(url).expanduser()
+    git_url = str(local / ".hm") if (local / ".hm").is_dir() else url
+    try:
+        Dothm.clone(git_url, dothm_path, display_path=display_path)
+    except CloneError as exc:
+        raise CloneError(
+            f"{exc}\nFor a raw dataset, use hallmark init PATH --from URL.") from exc
+    if worktree_path:
+        Worktree.init(worktree_path)
+    return cls(destination)
 
-    An incomplete destination created by this call is removed on failure.
-    Existing destinations are rejected before any source access.
+
+def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
+    """
+    Clone an existing Git catalog or published HTTP/SFTP catalog snapshot.
+
+    Existing destinations are rejected before source access. An incomplete
+    destination created by this call is removed on failure. Dataset discovery
+    belongs to ``Repo.init(from_url=...)``.
 
     Args:
         cls: Repository class used to initialize or open the result.
-        url (str): Catalog location or URL of the dataset directory.
+        url (str): Existing Git catalog or published snapshot location.
         path (Path | str): New repository destination.
-        auth (str, optional): Local SSH profile for data access.
-        filter (str | list[str], optional): Relative path glob or globs.
-        fmt (str, optional): Filename format used to select paths.
-        source_type (str): ``auto``, ``git``, ``directory``, or ``catalog``.
-            Defaults to automatic detection.
-        progress (bool | callable): Discovery progress display or callback.
-            Defaults to False.
+        auth (str, optional): Local profile for snapshot metadata access.
+        source_type (str): ``auto``, ``git``, or ``catalog``.
 
     Returns:
-        Repo: Repository containing catalog metadata without dataset files.
+        Repo: Repository containing complete catalog metadata without payloads.
 
     Raises:
         DestinationExistsError: If the destination already exists.
@@ -217,10 +264,9 @@ def clone_catalog(cls, url, path, *, auth=None, filter=None, fmt=None,
         ValueError: If source options are invalid.
         DownloadError: If remote metadata cannot be read or validated.
     """
-    if source_type not in {"auto", "git", "directory", "catalog"}:
-        raise ValueError("source_type must be auto, git, directory, or catalog")
+    if source_type not in {"auto", "git", "catalog"}:
+        raise ValueError("source_type must be auto, git, or catalog")
     url = str(url)
-    path_matches("validation", filter=filter, fmt=fmt)
     destination = Path(path).expanduser().absolute()
     if destination.exists() or destination.is_symlink():
         raise DestinationExistsError(
@@ -228,7 +274,6 @@ def clone_catalog(cls, url, path, *, auth=None, filter=None, fmt=None,
     is_git = _git_source(url, source_type)
     if is_git and auth is not None:
         raise ValueError("Git cloning uses Git/SSH authentication, not auth profiles")
-    # Create the destination exclusively so cleanup only removes our own directory.
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         destination.mkdir()
@@ -236,38 +281,23 @@ def clone_catalog(cls, url, path, *, auth=None, filter=None, fmt=None,
         raise DestinationExistsError(f"Destination already exists: {path}") from exc
     try:
         if is_git:
-            dothm_path, worktree_path = cls.lwpaths(destination)
-            local = Path(url).expanduser()
-            git_url = str(local / ".hm") if (local / ".hm").is_dir() else url
-            Dothm.clone(git_url, dothm_path, display_path=path)
-            if worktree_path:
-                Worktree.init(worktree_path)
-            repo = cls(destination)
-            _filter_catalog(repo, filter=filter, fmt=fmt)
-            return repo
-
+            return _clone_git(cls, url, destination, path, auth)
         source = RemoteSpec.parse(url, auth)
-        snapshot = None
         with OperationContext(source) as context:
-            if source_type != "directory":
+            snapshot = _snapshot(context)
+        if snapshot is None and not source.root.rstrip("/").endswith(".hm"):
+            nested = RemoteSpec.parse(url.rstrip("/") + "/.hm/", auth)
+            with OperationContext(nested) as context:
                 snapshot = _snapshot(context)
-                if snapshot is None and not source.root.rstrip("/").endswith(".hm"):
-                    nested = RemoteSpec.parse(url.rstrip("/") + "/.hm/", auth)
-                    with OperationContext(nested) as nested_context:
-                        snapshot = _snapshot(nested_context)
-            if snapshot is None:
-                if source_type == "catalog":
-                    raise CloneError("No published Hallmark catalog at this URL")
-                entries = discover(context, filter=filter, fmt=fmt,
-                                   progress=progress)
+        if snapshot is None:
+            if source_type == "auto" and source.scheme in {"http", "https"}:
+                return _clone_git(cls, url, destination, path, auth)
+            raise CloneError("No published Hallmark catalog at this URL; "
+                             "use hallmark init PATH --from URL for a raw dataset")
         repo = cls.init(destination)
-        if snapshot is not None:
-            for name, contents in snapshot.items():
-                (repo.dothm.path / name).write_text(contents, encoding="utf-8")
-            _metadata_commit(repo, snapshot, "Import published catalog snapshot")
-            _filter_catalog(repo, filter=filter, fmt=fmt)
-        else:
-            _write_inventory(repo, source, entries, fmt)
+        for name, contents in snapshot.items():
+            (repo.dothm.path / name).write_text(contents, encoding="utf-8")
+        _metadata_commit(repo, snapshot, "Import published catalog snapshot")
         return repo
     except BaseException:
         rmtree(destination, ignore_errors=True)

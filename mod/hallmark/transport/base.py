@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
 
 from ..error import HallmarkError
@@ -30,6 +32,57 @@ class CapabilityError(DownloadError):
 
 class TransferCancelled(DownloadError):
     """Raised when a transfer is cancelled."""
+
+
+def backend_name(value):
+    """Validate a registered backend name, never an import path."""
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value):
+        raise RemoteConfigurationError(
+            "Backend name must match [a-z][a-z0-9_-]{0,63}")
+    return value
+
+
+def freeze_backend_options(options=None):
+    """Copy YAML-compatible options into a deeply immutable mapping."""
+    active = set()
+
+    def freeze(value):
+        if isinstance(value, (Mapping, list, tuple)):
+            if id(value) in active:
+                raise RemoteConfigurationError("Backend options cannot contain cycles")
+            active.add(id(value))
+            try:
+                if isinstance(value, Mapping):
+                    if any(not isinstance(key, str) for key in value):
+                        raise RemoteConfigurationError(
+                            "Backend option keys must be strings")
+                    return MappingProxyType({key: freeze(item)
+                                             for key, item in value.items()})
+                return tuple(freeze(item) for item in value)
+            finally:
+                active.remove(id(value))
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return value
+        raise RemoteConfigurationError(
+            "Backend options must contain YAML scalar, list, or mapping values")
+
+    if options is None:
+        options = {}
+    if not isinstance(options, Mapping):
+        raise RemoteConfigurationError("Backend options must be a mapping")
+    return freeze(options)
+
+
+def thaw_backend_options(options=None):
+    """Return an independent YAML-compatible copy of backend options."""
+    def thaw(value):
+        if isinstance(value, Mapping):
+            return {key: thaw(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [thaw(item) for item in value]
+        return value
+
+    return thaw(freeze_backend_options(options))
 
 
 def reject_controls(value: str, label: str) -> None:
@@ -124,6 +177,8 @@ class RemoteSpec:
         user (str, optional): Explicit SSH username.
         port (int, optional): Explicit port number.
         auth (str, optional): Local SSH authentication profile name.
+        backend (str): Registered backend name, resolved from the URL by default.
+        backend_options (Mapping): Deeply immutable backend configuration.
     """
 
     url: str = field(repr=False)
@@ -133,15 +188,33 @@ class RemoteSpec:
     user: str | None = field(default=None, repr=False)
     port: int | None = None
     auth: str | None = None
+    backend: str | None = None
+    backend_options: Mapping = field(default_factory=lambda: MappingProxyType({}),
+                                     repr=False, hash=False)
+
+    def __post_init__(self):
+        selected = self.backend
+        if selected is None:
+            selected = "ssh" if self.scheme in {"ssh", "sftp"} else "http"
+            if selected == "http" and (self.host == "cyverse.org"
+                                      or self.host.endswith(".cyverse.org")):
+                selected = "cyverse"
+        object.__setattr__(self, "backend", backend_name(selected))
+        object.__setattr__(self, "backend_options",
+                           freeze_backend_options(self.backend_options))
 
     @classmethod
-    def parse(cls, url: str, auth: str | None = None) -> RemoteSpec:
+    def parse(cls, url: str, auth: str | None = None, *,
+              backend=None, backend_options=None) -> RemoteSpec:
         """
         Parse and validate a data-remote URL.
 
         Args:
             url (str): HTTP(S) URL or SSH/SFTP URL with an absolute dataset root.
             auth (str, optional): Local SSH profile name. Unsupported for HTTP(S).
+            backend (str, optional): Registered backend name. Defaults to URL
+                detection. Parsing does not load plugins or resolve profiles.
+            backend_options (Mapping, optional): Backend-specific configuration.
 
         Returns:
             RemoteSpec: Validated source description.
@@ -205,7 +278,8 @@ class RemoteSpec:
                     "Auth profiles currently support SSH/SFTP only; "
                     "HTTP retains Requests .netrc authentication"
                 )
-        return cls(url, scheme, host, root, user, port, auth)
+        return cls(url, scheme, host, root, user, port, auth,
+                   backend, backend_options)
 
     def pathname(self, relative_path: str) -> str:
         """Append a literal relative path to the dataset root."""
@@ -229,9 +303,15 @@ class RemoteSpec:
         return f"{self.scheme}://{host}"
 
 
-class Transport:
+class DataBackend:
     """
-    Common interface for internal data transports.
+    Common interface for dataset discovery and data transfer.
+
+    Implementations receive shared cancellation state and thread-local HTTP
+    sessions through ``context``. Fetch may run concurrently: protect mutable
+    backend state, check ``context.check_cancelled()`` during long operations,
+    and release owned resources in ``close``. Authentication secrets belong in
+    local configuration, not persisted backend options.
 
     Args:
         context (OperationContext): Resources and settings for this operation.
@@ -241,7 +321,7 @@ class Transport:
         self.context = context
 
     def prepare(self):
-        """Check connection requirements before starting transfers."""
+        """Prepare for discovery or transfer; repeated calls must be safe."""
         pass
 
     def fetch(self, relative_path, destination, *, chunk_size=8192):
@@ -293,3 +373,11 @@ class Transport:
     def close(self):
         """Release connections and processes used by this transport."""
         pass
+
+    def cancel(self):
+        """Stop active backend work after the context's cancellation is set."""
+        pass
+
+
+# Existing transport imports remain valid for downstream integrations.
+Transport = DataBackend

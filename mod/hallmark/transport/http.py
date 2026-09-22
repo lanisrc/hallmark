@@ -2,19 +2,56 @@
 
 from __future__ import annotations
 
+from collections import deque
 from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
 from ..helper_functions import REMOTE_REQUEST_TIMEOUT
-from .base import DownloadError, RemoteObjectMissing, Transport, reject_controls
+from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
+                   RemoteObjectMissing, DataBackend, reject_controls)
+from .index import _parse_index, _response_directory
 
 
-class HttpTransport(Transport):
+class HttpBackend(DataBackend):
     """Transfer files and metadata using reusable Requests sessions."""
     def __init__(self, context):
         super().__init__(context)
+        if context.remote.scheme not in {"http", "https"}:
+            raise RemoteConfigurationError("HTTP backends require an HTTP(S) URL")
         self.text_urls = {}
+
+    def _parse_index(self, text, directory):
+        """Read generic indexes and recognize the CyVerse dialect automatically."""
+        from .cyverse import CyVerseIndexParser, is_cyverse_index
+
+        if is_cyverse_index(text):
+            return _parse_index(text, self.context.remote.url, directory,
+                                parser_class=CyVerseIndexParser)
+        return _parse_index(text, self.context.remote.url, directory)
+
+    def iter_entries(self, on_directory=None):
+        """Yield metadata from recursive listings without reading payloads."""
+        queue, visited = deque([""]), set()
+        while queue:
+            directory = queue.popleft()
+            if directory in visited:
+                continue
+            visited.add(directory)
+            self.context.check_cancelled()
+            text = self.context.read_text(directory)
+            canonical = _response_directory(self.context, directory)
+            if canonical != directory and canonical in visited:
+                continue
+            visited.add(canonical)
+            for path, is_directory, size, mtime in self._parse_index(text, canonical):
+                if is_directory:
+                    if path not in visited:
+                        queue.append(path)
+                else:
+                    yield RemoteEntry(path=path, size=size, mtime=mtime)
+            if on_directory is not None:
+                on_directory(canonical)
 
     def _get(self, path):
         """Open a streaming response with the configured request timeout."""
@@ -85,7 +122,6 @@ class HttpTransport(Transport):
                                 self.context.on_bytes(len(chunk))
         except requests.RequestException as exc:
             raise self._error(exc) from None
-
     def read_text(self, relative_path, limit):
         """Read metadata within the source root and byte limit."""
         content = bytearray()
@@ -104,3 +140,6 @@ class HttpTransport(Transport):
             return text
         except requests.RequestException as exc:
             raise self._error(exc) from None
+
+
+HttpTransport = HttpBackend

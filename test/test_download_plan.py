@@ -234,3 +234,48 @@ def test_bare_catalog_requires_explicit_output(catalog):
     catalog.worktree = None
     with pytest.raises(DownloadError, match="output_path"):
         plan_download(catalog)
+
+
+def test_plan_pins_backend_and_nested_options_without_loading_plugin(
+        catalog, monkeypatch):
+    options = {"servers": [{"url": "https://original.test/"}]}
+    catalog.state.config["remote"].update(
+        backend="external-survey", backend_options=options)
+
+    def reject_network(*args, **kwargs):
+        raise AssertionError("planning must not load or contact a backend")
+
+    monkeypatch.setattr("hallmark.downloader.OperationContext", reject_network)
+    plan = plan_download(catalog, file_paths="nested/a.fits")
+    options["servers"][0]["url"] = "https://changed.test/"
+    catalog.state.config["remote"]["backend"] = "another-survey"
+    assert plan.remote_backend == "external-survey"
+    assert plan.backend_options["servers"][0]["url"] == "https://original.test/"
+    with pytest.raises(TypeError):
+        plan.backend_options["servers"][0]["url"] = "https://changed.test/"
+    with pytest.raises(TypeError):
+        plan.backend_options["extra"] = True
+    assert hash(plan) == hash(replace(plan))
+    captured = []
+
+    def download(source, *args, **kwargs):
+        captured.append(source)
+        return {"succeeded": 1, "failed": 0, "total_bytes": 6, "errors": []}
+
+    monkeypatch.setattr("hallmark.downloader._download_selected", download)
+    execute_download_plan(catalog, plan, approved=True)
+    assert captured[0].backend == "external-survey"
+    assert captured[0].backend_options["servers"][0]["url"] == \
+        "https://original.test/"
+
+
+def test_legacy_remote_pins_default_backend(catalog):
+    assert plan_download(catalog).remote_backend == "http"
+
+
+def test_missing_plugin_can_be_planned_but_not_executed(catalog):
+    catalog.state.config["remote"]["backend"] = "missing-survey-plugin"
+    plan = plan_download(catalog, file_paths="nested/a.fits")
+    with pytest.raises(DownloadError, match="missing-survey-plugin"):
+        execute_download_plan(catalog, plan, approved=True)
+    assert not (catalog.worktree / "nested/a.fits").exists()

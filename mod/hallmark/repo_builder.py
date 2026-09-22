@@ -16,7 +16,7 @@ import parse
 from .repo import Repo
 from .transport import OperationContext, RemoteSpec
 from .transport.base import (
-    CapabilityError, DownloadError, reject_controls)
+    CapabilityError, DownloadError, reject_controls, thaw_backend_options)
 from .fmt_detection import (
     KNOWN_PROCESSING_STAGES,
     KNOWN_STATIC_FILE_STEMS)
@@ -720,13 +720,15 @@ def build_repo(
     index_format: str | None = None,
     allow_remote_commands: bool = False,
     remote_hash: bool = False,
+    backend: str | None = None,
+    backend_options=None,
 ) -> "Repo":
     """
     Build a remote catalog using the deprecated builder interface.
 
-    Prefer ``Repo.clone(url, path)`` for remote catalogs and ``Repo.init(path)``
-    for local repositories. Discovery reads listings and published checksum
-    manifests without downloading dataset files.
+    Prefer ``Repo.init(path, from_url=url)`` for remote datasets.
+    Discovery reads listings and published checksum manifests without
+    downloading dataset files.
 
     Args:
         repo_path (Path): Destination repository path.
@@ -749,6 +751,8 @@ def build_repo(
         allow_remote_commands (bool): Obsolete option, ignored when supplied.
         remote_hash (bool): Unsupported when True. Defaults to False;
             discovery does not compute checksums from dataset contents.
+        backend (str, optional): Registered discovery backend name.
+        backend_options (mapping, optional): Non-secret backend configuration.
 
     Returns:
         Repo: Repository containing the prepared catalog.
@@ -761,7 +765,7 @@ def build_repo(
         DownloadError: If remote discovery fails.
     """
     warnings.warn(
-        "build_repo is deprecated; use Repo.clone(url, path) or Repo.init(path)",
+        "build_repo is deprecated; use Repo.init(path, from_url=url)",
         DeprecationWarning, stacklevel=2)
     if remote_hash:
         raise CapabilityError(
@@ -776,7 +780,8 @@ def build_repo(
     dataset_name = validate_path_component(dataset_name, label="dataset name")
     base_url = (dataset_url if dataset_url is not None else
                 _remote_url(_CYVERSE_CURATED_BASE, f"{dataset_name}/"))
-    source = RemoteSpec.parse(base_url, dataset_auth)
+    source = RemoteSpec.parse(
+        base_url, dataset_auth, backend=backend, backend_options=backend_options)
     with OperationContext(source) as context:
         return _build_repo(repo_path, dataset_name, fmt_entries, config_file,
                            remotes, overwrite, context)
@@ -1054,8 +1059,19 @@ def _build_repo(
         remotes = [{"name": "origin"}]
         if source.remote.auth is not None:
             remotes[0]["auth"] = source.remote.auth
+        if source.remote.backend_options:
+            remotes[0]["backend_options"] = thaw_backend_options(
+                source.remote.backend_options)
     # create the final remotes list by adding the base_url to each remote entry
     final_remotes = [{"url": base_url, **remote} for remote in remotes]
+    default_backend = RemoteSpec.parse(base_url, source.remote.auth).backend
+    for remote in final_remotes:
+        if remote["url"] == base_url:
+            if source.remote.backend != default_backend:
+                remote.setdefault("backend", source.remote.backend)
+            if source.remote.backend_options:
+                remote.setdefault("backend_options", thaw_backend_options(
+                    source.remote.backend_options))
     repo.state.config["remote"] = final_remotes
 
     # if a meta file entry exists, add it to the config

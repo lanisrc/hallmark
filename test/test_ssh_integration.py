@@ -383,7 +383,7 @@ def test_sftp_only_discovers_metadata_and_fetches(ssh_server, tmp_path):
 
 @pytest.mark.parametrize("ssh_server", ["sftp-only"], indirect=True)
 @pytest.mark.parametrize("scheme", ["ssh", "sftp"])
-def test_sftp_only_clone_plans_then_requires_payload_approval(
+def test_sftp_only_init_plans_then_requires_payload_approval(
     ssh_server, tmp_path, monkeypatch, scheme,
 ):
     root = ssh_server["root"]
@@ -408,8 +408,9 @@ def test_sftp_only_clone_plans_then_requires_payload_approval(
         plans.append(plan)
         return False
 
-    repo = Repo.clone(
-        ssh_server["url"].replace("ssh:", scheme + ":"), tmp_path / "clone",
+    repo = Repo.init(
+        tmp_path / "initialized",
+        from_url=ssh_server["url"].replace("ssh:", scheme + ":"),
         filter="**/*.fits", download=True, approve=decline,
     )
     assert fetched == []

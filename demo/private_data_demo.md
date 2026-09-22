@@ -17,7 +17,7 @@ Run the Bash blocks in order in one local terminal.
 # Start in the Hallmark source checkout.
 python -m pip install -e .
 ssh -V
-hallmark clone --help
+hallmark init --help
 ```
 
 2. Add or update this entry in `~/.ssh/config`, preserving your other entries.
@@ -50,7 +50,7 @@ cd "$HM_DEMO_WORKSPACE"
 ```
 
 SSH configuration alone is enough. To demonstrate an optional local profile,
-create this file outside the catalog and clone:
+create this file outside the catalog:
 
 ```bash
 export HALLMARK_AUTH_FILE="$HM_DEMO_WORKSPACE/auth.yml"
@@ -74,11 +74,14 @@ their own local profile; catalog configuration stores only its name.
 4. Discover the two indexed runs and prepare a local `.hm`.
 
 ```bash
-hallmark clone "$HM_DEMO_URL" ./client \
+hallmark init ./client --from "$HM_DEMO_URL" \
     --auth demo --fmt 'runs/run_{run:03d}.dat'
 cat ./client/.hm/config.yml
 cat ./client/.hm/data.tsv
 ```
+
+The destination can contain existing files when `.hm` is absent; those files
+are preserved. An existing `.hm` is rejected before contacting the data server.
 
 Expected for the illustrative export: two run rows, with sizes and modification
 times where available. Published manifest checksums are attached when present;
@@ -166,7 +169,8 @@ PYTHON
 python ../download_subset.py
 ```
 
-The plan fixes its source, profile reference, destination, paths, and checksums.
+The plan fixes its source, profile reference, backend settings, destination,
+paths, and checksums.
 Later catalog or configuration changes do not redirect it. Without
 `approved=True`, nonempty Python transfers fail before connecting. Check the
 returned `failed` count; successful files remain when another transfer fails.
@@ -177,18 +181,19 @@ remove their temporary file. Repeating a download transfers the selection again.
 Cancellation closes the connections and processes started for the download.
 Byte progress shows an ETA when a total is known; unknown totals stay indeterminate.
 
-8. Request an approved download during cloning, using either interface.
+8. Request an approved download during initialization, using either interface.
 The CLI prepares the catalog first and then displays its normal approval prompt:
 
 ```bash
-hallmark clone "$HM_DEMO_URL" ../clone-and-download \
-    --auth demo --filter 'runs/run_001.dat' --download
+hallmark init ../init-and-download --from "$HM_DEMO_URL" \
+    --auth demo --filter 'runs/run_001.dat' --with-download
 ```
 
-Python receives the completed plan through a callback:
+Declining keeps the completed catalog available. Empty selections need no
+approval. Python receives the completed plan through a callback:
 
 ```bash
-cat > ../clone_with_approval.py <<'PYTHON'
+cat > ../init_with_approval.py <<'PYTHON'
 import os
 from hallmark import Repo
 
@@ -198,13 +203,13 @@ def approve(plan):
     return input("Download these files? [y/N] ").strip().lower() == "y"
 
 
-repo = Repo.clone(
-    os.environ["HM_DEMO_URL"], "../python-clone", auth="demo",
+repo = Repo.init(
+    "../python-init", from_url=os.environ["HM_DEMO_URL"], auth="demo",
     filter="runs/run_001.dat", download=True, approve=approve, progress=True,
 )
 print(repo.dothm.path)
 PYTHON
-python ../clone_with_approval.py
+python ../init_with_approval.py
 ```
 
 9. Explore CyVerse and DESI with the same metadata-only workflow. These examples
@@ -213,10 +218,10 @@ require many directory-listing requests; use a specific subtree when appropriate
 
 ```bash
 cd "$HM_DEMO_WORKSPACE"
-hallmark clone \
+hallmark init ./cyverse --from \
     'https://data.cyverse.org/dav-anon/iplant/commons/cyverse_curated/EHTC_FirstM87Results_Apr2019/' \
-    ./cyverse --filter '**/*.uvfits'
-hallmark clone 'https://data.desi.lbl.gov/public/' ./desi --filter '**/*.fits'
+    --filter '**/*.uvfits'
+hallmark init ./desi --from 'https://data.desi.lbl.gov/public/' --filter '**/*.fits'
 
 cd "$HM_DEMO_WORKSPACE/cyverse"
 hallmark download --all --dry-run
@@ -237,13 +242,14 @@ cd "$HM_DEMO_WORKSPACE"
 python - <<'PYTHON'
 from hallmark import Repo
 
-cyverse = Repo.clone(
-    "https://data.cyverse.org/dav-anon/iplant/commons/"
-    "cyverse_curated/EHTC_FirstM87Results_Apr2019/",
-    "cyverse-python", filter="**/*.uvfits", progress=True,
+cyverse = Repo.init(
+    "cyverse-python",
+    from_url="https://data.cyverse.org/dav-anon/iplant/commons/"
+             "cyverse_curated/EHTC_FirstM87Results_Apr2019/",
+    filter="**/*.uvfits", progress=True,
 )
-desi = Repo.clone(
-    "https://data.desi.lbl.gov/public/", "desi-python",
+desi = Repo.init(
+    "desi-python", from_url="https://data.desi.lbl.gov/public/",
     filter="**/*.fits", progress=True,
 )
 for repo in (cyverse, desi):
@@ -269,17 +275,41 @@ unset HALLMARK_AUTH_FILE
 
 A local or Git-hosted Hallmark repository retains its history. A published
 HTTP/SFTP catalog directory is imported as a snapshot with new local history.
-Use `--source-type git` for a Git endpoint without an obvious `.git` suffix, or
-`--source-type catalog` to require a published snapshot. Git credentials are
-separate from the data remote's `--auth` profile. Filtering an existing Git
-catalog preserves fetched history and adds a local filtered-catalog commit.
+Use `--source-type git` to require a Git endpoint, or `--source-type catalog`
+to require a published snapshot. Automatic HTTP(S) detection checks for
+metadata at the root and in `.hm`, then tries Git if neither snapshot exists.
+Git credentials are separate from data-remote profile references. Cloning
+preserves the complete catalog and Git HEAD. To download selected files after
+cloning, add `--with-download --filter PATTERN`; clone filters require download
+intent and do not remove catalog rows. `--download` remains an alias.
+Declining approval leaves the catalog available, and empty selections do not
+prompt. Raw dataset URLs belong to `init --from`.
 
 `clone` downloads no dataset files by default, so `--no-fetch-data` is now only
-a compatibility alias. `init` creates a local repository; the older remote `build`
-command is deprecated. Discovery uses no `--allow-remote-commands` or
-`--remote-hash` flag, and does not read dataset files to compute checksums.
+a compatibility alias. Plain `init` creates a local repository; the older remote
+`build` command is deprecated in favor of `init --from`. Discovery uses no
+`--allow-remote-commands` or `--remote-hash` flag, and does not read dataset files
+to compute checksums.
 For local `add`/`commit` experiments, use a separate compatible one-format
 repository; downloading a remote catalog does not populate the local object store.
+
+The catalog can also live on GitHub or an HTTPS metadata server while its
+data remote remains on the SSH server. For example, after the team publishes
+`.hm` as a Git repository, collaborators can run:
+
+```bash
+hallmark clone https://github.com/example/lab-catalog.git ./shared-catalog
+```
+
+This uses Git credentials and preserves the stored data URL and profile
+reference. A published snapshot at `https://catalogs.example.org/lab/`
+can be cloned in the same way, starting local history. Cloning metadata alone
+does not require the payload profile.
+
+Use `init --backend NAME --backend-options FILE` to select an installed data
+backend and load its nonsecret options from a YAML mapping. Python accepts
+`backend=NAME, backend_options=options`. See [data backends](../doc/backends.rst)
+for registration and a multiple-server example.
 
 See [the private data guide](../doc/private_data.rst) for profile settings,
 error handling and operational details. The auth-file override above lasts only

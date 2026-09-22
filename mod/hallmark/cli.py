@@ -27,6 +27,7 @@ from . import Repo
 from .helper_functions import validate_path_component
 from .repo_builder import build_repo
 from .downloader import DownloadError
+from .discovery import path_matches
 from .error import CheckoutError, CloneError
 from .repo_config import normalize_tsv_name
 
@@ -157,19 +158,59 @@ def hallmark(ctx):
         ctx.obj = Repo(".")
 
 
+def _backend_options_file(path):
+    """Read a backend's configuration from a YAML mapping."""
+    if path is None:
+        return None
+    with Path(path).open(encoding="utf-8") as handle:
+        options = yaml.safe_load(handle)
+    if not isinstance(options, dict):
+        raise ValueError("Backend options file must contain a YAML mapping")
+    return options
+
+
 @hallmark.command(short_help="Initialize a hallmark repository.")
 @click.argument("path")
-def init(path):
+@click.option("--from", "from_url", help="Discover a raw remote dataset.")
+@click.option("--backend", help="Registered data backend name.")
+@click.option("--backend-options", type=click.Path(exists=True, dir_okay=False),
+              help="YAML mapping of backend-specific options.")
+@click.option("--auth", help="Optional local authentication profile for data access.")
+@click.option("--filter", "filters", multiple=True,
+              help="Include paths matching a glob. May be repeated.")
+@click.option("--fmt", help="Select paths and extract filename parameters.")
+@click.option("--with-download", is_flag=True,
+              help="Review and approve a download after catalog creation.")
+@click.option("--max-workers", type=click.IntRange(min=1), default=4,
+              show_default=True)
+def init(path, from_url, backend, backend_options, auth, filters, fmt,
+         with_download, max_workers):
     """Initialize a hallmark repository at PATH.
 
+    Use --from URL to discover a remote dataset without downloading payloads.
     If PATH ends with `.hm`, a bare repository is created.
     Otherwise, a `.hm` directory is created inside PATH.
     """
-    # attempt to initialize the hallmark repository at the specified path
     with _translate_cli_errors(
-        GitError,
-        prefix=("Failed to initialize hallmark repository " f'at "{path}"')):
-        Repo.init(path)
+        GitError, DownloadError, ValueError, OSError, yaml.YAMLError,
+        prefix=f'Failed to initialize hallmark repository at "{path}"'):
+        options = _backend_options_file(backend_options)
+        if with_download and not from_url:
+            raise ValueError("--with-download requires --from")
+        if with_download and Repo.lwpaths(path)[1] is None:
+            raise ValueError("Use a worktree destination for --with-download")
+        kwargs = dict(from_url=from_url, backend=backend, backend_options=options,
+                      auth=auth, filter=filters or None, fmt=fmt,
+                      progress=True, max_workers=max_workers)
+        if from_url is None and all(value is None for value in
+                                    (backend, options, auth, filters or None, fmt)):
+            repo = Repo.init(path)
+        else:
+            repo = Repo.init(path, **kwargs)
+        if from_url is not None:
+            click.echo(f'Successfully initialized "{path}"')
+        if with_download:
+            _run_download(repo, repo.plan_download(), max_workers=max_workers)
 
 
 @hallmark.command(short_help="Show information of the current directory.")
@@ -279,14 +320,19 @@ def add(repo, encoding, inputs):
 @click.option("--remote-url")
 @click.option("--remote-auth",
               help="Local SSH profile name. An empty string removes the reference.")
+@click.option("--remote-backend", help="Registered data backend name.")
+@click.option("--remote-backend-options", type=click.Path(exists=True, dir_okay=False),
+              help="YAML mapping of backend-specific options.")
 @click.option("--encoding", "encodings", multiple=True)
 @click.pass_obj
-def set_config(repo, fmt, remote_name, remote_url, remote_auth, encodings):
+def set_config(repo, fmt, remote_name, remote_url, remote_auth, remote_backend,
+               remote_backend_options, encodings):
     """Update the current branch config.yml."""
     # if no config changes are requested, raise a ClickException to inform the user
     if (
     fmt is None and remote_name is None and remote_url is None
-    and remote_auth is None and not encodings):
+    and remote_auth is None and remote_backend is None
+    and remote_backend_options is None and not encodings):
         raise ClickException("No config changes requested.")
     encoding_updates = {}
     for item in encodings:
@@ -298,13 +344,17 @@ def set_config(repo, fmt, remote_name, remote_url, remote_auth, encodings):
         encoding_updates[field.strip()] = regex
 
     # use the _translate_cli_errors context manager to handle specific exceptions
-    with _translate_cli_errors(RuntimeError, ValueError, FileNotFoundError):
+    with _translate_cli_errors(RuntimeError, ValueError, OSError, yaml.YAMLError):
+        options = _backend_options_file(remote_backend_options)
         repo.set_config(
             fmt=fmt,
             remote_name=remote_name,
             remote_url=remote_url,
             encoding_updates=encoding_updates or None,
-            **({"remote_auth": remote_auth} if remote_auth is not None else {}))
+            **({"remote_auth": remote_auth} if remote_auth is not None else {}),
+            **({"remote_backend": remote_backend}
+               if remote_backend is not None else {}),
+            **({"remote_backend_options": options} if options is not None else {}))
 
     click.echo("Updated hallmark config.")
 
@@ -426,7 +476,7 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
         _run_download(repo, plan, max_workers=max_workers)
 
 
-@hallmark.command(short_help="Clone a catalog or discover a remote dataset.")
+@hallmark.command(short_help="Clone an existing Hallmark catalog.")
 @click.argument("url")
 @click.argument("path")
 @click.option("--auth", help="Optional local SSH authentication profile.")
@@ -434,11 +484,12 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
               help="Select paths matching a glob. ** matches recursively. "
                    "May be repeated.")
 @click.option("--fmt",
-              help="Select paths and extract parameters using a filename format.")
+              help="Select downloads using a filename format; "
+                   "requires --with-download.")
 @click.option("--source-type", default="auto", show_default=True,
-              type=click.Choice(["auto", "git", "directory", "catalog"]),
+              type=click.Choice(["auto", "git", "catalog"]),
               help="Override automatic source detection.")
-@click.option("--download", "fetch_data", is_flag=True,
+@click.option("--with-download", "--download", "fetch_data", is_flag=True,
               help="Request a download after catalog creation, with confirmation.")
 @click.option("--no-fetch-data", is_flag=True, hidden=True)
 @click.option("--max-workers", type=click.IntRange(min=1), default=4,
@@ -447,19 +498,25 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
 def clone(url, path, auth, filters, fmt, source_type, fetch_data, no_fetch_data,
           max_workers, yes):
     """
-    Clone a catalog or index a remote data directory at PATH.
+    Clone an existing Git catalog or published catalog snapshot at PATH.
 
-    Dataset files are not downloaded by default. Use --download to review
-    and approve a transfer after the catalog has been created.
+    Dataset files are not downloaded by default. Use --with-download to review
+    and approve a transfer. --filter and --fmt select downloads while preserving
+    the complete catalog and Git history. Use init --from for raw datasets.
     """
     if fetch_data and no_fetch_data:
         raise ClickException("--download conflicts with --no-fetch-data")
+    if (filters or fmt is not None) and not fetch_data:
+        raise ClickException("--filter and --fmt require --with-download")
+    if fetch_data and Repo.lwpaths(path)[1] is None:
+        raise ClickException("Use a worktree destination for --with-download")
     if yes:
         click.echo("--yes is deprecated; downloads still require confirmation.",
                    err=True)
     with _translate_cli_errors(DownloadError, GitError, ValueError):
+        path_matches("validation", filter=filters or None, fmt=fmt)
         try:
-            repo = Repo.clone(url, path, auth=auth, filter=filters or None, fmt=fmt,
+            repo = Repo.clone(url, path, auth=auth,
                               source_type=source_type, progress=True,
                               max_workers=max_workers)
         except CloneError as exc:
@@ -469,11 +526,12 @@ def clone(url, path, auth, filters, fmt, source_type, fetch_data, no_fetch_data,
         if fetch_data:
             if repo.worktree is None:
                 raise ClickException("Use a worktree destination for --download")
-            _run_download(repo, repo.plan_download(), max_workers=max_workers)
+            plan = repo.plan_download(filter=filters or None, fmt=fmt)
+            _run_download(repo, plan, max_workers=max_workers)
 
 
 
-@hallmark.command(short_help="Deprecated: use clone for remote datasets.")
+@hallmark.command(short_help="Deprecated: use init --from for remote datasets.")
 @click.argument("directory")
 @click.argument("dataset_name")
 @click.option(
@@ -507,7 +565,7 @@ def build(directory, dataset_name, remotes, config_file, fmts, overwrite,
     """
     Build a catalog at DIRECTORY/DATASET_NAME.hm.
 
-    This command is deprecated. Use hallmark clone URL PATH for remote
+    This command is deprecated. Use hallmark init --from URL PATH for remote
     datasets, or hallmark init PATH to create a local repository.
 
     --dataset-url selects the exact discovery root; otherwise DATASET_NAME
@@ -518,7 +576,7 @@ def build(directory, dataset_name, remotes, config_file, fmts, overwrite,
     provided, existing formats are reused or a generic path catalog is
     created. Dataset files are not downloaded during catalog creation.
     """
-    click.echo("build is deprecated; use hallmark clone URL PATH.", err=True)
+    click.echo("build is deprecated; use hallmark init --from URL PATH.", err=True)
     if config_file and fmts:
         raise ClickException("Use only one of --config-file or --fmt, not both.")
     # validate the dataset name to ensure it is a valid path component

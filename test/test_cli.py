@@ -650,9 +650,11 @@ def test_clone_reports_download_error_cleanly(monkeypatch, tmp_path):
 
 def test_clone_cli_skips_download_when_no_remote_files(monkeypatch, tmp_path):
     repo = SimpleNamespace(worktree=tmp_path,
-                           plan_download=lambda: _download_plan(0, tmp_path))
+                           plan_download=lambda **kwargs: _download_plan(0, tmp_path))
 
     class FakeRepo:
+        lwpaths = Repo.lwpaths
+
         @staticmethod
         def clone(url, path, **kwargs):
             return repo
@@ -1349,25 +1351,29 @@ def test_clone_cli_defaults_to_metadata_only(monkeypatch, tmp_path, arguments):
     assert "Download these files?" not in result.output
 
 
-def test_clone_cli_forwards_discovery_options(monkeypatch, tmp_path):
+def test_init_cli_forwards_discovery_options(monkeypatch, tmp_path):
     captured = {}
+    options = tmp_path / "backend.yml"
+    options.write_text("collection: latest\n")
 
     class FakeRepo:
         @staticmethod
-        def clone(url, path, **kwargs):
-            captured.update(url=url, path=path, **kwargs)
+        def init(path, **kwargs):
+            captured.update(path=path, **kwargs)
             return SimpleNamespace(worktree=Path(path))
 
     monkeypatch.setattr(cli_module, "Repo", FakeRepo)
     result = CliRunner().invoke(hallmark, [
-        "clone", "ssh://lab-data/export/", str(tmp_path / "target"), "--auth", "lab",
+        "init", str(tmp_path / "target"), "--from", "ssh://lab-data/export/",
+        "--auth", "lab", "--backend", "ssh", "--backend-options", str(options),
         "--filter", "**/*.fits", "--filter", "README*", "--fmt", "{name}.fits",
-        "--source-type", "directory", "--max-workers", "2"])
+        "--max-workers", "2"])
     assert result.exit_code == 0, result.output
     assert captured == {
-        "url": "ssh://lab-data/export/", "path": str(tmp_path / "target"),
-        "auth": "lab", "filter": ("**/*.fits", "README*"), "fmt": "{name}.fits",
-        "source_type": "directory", "progress": True, "max_workers": 2}
+        "from_url": "ssh://lab-data/export/", "path": str(tmp_path / "target"),
+        "auth": "lab", "backend": "ssh", "backend_options": {"collection": "latest"},
+        "filter": ("**/*.fits", "README*"), "fmt": "{name}.fits",
+        "progress": True, "max_workers": 2}
 
 
 def test_clone_cli_rejects_conflicting_download_aliases():
@@ -1417,3 +1423,89 @@ def test_cli_downloads_only_approved_selected_payload(
         assert requests_made == []
         assert not (target / "tiny.fits").exists()
     assert not (target / "other.txt").exists()
+
+
+@pytest.mark.parametrize("options", ["[]\n", "scalar\n", "options: [\n"])
+def test_init_cli_rejects_invalid_backend_options_before_access(
+        monkeypatch, tmp_path, options):
+    config = tmp_path / "options.yml"
+    config.write_text(options)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("Invalid options must be rejected before initialization")
+
+    monkeypatch.setattr(Repo, "init", fail)
+    result = CliRunner().invoke(hallmark, [
+        "init", str(tmp_path / "target"), "--from", "https://example.test/data/",
+        "--backend-options", str(config)])
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert not (tmp_path / "target").exists()
+
+
+@pytest.mark.parametrize("arguments", [
+    ["--filter", "*.fits"], ["--fmt", "{name}.fits"],
+    ["--with-download", "--fmt", "{name:invalid}"],
+])
+def test_clone_cli_rejects_invalid_selection_before_source_access(
+        monkeypatch, arguments):
+    def fail(*args, **kwargs):
+        raise AssertionError("Invalid selection must fail before cloning")
+
+    monkeypatch.setattr(Repo, "clone", fail)
+    result = CliRunner().invoke(hallmark, ["clone", "source", "target", *arguments])
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+
+
+def test_init_cli_success_does_not_echo_source_credentials(monkeypatch, tmp_path):
+    def initialize(path, **kwargs):
+        return SimpleNamespace(worktree=Path(path))
+
+    monkeypatch.setattr(Repo, "init", initialize)
+    result = CliRunner().invoke(hallmark, [
+        "init", str(tmp_path / "target"), "--from",
+        "https://user:secret@example.test/data/?token=private"])
+    assert result.exit_code == 0, result.output
+    assert "Successfully initialized" in result.output
+    assert "secret" not in result.output
+    assert "private" not in result.output
+
+
+def test_set_config_cli_persists_backend_options(monkeypatch, tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    options = tmp_path / "backend.yml"
+    options.write_text("collection: [release-1, release-2]\n")
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, [
+        "set-config", "--remote-url", "https://example.test/data/",
+        "--remote-backend", "http", "--remote-backend-options", str(options)])
+    assert result.exit_code == 0, result.output
+    remote = Repo(repo.worktree).state.config["remote"]
+    assert remote["backend"] == "http"
+    assert remote["backend_options"] == {"collection": ["release-1", "release-2"]}
+
+
+@pytest.mark.parametrize("answer", ["y\n", "n\n", ""])
+def test_init_cli_downloads_only_after_confirmation(monkeypatch, tmp_path, answer):
+    from hallmark.transport import OperationContext
+    from hallmark.transport.base import RemoteObjectMissing
+    from mock_server import MockServer
+
+    def metadata(context, path):
+        if path == "":
+            return '<h1>Index of data</h1><a href="a.fits">a.fits</a>'
+        raise RemoteObjectMissing("Missing metadata")
+
+    server = MockServer("https://example.test/data/")
+    server.add_file("a.fits", b"fits")
+    monkeypatch.setattr(OperationContext, "read_text", metadata)
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    destination = tmp_path / "target"
+    result = CliRunner().invoke(hallmark, [
+        "init", str(destination), "--from", "https://example.test/data/",
+        "--with-download"], input=answer)
+    assert "Download these files? [y/N]" in result.output
+    assert Repo(destination).state.data["path"].tolist() == ["a.fits"]
+    assert (destination / "a.fits").exists() == (answer == "y\n")
+    assert (result.exit_code == 0) == (answer == "y\n")

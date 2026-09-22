@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from hallmark.discovery import discover, path_matches
+from hallmark.backends import HttpBackend
 from hallmark.transport.base import (
     CapabilityError, DownloadError, RemoteEntry, RemoteSpec, TransferCancelled,
 )
@@ -16,6 +17,8 @@ class Source:
         self.remote = RemoteSpec.parse(url)
         self.pages = pages
         self.reads = []
+        if self.remote.scheme in {"http", "https"}:
+            self.transport = HttpBackend(self)
 
     def read_text(self, path):
         self.reads.append(path)
@@ -164,7 +167,7 @@ def test_redirected_listing_uses_final_directory_and_deduplicates_crawl(final_ur
         "alias/": index("file.fits", "nested/"),
         "release one/nested/": index("other.fits"),
     })
-    source.transport = SimpleNamespace(text_urls={"alias/": final_url})
+    source.transport.text_urls = {"alias/": final_url}
     entries = discover(source)
     assert [entry.path for entry in entries] == [
         "release one/file.fits", "release one/nested/other.fits"]
@@ -226,7 +229,7 @@ def test_sftp_metadata_and_progress_callback():
         on_directory("nested")
         yield RemoteEntry(path="nested/file.bin", size=20)
 
-    source.transport = SimpleNamespace(iter_entries=entries)
+    source.transport = SimpleNamespace(iter_entries=entries, prepare=lambda: None)
     snapshots = []
     selected = discover(source, filter="**/*.fits", progress=snapshots.append)
     assert selected == [RemoteEntry(path="root.fits", size=12, mtime=123)]

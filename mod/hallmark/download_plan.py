@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
 from typing import Optional, Union
 from urllib.parse import urlsplit, urlunsplit
+
+from .transport.base import backend_name, freeze_backend_options
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,8 @@ class DownloadPlan:
         remote_name (str, optional): Name of the selected data remote.
         estimated_bytes_per_second (float, optional): Positive rate supplied
             by the caller for duration estimates.
+        remote_backend (str, optional): Registered backend selected for transfer.
+        backend_options (mapping): Immutable backend configuration snapshot.
     """
 
     items: tuple[DownloadItem, ...]
@@ -71,6 +76,8 @@ class DownloadPlan:
     remote_auth: Optional[str] = None
     remote_name: Optional[str] = None
     estimated_bytes_per_second: Optional[float] = None
+    remote_backend: Optional[str] = None
+    backend_options: Mapping = field(default_factory=dict, repr=False, hash=False)
 
     def __post_init__(self) -> None:
         """Copy the selection and validate the source fields and rate."""
@@ -80,8 +87,13 @@ class DownloadPlan:
         if any(not isinstance(item, DownloadItem) for item in self.items):
             raise TypeError("items must contain DownloadItem values")
         if any(value is not None and not isinstance(value, str) for value in
-               (self.remote_url, self.remote_auth, self.remote_name)):
+               (self.remote_url, self.remote_auth, self.remote_name,
+                self.remote_backend)):
             raise TypeError("remote fields must be strings or None")
+        if self.remote_backend is not None:
+            backend_name(self.remote_backend)
+        object.__setattr__(self, "backend_options",
+                           freeze_backend_options(self.backend_options))
         rate = self.estimated_bytes_per_second
         if rate is not None and (
             isinstance(rate, bool) or not isinstance(rate, (int, float))
@@ -134,6 +146,7 @@ class DownloadPlan:
             parsed = urlsplit(self.remote_url)
             source = urlunsplit(parsed._replace(
                 netloc=parsed.netloc.rsplit("@", 1)[-1], query="", fragment=""))
+        backend = f"\nBackend: {self.remote_backend}" if self.remote_backend else ""
         return (f"{self.file_count} file(s); {size}; estimated duration: {duration}"
-                f"\nSource: {source}"
+                f"\nSource: {source}{backend}"
                 f"\nDestination: {self.output_path}")
