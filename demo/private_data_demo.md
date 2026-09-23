@@ -47,11 +47,12 @@ mkdir "$HM_DEMO_WORKSPACE"
 cd "$HM_DEMO_WORKSPACE"
 ```
 
-4. Discover the two indexed runs and prepare a local `.hm`. The format selects
-run files and extracts their run numbers; it does not authorize a download.
+4. Discover the two indexed runs and prepare a local `.hm`. The filter selects
+run files; the explicit format extracts their run numbers instead of inferring
+a template. Initialization does not authorize a download.
 
 ```bash
-hallmark init ./client --from "$HM_DEMO_URL" --fmt 'runs/run_{run:03d}.dat'
+hallmark init ./client --from "$HM_DEMO_URL" --filter 'runs/*.dat' --format 'runs/run_{run:03d}.dat'
 cd client
 ```
 
@@ -61,11 +62,12 @@ Only listings and published metadata are read. Available sizes, modification
 times, and published checksums are retained; missing checksums stay unknown.
 Dataset files are not downloaded to calculate checksums.
 
-Omit `--fmt` to catalog every file below the dataset root. A filter such as
-`--filter 'runs/*.dat'` selects relative paths without defining parameters.
-`init --backend NAME --backend-options FILE` selects an installed data backend
-and reads nonsecret options from a YAML mapping. See
-[data backends](../doc/backends.rst) for registration and multiple-server routing.
+Omit `--filter` to catalog every file below the dataset root. Omit `--format`
+to detect filename templates automatically from the selected paths. An explicit
+format overrides detection; either way, unmatched files remain cataloged.
+Use `hallmark sources`
+to inspect named sources; `--release` and `--collection` select their contents.
+See [data backends](../doc/backends.rst) for source registration and adapter routing.
 
 5. Review an offline plan for one run, then approve its transfer. The second
 command displays the plan again and asks for confirmation; answer `y` only when
@@ -101,22 +103,37 @@ hallmark download runs/run_001.dat --output ../via-sftp --dry-run
 
 Both `ssh://` and `sftp://` use SFTP for discovery and data transfer. Relative
 output paths use the current directory. A bare `.hm` catalog requires an
-explicit `--output`. To set a named authentication profile, use
-`hallmark set-config --remote-name origin --remote-auth PROFILE`; an empty
-profile name returns to SSH configuration alone.
+explicit `--output`, or the interactive chooser prompts for a directory.
+Authentication uses `~/.ssh/config` and the SSH agent; Hallmark has no
+authentication-profile file or flags.
 
 7. Use the same review step in Python. The
 [scientific workflows notebook](scientific_workflows_python.ipynb) demonstrates
 `Repo.plan_download()` followed by explicit approval and
 `repo.download(plan, approved=True)`. It stops on refusal or returned transfer
-failures. A plan retains its source, profile reference, backend settings,
+failures. A plan retains its source, backend settings,
 destination, paths, and checksums even if repository configuration later changes.
 
-8. To review a download as part of initialization, add `--with-download` to an
-`init --from` command. The catalog is created before the approval prompt;
-declining keeps it available. Python accepts `download=True` and an
-`approve(plan)` callback. The [private data guide](../doc/private_data.rst)
-contains both forms.
+8. Plain initialization and cloning do not download payloads. To choose files
+interactively from the completed catalog, run the following command. Choose
+`patterns` and enter one raw relative-path glob per line, ending with a blank
+line, or choose `all`. Review recorded sizes, then choose `download`, `change`,
+or `skip` (the default). Unknown file sizes remain unknown.
+
+```bash
+hallmark download --interactive
+```
+
+Add `--dry-run` to stop after the preview. Initialization never offers downloads.
+CLI cloning reviews a download plan after copying the complete catalog by default;
+use `clone --filter` to narrow transfers or `clone --interactive` for this chooser.
+Use `clone --no-download` to skip review. Without a terminal, clone keeps the
+catalog, skips downloading, and prints commands reflecting the selected filters
+and output directory. Declining or EOF during clone's review preserves the catalog
+and exits successfully; an interrupt or transfer failure preserves it but exits
+with an error. Python continues to use `repo.plan_download()` and then
+`repo.download(plan, approved=True)`. The
+[private data guide](../doc/private_data.rst) describes both interfaces.
 
 9. Use the same discovery workflow for public datasets. The
 [scientific CLI workflows](scientific_workflows_cli.md) select one EHT file from
@@ -133,19 +150,18 @@ SSH data URL. The uncommitted configuration change in step 6 remains local.
 
 ```bash
 cd "$HM_DEMO_WORKSPACE"
-hallmark clone ./client/.hm ./catalog-copy
+hallmark clone ./client/.hm ./catalog-copy --no-download
 ```
 
 `clone` copies existing catalogs; raw dataset URLs belong to `init --from`.
 A Git catalog can live on GitHub while its data remains on the SSH server. A
 published HTTP/SFTP catalog snapshot can likewise use a different data server;
 snapshot imports start local history. Cloning metadata does not require the
-configured data profile or dataset credentials. Git catalog authentication and
+dataset credentials. Git catalog authentication and
 data authentication are independent.
 
-Clone preserves the complete catalog. Its `--filter` and `--fmt` options select
-optional downloads and require `--with-download` (`--download` is an alias).
-They do not remove catalog rows. Plain `init` creates a local repository; the
+Clone preserves the complete catalog. `download --filter` selects transfers
+without removing catalog rows. Plain `init` creates a local repository; the
 legacy remote `build` command is deprecated in favor of `init --from`.
 Downloading files alone does not populate the local object store; the scientific
 workflows show how to add and commit selected local inputs before branching.

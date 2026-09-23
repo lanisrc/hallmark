@@ -32,10 +32,22 @@ settings file; they do not duplicate an unchanged scientific input.
 
 `init --from` discovers a raw dataset and creates a catalog using directory
 listings and published metadata. It does not download dataset files. Its
-filters select catalog entries. `clone` copies an existing catalog; clone
-filters select optional downloads and require `--with-download`. Every nonempty
+`--filter` globs select catalog entries. Filename templates are detected from
+those paths automatically; `--format` overrides detection without excluding
+unmatched files. A single selected file may have no inferable template and is
+still cataloged. `clone` copies a complete existing
+catalog. Select transfers separately with `download --filter`. Every nonempty
 CLI transfer displays its plan and prompts for approval. `--dry-run` prepares an
 offline plan without transferring files. Unknown sizes remain unknown.
+
+For interactive selection, use `hallmark download --interactive`. It accepts
+one raw glob per line or an all-files choice, shows recorded sizes, and lets you
+download, change the selection, or skip. Initialization never offers downloads.
+CLI cloning copies the complete catalog and then reviews a download plan by
+default. Use `clone --interactive` for the chooser, `clone --filter` to narrow
+transfers, or `clone --no-download` for metadata alone. Without a terminal, clone
+keeps the catalog and prints commands for downloading later.
+The examples below keep explicit selections so their intended inputs are clear.
 
 Each example uses a working directory containing `.hm`. After download,
 `hallmark add '{name}'` indexes the selected local input and settings file;
