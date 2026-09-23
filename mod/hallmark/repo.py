@@ -47,6 +47,7 @@ from .repo_worktree import (
 from .repo_config import (
     branch_encodings,
     branch_fmt,
+    normalize_remotes,
     row_to_path,
     set_config,
     single_data_fmt)
@@ -97,6 +98,7 @@ class Repo:
         self.dothm = Dothm(dothm_path)
         self.worktree = worktree_path and Worktree(worktree_path)
         self.state = self.dothm.load()
+        normalize_remotes(self.state.config.get("remote"))
         self.paraframe_cls = ParaFrame
         self.download_result = None
 
@@ -176,59 +178,43 @@ class Repo:
         pf["sha1"] = [checksums[path] for path in full_paths]
 
     @classmethod
-    def init(cls, path: Union[Path, str], *, from_url=None, backend=None,
-             backend_options=None, auth=None, filter=None, fmt=None,
-             download=False, approve=None, progress=False, max_workers=4) -> "Repo":
-        """
-        Initialize a local repository, optionally discovering a remote dataset.
+    def init(cls, path: Union[Path, str], *, source=None, release=None,
+             collections=None, filter=None, format=None, progress=False) -> "Repo":
+        """Initialize a local repository or catalog a named source or raw URL.
 
-        Remote discovery reads listings and published checksums without fetching
-        payloads. Existing destination files are preserved; an existing ``.hm``
-        is rejected before contacting the remote dataset.
+        Discovery reads listings and published checksums without fetching data.
+        Existing destination files are preserved; an existing catalog is rejected.
 
         Args:
             path (Path | str): Worktree or bare ``.hm`` repository destination.
-            from_url (str, optional): Raw remote dataset to discover.
-            backend (str, optional): Registered data backend name.
-            backend_options (dict, optional): Backend-specific configuration.
-            auth (str, optional): Local authentication profile for data access.
-            filter (str | list[str], optional): Relative path glob or globs.
-            fmt (str, optional): Filename format for selection and parameters.
-            download (bool): Request approved downloads after discovery.
-            approve (callable, optional): Callback returning True to approve a plan.
-            progress (bool | callable): Discovery and download progress display.
-            max_workers (int): Maximum download workers. Defaults to 4.
+            source (str, optional): Registered data source name or dataset URL.
+            release (str, optional): Explicit release for a named source.
+            collections (str | list[str], optional): Collections within the release.
+                Omission catalogs the entire release.
+            filter (str | list[str], optional): Relative path inclusion globs.
+            format (str, optional): Named filename template for extra columns,
+                overriding automatic detection from the filtered paths.
+                Unmatched files remain in the catalog. Detected templates and
+                their columns are combined in one table; literal paths remain
+                authoritative. No inferred template is required for cataloging.
+            progress (bool | callable): Display discovery progress or receive updates.
 
         Returns:
-            Repo: Initialized repository, retained if download approval is declined.
+            Repo: Initialized repository without downloaded data files.
 
         Raises:
             DestinationExistsError: If remote initialization would replace a catalog.
-            ValueError: If remote options are supplied without ``from_url``.
-            DownloadError: If discovery fails or download approval is unavailable.
+            ValueError: If source options or the extraction template are invalid.
+            DownloadError: If remote discovery fails.
         """
         from .catalog import initialize_remote
-        from .downloader import DownloadError, _require_positive_integer
 
-        _require_positive_integer(max_workers, label="max_workers")
-        if from_url is not None:
-            if download and not callable(approve):
-                raise DownloadError(
-                    "Downloading during init requires an approve(plan) callback")
-            if download and cls.lwpaths(path)[1] is None:
-                raise DownloadError(
-                    "Initialize a worktree to download; "
-                    "bare catalogs need an output path")
-            repo = initialize_remote(
-                cls, path, from_url, backend=backend, backend_options=backend_options,
-                auth=auth, filter=filter, fmt=fmt, progress=progress)
-            if download:
-                repo._download_after_creation(
-                    approve=approve, max_workers=max_workers, progress=progress)
-            return repo
-        if any(value is not None for value in
-               (backend, backend_options, auth, filter, fmt, approve)) or download:
-            raise ValueError("Remote initialization options require from_url")
+        if source is not None:
+            return initialize_remote(
+                cls, path, source, release=release, collections=collections,
+                filter=filter, format=format, progress=progress)
+        if any(value is not None for value in (release, collections, filter, format)):
+            raise ValueError("Remote initialization options require source")
         dothm_path, worktree_path = cls.lwpaths(path)
         dothm = Dothm.init(dothm_path)
         (dothm.path / "config.yml").write_text(Dothm.config_template(),
@@ -240,114 +226,41 @@ class Repo:
             Worktree.init(worktree_path)
         return cls(path)
 
-    def _download_after_creation(self, *, approve, max_workers, progress,
-                                 filter=None, fmt=None):
-        """Run an approved transfer after catalog creation has completed."""
-        from .downloader import DownloadError
-
-        plan = self.plan_download(filter=filter, fmt=fmt)
-        if plan.file_count and approve(plan) is True:
-            self.download_result = self.download(
-                plan, approved=True, max_workers=max_workers, progress=progress)
-            if self.download_result["failed"]:
-                details = "\n".join(self.download_result["errors"][:5])
-                raise DownloadError(
-                    f"Failed to download {self.download_result['failed']} "
-                    f"file(s):\n{details}")
-
     @classmethod
-    def clone(
-        cls,
-        url: str,
-        path: Union[Path, str],
-        *,
-        auth: Optional[str] = None,
-        filter=None,
-        fmt: Optional[str] = None,
-        source_type: str = "auto",
-        progress: bool = False,
-        download: bool = False,
-        approve=None,
-        max_workers: int = 4,
-        fetch_data: Optional[bool] = None,
-        show_progress: Optional[bool] = None,
-    ) -> "Repo":
-        """
-        Clone an existing Hallmark Git catalog or published snapshot.
+    def clone(cls, url: str, path: Union[Path, str], *,
+              source_type: str = "auto", progress: bool = False) -> "Repo":
+        """Clone a complete Hallmark Git catalog or published snapshot.
 
-        Git sources retain their history. Published catalog snapshots
-        start new local history. Dataset files are
-        downloaded only when requested and approved after catalog creation.
-        Declining approval leaves the catalog available without dataset files.
+        Git sources retain their history. Published snapshots start new history.
+        Dataset files are never downloaded; plan and execute transfers separately.
 
         Args:
             url (str): Existing Git catalog or published snapshot location.
             path (Path | str): New worktree or bare ``.hm`` repository path.
-            auth (str, optional): Local profile for snapshot metadata access.
-                Git sources use Git's authentication configuration instead.
-            filter (str | list[str], optional): Download selection globs.
-                Requires ``download=True``; the catalog remains complete.
-            fmt (str, optional): Filename format used to select downloads.
-                Requires ``download=True``.
             source_type (str): ``auto``, ``git``, or ``catalog``.
-                Defaults to automatic source detection.
-            progress (bool): Show download progress. Defaults
-                to False.
-            download (bool): Request downloads after preparing the catalog.
-                Defaults to False and requires an approval callback when True.
-            approve (callable, optional): Called with the completed download
-                plan. Return the Boolean True to approve the transfer.
-            max_workers (int): Maximum download workers. Defaults to 4.
-            fetch_data (bool, optional): Compatibility alias for ``download``.
-            show_progress (bool, optional): Compatibility alias for ``progress``.
+            progress (bool): Reserved for metadata progress reporting.
 
         Returns:
-            Repo: The cloned repository. ``download_result`` contains results
-            when an approved, nonempty download was performed.
+            Repo: Complete cloned catalog without downloaded data files.
 
         Raises:
             DestinationExistsError: If the destination already exists.
             CloneError: If a requested catalog is missing or invalid.
-            ValueError: If source options are invalid or conflict.
-            DownloadError: If metadata access or downloading fails, or a download
-                is requested without a callback or worktree destination.
+            ValueError: If source options are invalid.
+            DownloadError: If metadata access fails.
         """
         from .catalog import clone_catalog
-        from .discovery import path_matches
-        from .downloader import DownloadError, _require_positive_integer
 
-        _require_positive_integer(max_workers, label="max_workers")
-        if fetch_data is not None:
-            if download and not fetch_data:
-                raise ValueError("download and fetch_data conflict")
-            download = fetch_data
-        if show_progress is not None:
-            progress = show_progress
-        if (filter is not None or fmt is not None) and not download:
-            raise ValueError("clone filter and fmt require download=True; "
-                             "use init(from_url=...) to select a new catalog")
-        if download and not callable(approve):
-            raise DownloadError(
-                "Downloading during clone requires an approve(plan) callback")
-        if download and cls.lwpaths(path)[1] is None:
-            raise DownloadError(
-                "Clone a worktree to download; bare catalogs need an output path")
-        path_matches("validation", filter=filter, fmt=fmt)
-        repo = clone_catalog(cls, url, path, auth=auth, source_type=source_type)
-        if download:
-            repo._download_after_creation(
-                approve=approve, max_workers=max_workers, progress=progress,
-                filter=filter, fmt=fmt)
-        return repo
+        return clone_catalog(cls, url, path, source_type=source_type)
 
     def plan_download(self, output_path=None, *, file_paths=None, tsv_names=None,
-                      all_files=False, filter=None, fmt=None, remote_name=None,
+                      all_files=False, filter=None, remote_name=None,
                       estimated_bytes_per_second=None):
         """
         Plan a download using the local catalog without contacting a server.
 
         With no explicit paths or TSVs, select the complete catalog before
-        applying any filter or filename format. Planning does not approve
+        applying inclusion globs. Planning does not approve
         the transfer.
 
         Args:
@@ -358,7 +271,6 @@ class Repo:
             all_files (bool): Select all configured files. Cannot be combined
                 with explicit paths or TSVs. Defaults to False.
             filter (str | list[str], optional): Relative path glob or globs.
-            fmt (str, optional): Filename format that selected paths must match.
             remote_name (str, optional): Configured data remote to use.
             estimated_bytes_per_second (float, optional): Positive transfer
                 rate for duration estimates. No rate is measured while planning.
@@ -370,13 +282,13 @@ class Repo:
         Raises:
             DownloadError: If the catalog, remote, selection, or destination
                 is invalid.
-            ValueError: If a filter, format, or supplied rate is invalid.
+            ValueError: If an inclusion pattern or supplied rate is invalid.
         """
         from .downloader import plan_download
 
         return plan_download(
             self, output_path, file_paths=file_paths, tsv_names=tsv_names,
-            all_files=all_files, filter=filter, fmt=fmt, remote_name=remote_name,
+            all_files=all_files, filter=filter, remote_name=remote_name,
             estimated_bytes_per_second=estimated_bytes_per_second)
 
     def download(self, plan, *, approved=False, max_workers=4, progress=False):
@@ -462,7 +374,6 @@ class Repo:
         remote_name: Optional[str] = None,
         remote_url: Optional[str] = None,
         encoding_updates: Optional[Dict[str, str]] = None,
-        remote_auth: Optional[str] = None,
         remote_backend: Optional[str] = None,
         remote_backend_options: Optional[dict] = None,
     ) -> dict:
@@ -473,8 +384,6 @@ class Repo:
             fmt (str, optional): Data format specification.
             remote_name (str, optional): Name of the remote repository.
             remote_url (str, optional): URL of the remote repository.
-            remote_auth (str, optional): Local SSH profile name. An empty string
-                removes the reference; None leaves it unchanged.
             remote_backend (str, optional): Registered data backend name.
             remote_backend_options (dict, optional): Backend-specific configuration.
             encoding_updates (dict[str, str], optional): Updates to encoding rules.
@@ -488,7 +397,6 @@ class Repo:
             remote_name=remote_name,
             remote_url=remote_url,
             encoding_updates=encoding_updates,
-            **({"remote_auth": remote_auth} if remote_auth is not None else {}),
             **({"remote_backend": remote_backend}
                if remote_backend is not None else {}),
             **({"remote_backend_options": remote_backend_options}

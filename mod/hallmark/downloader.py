@@ -630,6 +630,7 @@ def _select_download_items(
     file_paths: Sequence[str] = (),
     tsv_names: Sequence[str] = (),
     all_files: bool = False,
+    catalog_only: bool = False,
     ) -> list[DownloadItem]:
     """
     Select files to download from a hallmark repository based on the provided
@@ -697,8 +698,9 @@ def _select_download_items(
                 add_file(relative_path, _row_checksum(row), row)
 
     # Add explicitly requested file paths to the selected files.
-    for file_path in file_paths:
-        add_file(file_path)
+    if not catalog_only:
+        for file_path in file_paths:
+            add_file(file_path)
     # Organize data configuration entries by their TSV names for easier access.
     entries_by_tsv: dict[str, list[dict]] = {}
     for entry in data_config:
@@ -789,6 +791,11 @@ def _select_download_items(
     elif explicit_paths and not entries_by_tsv:
         add_frame(repo.state.data, data_config, explicit_only=True)
 
+    missing = explicit_paths - set(selected)
+    if missing:
+        raise DownloadError(
+            "Paths are not in the catalog: " + ", ".join(sorted(missing)))
+
     return [DownloadItem(path, checksum, *metadata.get(path.as_posix(), (None, None)))
             for path, checksum in selected.values()]
 
@@ -840,7 +847,6 @@ def plan_download(
     tsv_names: Optional[Sequence[str]] = None,
     all_files: bool = False,
     filter: Optional[Union[str, Sequence[str]]] = None,
-    fmt: Optional[str] = None,
     remote_name: Optional[str] = None,
     estimated_bytes_per_second: Optional[float] = None,
 ) -> DownloadPlan:
@@ -859,7 +865,6 @@ def plan_download(
         all_files (bool): Select all configured files. Cannot be combined
             with explicit paths or TSVs. Defaults to False.
         filter (str | list[str], optional): Relative path glob or globs.
-        fmt (str, optional): Filename format that selected paths must match.
         remote_name (str, optional): Configured data remote to use.
         estimated_bytes_per_second (float, optional): Positive rate used
             to estimate duration when every file size is known.
@@ -871,7 +876,7 @@ def plan_download(
     Raises:
         DownloadError: If the catalog, remote, selection, or destination
             is invalid.
-        ValueError: If a filter, format, or supplied rate is invalid.
+        ValueError: If an inclusion pattern or supplied rate is invalid.
     """
     if output_path is None:
         output_path = getattr(repo, "worktree", None)
@@ -889,11 +894,12 @@ def plan_download(
         raise DownloadError("all_files cannot be combined with paths or TSVs")
     items = _select_download_items(
         repo, file_paths=file_paths, tsv_names=tsv_names,
-        all_files=all_files or (not file_paths and not tsv_names))
-    if filter is not None or fmt is not None:
+        all_files=all_files or (not file_paths and not tsv_names), catalog_only=True)
+    if filter is not None:
         from .discovery import path_matches
+        path_matches("validation", filter=filter)
         items = [item for item in items if path_matches(
-            item.relative_path.as_posix(), filter=filter, fmt=fmt)]
+            item.relative_path.as_posix(), filter=filter)]
     remote = _select_remote_config(repo, remote_name)
     if items and (remote is None or not remote.get("url")):
         raise DownloadError("No remote URL is configured in config.yml")
@@ -901,7 +907,7 @@ def plan_download(
     source = None
     if remote.get("url"):
         source = RemoteSpec.parse(
-            remote["url"], remote.get("auth"), backend=remote.get("backend"),
+            remote["url"], backend=remote.get("backend"),
             backend_options=remote.get("backend_options"))
     for item in items:
         try:
@@ -911,7 +917,7 @@ def plan_download(
             raise DownloadError(str(exc)) from exc
     return DownloadPlan(
         tuple(items), remote.get("url"), output_root,
-        remote_auth=remote.get("auth"), remote_name=remote.get("name"),
+        remote_name=remote.get("name"),
         estimated_bytes_per_second=estimated_bytes_per_second,
         remote_backend=source.backend if source is not None else None,
         backend_options=remote.get("backend_options"))
@@ -955,7 +961,7 @@ def execute_download_plan(
     if plan.output_path.resolve() != plan.output_path:
         raise DownloadError("Download destination changed since planning")
     remote = RemoteSpec.parse(
-        plan.remote_url, plan.remote_auth, backend=plan.remote_backend,
+        plan.remote_url, backend=plan.remote_backend,
         backend_options=plan.backend_options)
     return _download_selected(
         remote, plan.output_path,
@@ -1028,7 +1034,7 @@ def download_remote_data(
     if not remote_url:
         raise DownloadError("Remote URL not configured in config.yml")
     remote_spec = RemoteSpec.parse(
-        remote_url, remote_config.get("auth"), backend=remote_config.get("backend"),
+        remote_url, backend=remote_config.get("backend"),
         backend_options=remote_config.get("backend_options"))
     # If there are still no files selected for download
     if not selected_files:

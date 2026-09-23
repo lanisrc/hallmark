@@ -716,7 +716,6 @@ def build_repo(
     overwrite: bool = False,
     *,
     dataset_url: str | None = None,
-    dataset_auth: str | None = None,
     index_format: str | None = None,
     allow_remote_commands: bool = False,
     remote_hash: bool = False,
@@ -726,7 +725,7 @@ def build_repo(
     """
     Build a remote catalog using the deprecated builder interface.
 
-    Prefer ``Repo.init(path, from_url=url)`` for remote datasets.
+    Prefer ``Repo.init(path, source=url)`` for remote datasets.
     Discovery reads listings and published checksum manifests without
     downloading dataset files.
 
@@ -745,7 +744,6 @@ def build_repo(
             Defaults to False; existing formats may be reused without it.
         dataset_url (str, optional): Exact discovery root. Defaults to the
             CyVerse curated-data directory for ``dataset_name``.
-        dataset_auth (str, optional): Local SSH profile for discovery.
         index_format (str, optional): Obsolete listing option. None,
             ``auto``, and ``cyverse-html`` are accepted; detection is automatic.
         allow_remote_commands (bool): Obsolete option, ignored when supplied.
@@ -765,7 +763,7 @@ def build_repo(
         DownloadError: If remote discovery fails.
     """
     warnings.warn(
-        "build_repo is deprecated; use Repo.init(path, from_url=url)",
+        "build_repo is deprecated; use Repo.init(path, source=url)",
         DeprecationWarning, stacklevel=2)
     if remote_hash:
         raise CapabilityError(
@@ -781,7 +779,7 @@ def build_repo(
     base_url = (dataset_url if dataset_url is not None else
                 _remote_url(_CYVERSE_CURATED_BASE, f"{dataset_name}/"))
     source = RemoteSpec.parse(
-        base_url, dataset_auth, backend=backend, backend_options=backend_options)
+        base_url, backend=backend, backend_options=backend_options)
     with OperationContext(source) as context:
         return _build_repo(repo_path, dataset_name, fmt_entries, config_file,
                            remotes, overwrite, context)
@@ -1057,14 +1055,12 @@ def _build_repo(
     if not remotes:
         # use a default remote named "origin" pointing to the base_url if none provided
         remotes = [{"name": "origin"}]
-        if source.remote.auth is not None:
-            remotes[0]["auth"] = source.remote.auth
         if source.remote.backend_options:
             remotes[0]["backend_options"] = thaw_backend_options(
                 source.remote.backend_options)
     # create the final remotes list by adding the base_url to each remote entry
     final_remotes = [{"url": base_url, **remote} for remote in remotes]
-    default_backend = RemoteSpec.parse(base_url, source.remote.auth).backend
+    default_backend = RemoteSpec.parse(base_url).backend
     for remote in final_remotes:
         if remote["url"] == base_url:
             if source.remote.backend != default_backend:

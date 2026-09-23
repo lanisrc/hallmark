@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from shutil import rmtree
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import pandas as pd
-import parse
 import yaml
 
-from .discovery import discover, path_matches
+from .discovery import CATALOG_COLUMNS, discover, extraction_parser, path_matches
+from .sources import resolve_source
 from .dothm import Dothm
 from .error import CloneError, DestinationExistsError
+from .fmt_detection import detect_fmt
 from .helper_functions import as_list_of_dicts
 from .repo_config import fmt_fields, normalize_remotes, normalize_tsv_name, row_to_path
 from .transport import OperationContext, RemoteSpec
@@ -124,41 +126,55 @@ def _metadata_commit(repo, files, message):
     repo.state = repo.dothm.load()
 
 
-def _write_inventory(repo, source, entries, fmt):
+def _write_inventory(repo, source, entries, format, provenance):
     """Write discovered files and their source to a new catalog."""
-    columns = ["path", "checksum_algorithm", "checksum", "size_bytes", "mtime"]
+    columns = list(CATALOG_COLUMNS)
+    templates = [format] if format is not None else detect_fmt(
+        [entry.path for entry in entries])
+    parsers, formats, fields = [], [], []
+    for template in templates:
+        try:
+            parser, names = extraction_parser(template)
+        except ValueError:
+            if format is not None:
+                raise
+            # Inference can mistake literal braces for fields. Such filenames
+            # still belong in the catalog, without unsafe extraction columns.
+            continue
+        parsers.append(parser)
+        formats.append(template)
+        fields.extend(name for name in names if name not in fields)
     rows = []
     for entry in entries:
         row = dict(zip(columns, (entry.path, entry.checksum_algorithm,
                                 entry.checksum, entry.size, entry.mtime)))
-        if fmt:
-            matched = parse.parse(fmt, entry.path)
+        for parser in parsers:
+            matched = parser.parse(entry.path)
             if matched is not None:
                 row.update({key: value for key, value in matched.named.items()
                             if key not in columns})
+                # The detector returns formats in a stable order. A row uses
+                # the first matching template so overlapping guesses cannot
+                # overwrite one another's parameter values.
+                break
         rows.append(row)
-    frame = pd.DataFrame(rows)
-    if frame.empty:
-        frame = pd.DataFrame(columns=columns)
-    data_spec = {"db": "data.tsv"}
-    if fmt:
-        data_spec["fmt"] = fmt
+    frame = pd.DataFrame(rows, columns=columns + list(fields), dtype=object)
+    data_spec = {"db": "data.tsv", "extraction": {
+        "automatic": format is None, "formats": formats}}
     remote = {"name": "origin", "url": source.url}
-    if source.auth:
-        remote["auth"] = source.auth
     if source.backend:
         remote["backend"] = source.backend
     if source.backend_options:
         remote["backend_options"] = thaw_backend_options(source.backend_options)
     repo.dothm.dump_yml({"data": [data_spec], "remote": [remote]}, "config")
-    repo.dothm.dump_yml({"source": source.url}, "meta")
+    repo.dothm.dump_yml({"source": provenance}, "meta")
     repo.dothm.dump_tsv(frame, "data", na_rep="")
     _metadata_commit(repo, ["config.yml", "meta.yml", "data.tsv"],
                      "Discover remote catalog")
 
 
-def initialize_remote(cls, path, url, *, backend=None, backend_options=None,
-                      auth=None, filter=None, fmt=None, progress=False):
+def initialize_remote(cls, path, source, *, release=None, collections=None,
+                      filter=None, format=None, progress=False):
     """Discover a dataset and initialize its catalog without replacing local files."""
     destination = Path(path).expanduser().absolute()
     if destination.is_symlink():
@@ -169,9 +185,10 @@ def initialize_remote(cls, path, url, *, backend=None, backend_options=None,
             f"Hallmark repository already exists: {dothm_path}")
     if destination.exists() and not destination.is_dir():
         raise NotADirectoryError(f"Destination is not a directory: {path}")
-    path_matches("validation", filter=filter, fmt=fmt)
-    source = RemoteSpec.parse(str(url), auth, backend=backend,
-                              backend_options=backend_options)
+    path_matches("validation", filter=filter)
+    if format is not None:
+        extraction_parser(format)
+    source, roots, provenance = resolve_source(source, release, collections)
     # Claim only the metadata directory. On failure, existing dataset files stay put.
     missing_parents = []
     parent = dothm_path.parent
@@ -194,10 +211,19 @@ def initialize_remote(cls, path, url, *, backend=None, backend_options=None,
         except FileExistsError as exc:
             raise DestinationExistsError(
                 f"Hallmark repository already exists: {dothm_path}") from exc
-        with OperationContext(source) as context:
-            entries = discover(context, filter=filter, fmt=fmt, progress=progress)
+        inventory = {}
+        for root in roots:
+            scoped = source if not root else RemoteSpec.parse(
+                source.url.rstrip("/") + "/" + quote(root, safe="/") + "/",
+                backend=source.backend, backend_options=source.backend_options)
+            with OperationContext(scoped) as context:
+                for entry in discover(context, filter=filter, progress=progress,
+                                      path_prefix=root):
+                    path = root + "/" + entry.path if root else entry.path
+                    inventory[path] = replace(entry, path=path)
+        entries = [inventory[path] for path in sorted(inventory)]
         repo = cls.init(destination)
-        _write_inventory(repo, source, entries, fmt)
+        _write_inventory(repo, source, entries, format, provenance)
         return repo
     except BaseException:
         if owns_metadata:
@@ -223,10 +249,8 @@ def _git_source(url, source_type):
             or (parsed.scheme != "sftp" and parsed.path.rstrip("/").endswith(".git")))
 
 
-def _clone_git(cls, url, destination, display_path, auth):
+def _clone_git(cls, url, destination, display_path):
     """Clone a catalog's Git history without modifying its tracked metadata."""
-    if auth is not None:
-        raise ValueError("Git cloning uses Git/SSH authentication, not auth profiles")
     dothm_path, worktree_path = cls.lwpaths(destination)
     local = Path(url).expanduser()
     git_url = str(local / ".hm") if (local / ".hm").is_dir() else url
@@ -240,19 +264,18 @@ def _clone_git(cls, url, destination, display_path, auth):
     return cls(destination)
 
 
-def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
+def clone_catalog(cls, url, path, *, source_type="auto"):
     """
     Clone an existing Git catalog or published HTTP/SFTP catalog snapshot.
 
     Existing destinations are rejected before source access. An incomplete
     destination created by this call is removed on failure. Dataset discovery
-    belongs to ``Repo.init(from_url=...)``.
+    belongs to ``Repo.init(source=...)``.
 
     Args:
         cls: Repository class used to initialize or open the result.
         url (str): Existing Git catalog or published snapshot location.
         path (Path | str): New repository destination.
-        auth (str, optional): Local profile for snapshot metadata access.
         source_type (str): ``auto``, ``git``, or ``catalog``.
 
     Returns:
@@ -272,8 +295,6 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
         raise DestinationExistsError(
             f"fatal: destination path '{path}' already exists and is not empty.")
     is_git = _git_source(url, source_type)
-    if is_git and auth is not None:
-        raise ValueError("Git cloning uses Git/SSH authentication, not auth profiles")
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         destination.mkdir()
@@ -281,17 +302,17 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
         raise DestinationExistsError(f"Destination already exists: {path}") from exc
     try:
         if is_git:
-            return _clone_git(cls, url, destination, path, auth)
-        source = RemoteSpec.parse(url, auth)
+            return _clone_git(cls, url, destination, path)
+        source = RemoteSpec.parse(url)
         with OperationContext(source) as context:
             snapshot = _snapshot(context)
         if snapshot is None and not source.root.rstrip("/").endswith(".hm"):
-            nested = RemoteSpec.parse(url.rstrip("/") + "/.hm/", auth)
+            nested = RemoteSpec.parse(url.rstrip("/") + "/.hm/")
             with OperationContext(nested) as context:
                 snapshot = _snapshot(context)
         if snapshot is None:
             if source_type == "auto" and source.scheme in {"http", "https"}:
-                return _clone_git(cls, url, destination, path, auth)
+                return _clone_git(cls, url, destination, path)
             raise CloneError("No published Hallmark catalog at this URL; "
                              "use hallmark init PATH --from URL for a raw dataset")
         repo = cls.init(destination)

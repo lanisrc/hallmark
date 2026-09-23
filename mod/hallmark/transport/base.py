@@ -107,13 +107,6 @@ def literal_path(value) -> Path:
         raise RemoteConfigurationError(str(exc)) from None
 
 
-def profile_name(value: str) -> str:
-    """Validate and return a local authentication profile name."""
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
-        raise RemoteConfigurationError("Auth profile must match [A-Za-z0-9_-]{1,64}")
-    return value
-
-
 def ssh_host(value: str) -> str:
     # Aliases are not necessarily DNS names. Limit expansion tokens to characters
     # that cannot become shell syntax in a user's ProxyCommand/Match configuration.
@@ -164,7 +157,7 @@ class RemoteEntry:
 @dataclass(frozen=True)
 class RemoteSpec:
     """
-    A parsed data-remote URL and optional local authentication profile.
+    A parsed data-remote URL and transport configuration.
 
     Use ``parse`` to validate a URL. SSH roots are decoded once; catalog
     paths appended to the root are treated as literal filenames.
@@ -176,7 +169,6 @@ class RemoteSpec:
         root (str): Dataset root, decoded for SSH and SFTP.
         user (str, optional): Explicit SSH username.
         port (int, optional): Explicit port number.
-        auth (str, optional): Local SSH authentication profile name.
         backend (str): Registered backend name, resolved from the URL by default.
         backend_options (Mapping): Deeply immutable backend configuration.
     """
@@ -187,7 +179,6 @@ class RemoteSpec:
     root: str = field(repr=False)
     user: str | None = field(default=None, repr=False)
     port: int | None = None
-    auth: str | None = None
     backend: str | None = None
     backend_options: Mapping = field(default_factory=lambda: MappingProxyType({}),
                                      repr=False, hash=False)
@@ -204,30 +195,27 @@ class RemoteSpec:
                            freeze_backend_options(self.backend_options))
 
     @classmethod
-    def parse(cls, url: str, auth: str | None = None, *,
+    def parse(cls, url: str, *,
               backend=None, backend_options=None) -> RemoteSpec:
         """
         Parse and validate a data-remote URL.
 
         Args:
             url (str): HTTP(S) URL or SSH/SFTP URL with an absolute dataset root.
-            auth (str, optional): Local SSH profile name. Unsupported for HTTP(S).
             backend (str, optional): Registered backend name. Defaults to URL
-                detection. Parsing does not load plugins or resolve profiles.
+                detection. Parsing does not load plugins.
             backend_options (Mapping, optional): Backend-specific configuration.
 
         Returns:
             RemoteSpec: Validated source description.
 
         Raises:
-            RemoteConfigurationError: If the URL or profile reference is invalid.
+            RemoteConfigurationError: If the URL is invalid.
         """
         if not isinstance(url, str) or not url.strip():
             raise RemoteConfigurationError("Remote URL must be a non-empty string")
         reject_controls(url, "Remote URL")
         url = url.strip()
-        if auth is not None:
-            profile_name(auth)
         try:
             parsed = urlsplit(url)
             host, port = parsed.hostname, parsed.port
@@ -273,12 +261,7 @@ class RemoteSpec:
                 )
         else:
             root, user = parsed.path, None
-            if auth is not None:
-                raise RemoteConfigurationError(
-                    "Auth profiles currently support SSH/SFTP only; "
-                    "HTTP retains Requests .netrc authentication"
-                )
-        return cls(url, scheme, host, root, user, port, auth,
+        return cls(url, scheme, host, root, user, port,
                    backend, backend_options)
 
     def pathname(self, relative_path: str) -> str:

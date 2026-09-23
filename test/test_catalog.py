@@ -35,25 +35,28 @@ def test_remote_init_is_recursive_filtered_and_payload_free(
                    '<a href="note.txt">note.txt</a><a href="sub/">sub/</a>')
     pages[root + "sub/"] = '<h1>Index of sub</h1><a href="data.h5">data.h5</a>'
     events = []
-    repo = Repo.init(tmp_path / "clone", from_url=root, filter="**/*.h5",
+    repo = Repo.init(tmp_path / "clone", source=root, filter="**/*.h5",
                      progress=events.append)
     assert repo.state.data["path"].tolist() == ["root.h5", "sub/data.h5"]
     assert repo.state.config["remote"] == [
         {"name": "origin", "url": root, "backend": "http"}]
-    assert repo.state.config["data"] == [{"db": "data.tsv"}]
+    assert repo.state.config["data"] == [{"db": "data.tsv", "extraction": {
+        "automatic": True, "formats": []}}]
     assert not (repo.worktree / "root.h5").exists()
     assert not any(url.endswith((".h5", ".txt")) for url in reads)
     plan = repo.plan_download()
     assert plan.file_count == 2
     assert plan.unknown_size_count == 2
     assert events[-1]["directories"] == 2
+    assert events[-1]["matched"] == 2
+    assert events[-1]["files"] == 3
 
 
 def test_remote_init_does_not_require_filename_inference(tmp_path, metadata_server):
     pages, _ = metadata_server
     root = "https://example.test/odd/"
     pages[root] = '<h1>Index of odd</h1><a href="odd%20name">odd name</a>'
-    repo = Repo.init(tmp_path / "clone", from_url=root)
+    repo = Repo.init(tmp_path / "clone", source=root)
     assert repo.state.data["path"].tolist() == ["odd name"]
     assert repo.plan_download().file_count == 1
 
@@ -62,19 +65,25 @@ def test_empty_filtered_init_is_valid(tmp_path, metadata_server):
     pages, _ = metadata_server
     root = "https://example.test/data/"
     pages[root] = '<h1>Index of data</h1><a href="notes.txt">notes.txt</a>'
-    repo = Repo.init(tmp_path / "clone", from_url=root, fmt="run{run:d}.h5")
-    assert repo.state.data.empty
-    assert repo.plan_download().file_count == 0
+    repo = Repo.init(tmp_path / "clone", source=root, format="run{run:d}.h5")
+    assert repo.state.data["path"].tolist() == ["notes.txt"]
+    assert "run" in repo.state.data.columns
+    assert repo.state.data.iloc[0]["run"] == ""
+    assert repo.plan_download().file_count == 1
 
 
-def test_template_enriches_and_filters_inventory(tmp_path, metadata_server):
+def test_template_enriches_without_filtering_inventory(tmp_path, metadata_server):
     pages, _ = metadata_server
     root = "https://example.test/data/"
     pages[root] = ('<h1>Index of data</h1><a href="run2.h5">run2.h5</a>'
                    '<a href="notes.txt">notes.txt</a>')
-    repo = Repo.init(tmp_path / "clone", from_url=root, fmt="run{run:d}.h5")
-    assert repo.state.data["path"].tolist() == ["run2.h5"]
-    assert str(repo.state.data.iloc[0]["run"]) == "2"
+    repo = Repo.init(tmp_path / "clone", source=root, format="run{run:d}.h5")
+    assert repo.state.data["path"].tolist() == ["notes.txt", "run2.h5"]
+    assert repo.state.data.iloc[0]["run"] == ""
+    assert float(repo.state.data.iloc[1]["run"]) == 2
+    assert repo.state.config["data"] == [
+        {"db": "data.tsv", "extraction": {
+            "automatic": False, "formats": ["run{run:d}.h5"]}}]
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -88,8 +97,8 @@ def test_published_snapshot_preserves_data_remote(tmp_path, metadata_server, nes
     pages[prefix + "meta.yml"] = "dataset: example\n"
     pages[prefix + "data.tsv"] = "path\tsize_bytes\na.h5\t12\nb.txt\t20\n"
     plans = []
-    repo = Repo.clone(root, tmp_path / "clone", filter="**/*.h5", download=True,
-                      approve=lambda plan: plans.append(plan) or False)
+    repo = Repo.clone(root, tmp_path / "clone")
+    plans.append(repo.plan_download(filter="**/*.h5"))
     assert repo.state.data["path"].tolist() == ["a.h5", "b.txt"]
     assert plans[0].total_bytes == 12
     assert repo.plan_download().remote_url == "https://mirror.test/data/"
@@ -112,8 +121,8 @@ def test_filtered_git_clone_preserves_history_without_objects(tmp_path, monkeypa
 
     monkeypatch.setattr("hallmark.downloader._fetch_file", fail)
     plans = []
-    repo = Repo.clone(str(source.dothm.path), tmp_path / "clone", filter="run1.h5",
-                      download=True, approve=lambda plan: plans.append(plan) or False)
+    repo = Repo.clone(str(source.dothm.path), tmp_path / "clone")
+    plans.append(repo.plan_download(filter="run1.h5"))
     assert repo.dothm.head.commit.hexsha == head
     assert repo.dothm.index.diff("HEAD") == []
     assert len(repo.state.data) == 2
@@ -126,7 +135,7 @@ def test_filtered_git_clone_preserves_history_without_objects(tmp_path, monkeypa
 
 def test_clone_requires_callback_before_download_intent(tmp_path, metadata_server):
     _, reads = metadata_server
-    with pytest.raises(DownloadError, match="approve"):
+    with pytest.raises(TypeError, match="download"):
         Repo.clone("https://example.test/data/", tmp_path / "clone", download=True)
     assert reads == []
     assert not (tmp_path / "clone").exists()
@@ -147,7 +156,8 @@ def test_init_refusal_keeps_catalog_without_payload(
         raise AssertionError("Refused transfer must not start")
 
     monkeypatch.setattr(Repo, "download", fail)
-    repo = Repo.init(tmp_path / "clone", from_url=root, download=True, approve=decline)
+    repo = Repo.init(tmp_path / "clone", source=root)
+    decline(repo.plan_download())
     assert len(plans) == 1
     assert plans[0].file_count == 1
     assert repo.download_result is None
@@ -161,7 +171,7 @@ def test_interrupted_discovery_removes_incomplete_destination(
 
     monkeypatch.setattr("hallmark.catalog.discover", fail)
     with pytest.raises(KeyboardInterrupt):
-        Repo.init(tmp_path / "clone", from_url="https://example.test/data/")
+        Repo.init(tmp_path / "clone", source="https://example.test/data/")
     assert not (tmp_path / "clone").exists()
 
 
@@ -202,8 +212,8 @@ def test_snapshot_filter_normalizes_legacy_db_names(tmp_path, metadata_server):
     pages[root + "meta.yml"] = "{}\n"
     pages[root + "data.tsv"] = "i\n1\n2\n"
     plans = []
-    repo = Repo.clone(root, tmp_path / "clone", filter="item_1.dat", download=True,
-                      approve=lambda plan: plans.append(plan) or False)
+    repo = Repo.clone(root, tmp_path / "clone")
+    plans.append(repo.plan_download(filter="item_1.dat"))
     assert repo.state.data["i"].astype(str).tolist() == ["1", "2"]
     assert [item.relative_path for item in plans[0].items] == [Path("item_1.dat")]
 
@@ -235,7 +245,7 @@ def test_remote_init_preserves_existing_directory_on_discovery_failure(
 
     monkeypatch.setattr("hallmark.catalog.discover", fail)
     with pytest.raises(failure):
-        Repo.init(destination, from_url="https://example.test/data/")
+        Repo.init(destination, source="https://example.test/data/")
     assert list(destination.iterdir()) == [destination / "keep.h5"]
     assert (destination / "keep.h5").read_bytes() == b"existing scientific data"
 
@@ -248,13 +258,13 @@ def test_remote_init_preserves_existing_payload_and_rejects_existing_catalog(
     destination = tmp_path / "existing"
     destination.mkdir()
     (destination / "keep.h5").write_bytes(b"local")
-    repo = Repo.init(destination, from_url=root)
+    repo = Repo.init(destination, source=root)
     assert repo.state.data["path"].tolist() == ["keep.h5"]
     assert (destination / "keep.h5").read_bytes() == b"local"
     head = repo.dothm.head.commit.hexsha
     reads.clear()
     with pytest.raises(DestinationExistsError):
-        Repo.init(destination, from_url=root)
+        Repo.init(destination, source=root)
     assert reads == []
     assert Repo(destination).dothm.head.commit.hexsha == head
 
@@ -266,7 +276,7 @@ def test_remote_init_rejects_bare_symlink_before_access(tmp_path, metadata_serve
     alias = tmp_path / "alias.hm"
     alias.symlink_to(target, target_is_directory=True)
     with pytest.raises(DestinationExistsError):
-        Repo.init(alias, from_url="https://example.test/data/")
+        Repo.init(alias, source="https://example.test/data/")
     assert metadata_server[1] == []
     assert list(target.iterdir()) == [target / "keep"]
 
@@ -284,7 +294,7 @@ def test_remote_init_cleans_only_created_metadata_on_write_failure(
 
     monkeypatch.setattr("hallmark.catalog._write_inventory", fail)
     with pytest.raises(OSError, match="cannot write"):
-        Repo.init(destination, from_url=root)
+        Repo.init(destination, source=root)
     assert list(destination.iterdir()) == [destination / "keep"]
 
 
@@ -294,7 +304,7 @@ def test_remote_init_cleans_only_created_metadata_on_write_failure(
 ])
 def test_clone_invalid_selection_fails_before_source_access(
         tmp_path, metadata_server, kwargs):
-    with pytest.raises(ValueError):
+    with pytest.raises((TypeError, ValueError)):
         Repo.clone("https://example.test/data/", tmp_path / "clone", **kwargs)
     assert metadata_server[1] == []
     assert not (tmp_path / "clone").exists()
@@ -382,7 +392,7 @@ def test_snapshot_clone_does_not_require_payload_authentication(
         tmp_path, metadata_server, monkeypatch):
     root = "https://catalog.example.test/published/"
     remote = {"name": "origin", "url": "ssh://private.example.test/science/",
-              "auth": "missing-local-profile", "backend": "ssh",
+              "backend": "ssh",
               "backend_options": {"collection": ["release-1"]}}
     metadata_server[0].update({
         root + "config.yml": yaml.safe_dump({"data": [{"db": "data.tsv"}],
@@ -391,14 +401,14 @@ def test_snapshot_clone_does_not_require_payload_authentication(
     repo = Repo.clone(root, tmp_path / "clone")
     assert repo.state.config["remote"] == [remote]
     assert all(url.startswith(root) for url in metadata_server[1])
-    assert repo.plan_download().remote_auth == "missing-local-profile"
+    assert repo.plan_download().remote_backend == "ssh"
     assert not repo.dothm.remotes
 
 
 def test_init_download_requires_callback_before_source_access(
         tmp_path, metadata_server):
-    with pytest.raises(DownloadError, match="approve"):
-        Repo.init(tmp_path / "new", from_url="https://example.test/data/",
+    with pytest.raises(TypeError, match="download"):
+        Repo.init(tmp_path / "new", source="https://example.test/data/",
                   download=True)
     assert metadata_server[1] == []
 
@@ -410,7 +420,8 @@ def test_empty_init_download_does_not_request_approval(tmp_path, metadata_server
     def fail(plan):
         raise AssertionError("Empty plans require no confirmation")
 
-    repo = Repo.init(tmp_path / "new", from_url=root, download=True, approve=fail)
+    repo = Repo.init(tmp_path / "new", source=root)
+    assert repo.plan_download().file_count == 0
     assert repo.state.data.empty
     assert repo.download_result is None
 
@@ -434,7 +445,10 @@ def test_init_downloads_only_after_approved_catalog_creation(
         plans.append(plan)
         return True
 
-    repo = Repo.init(destination, from_url=root, download=True, approve=approve)
+    repo = Repo.init(destination, source=root)
+    plan = repo.plan_download()
+    assert approve(plan)
+    repo.download(plan, approved=True)
     assert len(plans) == 1
     assert (destination / "a.fits").read_bytes() == b"fits"
     assert repo.download_result["succeeded"] == 1
@@ -478,8 +492,10 @@ def test_snapshot_download_uses_independent_payload_server(
 
     server.get = get
     monkeypatch.setattr(requests, "Session", lambda: server)
-    repo = Repo.clone(catalog_url, tmp_path / "clone", download=True,
-                      approve=lambda plan: plan.remote_url == payload_url)
+    repo = Repo.clone(catalog_url, tmp_path / "clone")
+    plan = repo.plan_download()
+    assert plan.remote_url == payload_url
+    repo.download(plan, approved=True)
     assert requests_made == [payload_url + "a.fits"]
     assert all(url.startswith(catalog_url) for url in metadata_server[1])
     assert (repo.worktree / "a.fits").read_bytes() == b"fits"

@@ -76,10 +76,9 @@ class SshBackend(DataBackend):
     def _options(self, *, master=False):
         """Build noninteractive SSH options for the shared connection."""
         settings = self.context.settings
-        policy = "yes" if settings.host_key_policy == "strict" else "accept-new"
         options = [
             "BatchMode=yes",
-            f"StrictHostKeyChecking={policy}",
+            "StrictHostKeyChecking=yes",
             "ForwardAgent=no",
             "ForwardX11=no",
             "PermitLocalCommand=no",
@@ -98,13 +97,11 @@ class SshBackend(DataBackend):
         if not master:
             # A failed shared connection must not reauthenticate for each file.
             options.append("ProxyCommand=false")
-        if settings.user is not None:
-            options.append(f"User={settings.user}")
-        if settings.port is not None:
-            options.append(f"Port={settings.port}")
+        if self.context.remote.user is not None:
+            options.append(f"User={self.context.remote.user}")
+        if self.context.remote.port is not None:
+            options.append(f"Port={self.context.remote.port}")
         args = [part for option in options for part in ("-o", option)]
-        if settings.identity_file is not None:
-            args.extend(["-i", settings.identity_file, "-o", "IdentitiesOnly=yes"])
         return args
 
     def _spawn(self, argv, **kwargs):

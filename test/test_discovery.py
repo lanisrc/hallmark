@@ -142,11 +142,9 @@ def test_recursive_globs(path, pattern, matched):
     assert path_matches(path, filter=pattern) is matched
 
 
-def test_exact_format_and_filter_are_both_required():
-    assert path_matches("sample_001.fits", fmt="sample_{id:03d}.fits")
-    assert not path_matches("sample_bad.fits", fmt="sample_{id:03d}.fits")
-    assert not path_matches("Sample_001.fits", fmt="sample_{id:03d}.fits")
-    assert not path_matches("sample_001.fits", filter="*.txt", fmt="sample_{id}.fits")
+def test_globs_are_case_sensitive():
+    assert path_matches("sample_001.fits", filter="sample_*.fits")
+    assert not path_matches("Sample_001.fits", filter="sample_*.fits")
 
 
 @pytest.mark.parametrize("invalid", [12, {"*.fits": True}, iter(["*.fits"])])

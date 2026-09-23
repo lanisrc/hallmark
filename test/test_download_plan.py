@@ -57,12 +57,12 @@ def test_plan_reads_path_catalog_offline_and_preserves_unknown_sizes(
 
 
 def test_explicit_paths_retain_catalog_checksums_and_metadata(catalog):
-    plan = plan_download(catalog, file_paths=["nested/a.fits", "unlisted.bin"])
-    assert plan.file_count == 2
+    plan = plan_download(catalog, file_paths=["nested/a.fits"])
+    assert plan.file_count == 1
     assert plan.items[0].checksum == ("sha256", sha256(b"abcdef").hexdigest())
     assert plan.items[0].size_bytes == 6
-    assert plan.items[1].checksum is None
-    assert plan.items[1].size_bytes is None
+    with pytest.raises(DownloadError, match="not in the catalog"):
+        plan_download(catalog, file_paths=["unlisted.bin"])
     assert select_download_files(catalog, file_paths=["nested/a.fits"]) == [
         (Path("nested/a.fits"), plan.items[0].checksum)]
 

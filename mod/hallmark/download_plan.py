@@ -62,7 +62,6 @@ class DownloadPlan:
         items (tuple[DownloadItem]): Selected files and their metadata.
         remote_url (str, optional): Data source URL; may be None for an empty plan.
         output_path (Path): Absolute destination directory.
-        remote_auth (str, optional): Local SSH profile name.
         remote_name (str, optional): Name of the selected data remote.
         estimated_bytes_per_second (float, optional): Positive rate supplied
             by the caller for duration estimates.
@@ -73,7 +72,6 @@ class DownloadPlan:
     items: tuple[DownloadItem, ...]
     remote_url: Optional[str] = field(repr=False)
     output_path: Path
-    remote_auth: Optional[str] = None
     remote_name: Optional[str] = None
     estimated_bytes_per_second: Optional[float] = None
     remote_backend: Optional[str] = None
@@ -87,7 +85,7 @@ class DownloadPlan:
         if any(not isinstance(item, DownloadItem) for item in self.items):
             raise TypeError("items must contain DownloadItem values")
         if any(value is not None and not isinstance(value, str) for value in
-               (self.remote_url, self.remote_auth, self.remote_name,
+               (self.remote_url, self.remote_name,
                 self.remote_backend)):
             raise TypeError("remote fields must be strings or None")
         if self.remote_backend is not None:
@@ -146,7 +144,7 @@ class DownloadPlan:
             parsed = urlsplit(self.remote_url)
             source = urlunsplit(parsed._replace(
                 netloc=parsed.netloc.rsplit("@", 1)[-1], query="", fragment=""))
-        backend = f"\nBackend: {self.remote_backend}" if self.remote_backend else ""
+        backend = f"\nTransport: {self.remote_backend}" if self.remote_backend else ""
         return (f"{self.file_count} file(s); {size}; estimated duration: {duration}"
                 f"\nSource: {source}{backend}"
                 f"\nDestination: {self.output_path}")

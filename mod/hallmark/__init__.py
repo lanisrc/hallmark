@@ -15,6 +15,7 @@
 """Hallmark python public API"""
 
 
+from .sources import DataSource, SourceRelease, register_source
 from .repo import Repo
 from .paraframe import ParaFrame
 from .download_plan import DownloadItem, DownloadPlan
@@ -24,6 +25,7 @@ from .backends import (
 )
 
 __all__ = [
-    "Repo", "ParaFrame", "DownloadItem", "DownloadPlan", "DataBackend",
+    "DataSource", "SourceRelease", "register_source", "Repo", "ParaFrame",
+    "DownloadItem", "DownloadPlan", "DataBackend",
     "HttpBackend", "SshBackend", "CyVerseBackend", "RemoteEntry", "register_backend",
 ]

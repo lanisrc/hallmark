@@ -14,7 +14,6 @@ from urllib.parse import quote
 
 from click.testing import CliRunner
 import pytest
-import yaml
 
 from hallmark import Repo
 from hallmark.cli import hallmark
@@ -203,27 +202,20 @@ def test_host_trust_and_auth_fail_preflight(ssh_server, tmp_path, trust):
     assert not (tmp_path / "download").exists()
 
 
-def test_simultaneous_profiles_have_separate_masters(ssh_server, monkeypatch):
+def test_simultaneous_ssh_aliases_have_separate_masters(ssh_server):
     server = ssh_server
     (server["root"] / "item").write_bytes(b"data")
-    auth = server["base"] / "auth.yml"
-    auth.write_text(
-        yaml.safe_dump(
-            {
-                "version": 1,
-                "profiles": {
-                    name: {
-                        "hosts": ["hm-test"],
-                        "identity_file": str(server["base"] / key),
-                    }
-                    for name, key in [("one", "client"), ("two", "second")]
-                },
-            }
-        )
-    )
-    monkeypatch.setenv("HALLMARK_AUTH_FILE", str(auth))
-    with OperationContext(RemoteSpec.parse(server["url"], "one")) as one:
-        with OperationContext(RemoteSpec.parse(server["url"], "two")) as two:
+    original = server["config"].read_text()
+    aliases = "".join(
+        f"Host {alias}\n    HostName 127.0.0.1\n"
+        f"    IdentityFile {server['base'] / key}\n"
+        for alias, key in [("one", "client"), ("two", "second")])
+    server["config"].write_text(aliases + original.replace(
+        f"    IdentityFile {server['base'] / 'client'}\n", ""))
+    first_url = server["url"].replace("hm-test", "one")
+    second_url = server["url"].replace("hm-test", "two")
+    with OperationContext(RemoteSpec.parse(first_url)) as one:
+        with OperationContext(RemoteSpec.parse(second_url)) as two:
             with ThreadPoolExecutor(2) as pool:
                 list(pool.map(lambda context: context.transport.prepare(), [one, two]))
             assert one.transport._socket != two.transport._socket
@@ -236,7 +228,7 @@ def test_simultaneous_profiles_have_separate_masters(ssh_server, monkeypatch):
     assert first.poll() is not None
 
 
-def test_build_manifest_download_clone_workflow(ssh_server, tmp_path):
+def test_build_manifest_download_clone_workflow(ssh_server, tmp_path, monkeypatch):
     root = ssh_server["root"]
     (root / "nested").mkdir()
     (root / "nested/item_1.dat").write_bytes(b"science")
@@ -290,14 +282,17 @@ def test_build_manifest_download_clone_workflow(ssh_server, tmp_path):
     single.dothm.index.commit("Remove deliberately invalid test entry")
     clone = Repo.clone(
         str(single.dothm.path), tmp_path / "python-clone",
-        download=True, approve=lambda plan: True,
     )
+    clone.download(clone.plan_download(), approved=True)
     assert (clone.worktree / "nested/item_1.dat").read_bytes() == b"science"
     result = CliRunner().invoke(
         hallmark,
-        ["clone", str(single.dothm.path), str(tmp_path / "cli-clone"), "--download"],
+        ["clone", str(single.dothm.path), str(tmp_path / "cli-clone")],
         input="y\n",
     )
+    assert result.exit_code == 0, result.output
+    monkeypatch.chdir(tmp_path / "cli-clone")
+    result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
     assert result.exit_code == 0, result.output
     assert (tmp_path / "cli-clone/nested/item_1.dat").read_bytes() == b"science"
 
@@ -410,9 +405,10 @@ def test_sftp_only_init_plans_then_requires_payload_approval(
 
     repo = Repo.init(
         tmp_path / "initialized",
-        from_url=ssh_server["url"].replace("ssh:", scheme + ":"),
-        filter="**/*.fits", download=True, approve=decline,
+        source=ssh_server["url"].replace("ssh:", scheme + ":"),
+        filter="**/*.fits",
     )
+    decline(repo.plan_download())
     assert fetched == []
     assert repo.state.data["path"].tolist() == ["nested/science.fits"]
     assert len(plans) == 1
@@ -440,9 +436,9 @@ def test_disabled_subsystem_fails(ssh_server, tmp_path):
 def test_local_session_limit(ssh_server, tmp_path, monkeypatch):
     for i in range(4):
         (ssh_server["root"] / str(i)).write_bytes(b"data")
-    auth = tmp_path / "auth.yml"
-    auth.write_text("version: 1\ndefaults:\n  max_sessions: 1\n")
-    monkeypatch.setenv("HALLMARK_AUTH_FILE", str(auth))
+    from hallmark.transport.settings import SSHSettings
+    monkeypatch.setattr("hallmark.transport.SSHSettings",
+                        lambda: SSHSettings(max_sessions=1))
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url=ssh_server["url"])
     result = download_remote_data(
@@ -455,7 +451,7 @@ def test_local_session_limit(ssh_server, tmp_path, monkeypatch):
     assert result["failed"] == 0
 
 
-def test_profile_source_recording_and_explicit_output(
+def test_ssh_config_source_recording_and_explicit_output(
     ssh_server, tmp_path, monkeypatch
 ):
     auth = tmp_path / "auth.yml"
@@ -466,16 +462,14 @@ def test_profile_source_recording_and_explicit_output(
         "label",
         [],
         dataset_url=ssh_server["url"],
-        dataset_auth="lab",
     )
-    assert repo.state.config["remote"][0]["auth"] == "lab"
+    assert "auth" not in repo.state.config["remote"][0]
     explicit = build_repo(
         tmp_path / "explicit",
         "label",
         [],
         remotes=[{"name": "mirror", "url": "https://example.test/data"}],
         dataset_url=ssh_server["url"],
-        dataset_auth="lab",
     )
     assert explicit.state.config["remote"] == [
         {"name": "mirror", "url": "https://example.test/data"}

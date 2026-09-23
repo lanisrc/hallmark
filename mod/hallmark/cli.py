@@ -16,6 +16,8 @@
 
 from contextlib import contextmanager
 from pathlib import Path
+import shlex
+import sys
 
 import click
 import requests
@@ -26,8 +28,8 @@ from git.exc import GitError
 from . import Repo
 from .helper_functions import validate_path_component
 from .repo_builder import build_repo
-from .downloader import DownloadError
-from .discovery import path_matches
+from .downloader import DownloadError, _select_download_items, _select_remote_config
+from .sources import get_source, list_sources
 from .error import CheckoutError, CloneError
 from .repo_config import normalize_tsv_name
 
@@ -116,6 +118,36 @@ def _report_download_results(results: dict) -> None:
     raise ClickException(f"Failed to download {failed} file(s)")
 
 
+def _show_download_plan(plan, *, show_paths=False):
+    """Display recorded sizes without querying the data server."""
+    click.echo(plan.summary())
+    if show_paths:
+        click.echo(f"Files with unknown size: {plan.unknown_size_count}")
+        for item in plan.items[:20]:
+            size = (f"{item.size_bytes:,} bytes" if item.size_bytes is not None
+                    else "size unknown")
+            click.echo(f"  {item.relative_path.as_posix()} ({size})")
+        if plan.file_count > 20:
+            click.echo(f"  ... {plan.file_count - 20} more file(s)")
+
+
+def _execute_download(repo, plan, *, max_workers):
+    """Execute the exact plan the user approved and report transfer failures."""
+    results = repo.download(plan, approved=True, max_workers=max_workers,
+                            progress=True)
+    _report_download_results(results)
+
+
+def _confirm_download_plan(plan, *, decline_is_skip=False, show_paths=False):
+    """Display a plan and approve it explicitly, optionally treating refusal as skip."""
+    _show_download_plan(plan, show_paths=show_paths)
+    if not plan.file_count:
+        click.echo("No files selected for download.")
+        return False
+    return click.confirm("Download these files?", default=False,
+                         abort=not decline_is_skip)
+
+
 def _run_download(repo, plan, *, max_workers):
     """
     Display a download plan, request approval, and report the results.
@@ -130,14 +162,155 @@ def _run_download(repo, plan, *, max_workers):
         ClickException: If any file transfers fail.
         DownloadError: If the download cannot be started.
     """
-    click.echo(plan.summary())
-    if not plan.file_count:
-        click.echo("No files selected for download.")
+    if _confirm_download_plan(plan):
+        _execute_download(repo, plan, max_workers=max_workers)
+
+
+def _download_output(repo, output):
+    """Prompt for the missing destination of a bare catalog without creating it."""
+    if repo.worktree is None and output is None:
+        return click.prompt(
+            "Output directory (relative to the current directory)",
+            type=click.Path(file_okay=False))
+    return output
+
+
+def _choose_download_plan(repo, *, output, remote_name, dry_run):
+    """Return an approved plan, or None after skipping or an offline preview."""
+    while True:
+        choice = click.prompt(
+            "Select files", type=click.Choice(["patterns", "all", "skip"],
+                                             case_sensitive=False), default="skip")
+        if choice == "skip":
+            return None
+        patterns = []
+        if choice == "patterns":
+            click.echo("Enter one relative-path glob per line, without shell quotes. "
+                       "Blank finishes; patterns are ORed. ** matches recursively.")
+            while True:
+                pattern = click.prompt("Pattern", default="", show_default=False)
+                if not pattern:
+                    break
+                patterns.append(pattern)
+            if not patterns:
+                continue
+        output = _download_output(repo, output)
+        plan = repo.plan_download(output, all_files=choice == "all",
+                                  filter=patterns or None, remote_name=remote_name)
+        _show_download_plan(plan, show_paths=True)
+        if not plan.file_count:
+            click.echo("No cataloged files match. Choose another selection or skip.")
+            continue
+        if dry_run:
+            return None
+        action = click.prompt(
+            "Next action", type=click.Choice(["download", "change", "skip"],
+                                             case_sensitive=False), default="skip")
+        if action == "download":
+            return plan
+        if action == "skip":
+            return None
+
+
+def _download_available(repo, remote_name=None):
+    """Explain an empty catalog or absent remote without contacting the server."""
+    remote = _select_remote_config(repo, remote_name)
+    if not remote or not remote.get("url"):
+        click.echo("No data remote is configured; skipping download. "
+                   "Configure one with hallmark set-config --remote-url URL.")
+        return False
+    if not _select_download_items(repo, all_files=True, catalog_only=True):
+        click.echo("The catalog is empty; nothing to download.")
+        return False
+    return True
+
+
+def _interactive_download(repo, *, output=None, remote_name=None, max_workers=4,
+                          dry_run=False):
+    """Select and approve cataloged files in a terminal, without network preflight."""
+    if not sys.stdin.isatty():
+        raise ClickException(
+            "--interactive requires a terminal. Use --filter 'PATTERN' --dry-run "
+            "to preview a selection; run in a terminal to approve a download.")
+    if not _download_available(repo, remote_name):
         return
-    click.confirm("Download these files?", default=False, abort=True)
-    results = repo.download(plan, approved=True, max_workers=max_workers,
-                            progress=True)
-    _report_download_results(results)
+    click.echo("Catalog ready. Downloading dataset files can consume substantial "
+               "bandwidth and disk space. Nothing transfers until you approve "
+               "a plan. Size estimates use recorded catalog metadata.")
+    try:
+        plan = _choose_download_plan(repo, output=output, remote_name=remote_name,
+                                     dry_run=dry_run)
+    except click.Abort as exc:
+        # Click wraps both EOF and Ctrl+C in Abort. EOF skips this optional
+        # step; retain Click's interrupt behavior for Ctrl+C.
+        if not isinstance(exc.__context__, EOFError):
+            raise
+        plan = None
+    if plan is None:
+        click.echo("No download started; the catalog is unchanged.")
+        return
+    # Outside the prompt handler: transfer errors must never become a skip.
+    _execute_download(repo, plan, max_workers=max_workers)
+
+
+def _offer_download(repo, *, filters=(), output=None, interactive=False):
+    """Review downloads after cloning, or print equivalent commands for later."""
+    if not sys.stdin.isatty():
+        click.echo("Warning: download approval is unavailable without "
+                   "a terminal. The catalog is ready; download was skipped.", err=True)
+        try:
+            _download_available(repo)
+        except (DownloadError, ValueError) as exc:
+            # A skipped handoff cannot fail successful catalog creation, even
+            # when later downloading will require extra configuration.
+            click.echo(f"Before downloading: {exc}", err=True)
+        directory = repo.worktree if repo.worktree is not None else repo.dothm.path
+        arguments = ["hallmark", "download"]
+        if filters:
+            for pattern in filters:
+                arguments.extend(["--filter", pattern])
+        else:
+            arguments.append("--all")
+        if output is not None:
+            # The example changes directory. Preserve --output's meaning relative
+            # to the original invocation, as plan_download does.
+            arguments.extend(["--output", str(Path(output).expanduser().resolve())])
+        command = shlex.join(arguments)
+        needs_output = repo.worktree is None and output is None
+        if needs_output:
+            command += " --output '/path/to/downloads'"
+        click.echo("Preview this selection locally; use --filter 'PATTERN' "
+                   "instead of --all to narrow it:")
+        click.echo(f"  cd -- {shlex.quote(str(directory))}")
+        click.echo(f"  {command} --dry-run")
+        click.echo("Run the download in a terminal; explicit approval is required:")
+        click.echo(f"  {command}")
+        if needs_output:
+            click.echo("Replace /path/to/downloads with your output directory.")
+        return
+    with _translate_cli_errors(DownloadError, ValueError, OSError,
+                               prefix="Catalog created; download failed"):
+        if interactive:
+            _interactive_download(repo, output=output)
+            return
+        if not _download_available(repo):
+            return
+        click.echo("Catalog ready. Review the recorded sizes before downloading; "
+                   "transfers can consume substantial bandwidth and disk space.")
+        try:
+            output = _download_output(repo, output)
+            plan = repo.plan_download(output, all_files=True, filter=filters or None)
+            approved = _confirm_download_plan(
+                plan, decline_is_skip=True, show_paths=True)
+        except click.Abort as exc:
+            if not isinstance(exc.__context__, EOFError):
+                raise
+            approved = False
+        if not approved:
+            click.echo("No download started; the catalog is unchanged.")
+            return
+        # Keep transfer errors and interrupts outside the prompt's EOF handler.
+        _execute_download(repo, plan, max_workers=4)
 
 
 @click.group()
@@ -150,67 +323,82 @@ def hallmark(ctx):
     manage data products in a complex workflow.
     """
     # if the invoked subcommand is one of the commands that does not require a repo
-    if ctx.invoked_subcommand in [None, "init", "clone", "build"]:
+    if ctx.invoked_subcommand in [None, "init", "clone", "build", "sources"]:
         # return early without attempting to open a repository
         return
     # attempt to open the hallmark repository in the current directory
-    with _translate_cli_errors(GitError, prefix="Failed to open hallmark repository"):
+    with _translate_cli_errors(
+            GitError, ValueError, prefix="Failed to open hallmark repository"):
         ctx.obj = Repo(".")
 
 
-def _backend_options_file(path):
-    """Read a backend's configuration from a YAML mapping."""
-    if path is None:
-        return None
-    with Path(path).open(encoding="utf-8") as handle:
-        options = yaml.safe_load(handle)
-    if not isinstance(options, dict):
-        raise ValueError("Backend options file must contain a YAML mapping")
-    return options
+@hallmark.command(short_help="List named data sources and available collections.")
+@click.argument("name", required=False)
+def sources(name):
+    """Show supported sources, releases and collection roots without crawling."""
+    with _translate_cli_errors(ValueError):
+        descriptors = [get_source(name)] if name else list_sources()
+        for source in descriptors:
+            click.echo(f"{source.name}: {source.description}")
+            for release, definition in source.releases.items():
+                click.echo(f"  {release}: {definition.description or release}")
+                click.echo(f"    {definition.url}")
+                if name:
+                    for collection, roots in definition.collections.items():
+                        description = definition.collection_descriptions.get(
+                            collection, "")
+                        click.echo(f"    {collection}: {description}")
+                        for root in roots:
+                            click.echo(f"      {definition.url.rstrip('/')}/{root}/")
+            if name:
+                click.echo("  Omit --collection to catalog the entire release.")
 
 
-@hallmark.command(short_help="Initialize a hallmark repository.")
+@hallmark.command(short_help="Initialize a local repository or data catalog.")
 @click.argument("path")
-@click.option("--from", "from_url", help="Discover a raw remote dataset.")
-@click.option("--backend", help="Registered data backend name.")
-@click.option("--backend-options", type=click.Path(exists=True, dir_okay=False),
-              help="YAML mapping of backend-specific options.")
-@click.option("--auth", help="Optional local authentication profile for data access.")
+@click.option("--from", "source", help="Named data source or raw dataset URL.")
+@click.option("--release",
+              help="Release of a named source; prompted for in a terminal.")
+@click.option("--collection", "collections", multiple=True,
+              help="Source collection to catalog. Repeat to include several.")
 @click.option("--filter", "filters", multiple=True,
-              help="Include paths matching a glob. May be repeated.")
-@click.option("--fmt", help="Select paths and extract filename parameters.")
-@click.option("--with-download", is_flag=True,
-              help="Review and approve a download after catalog creation.")
-@click.option("--max-workers", type=click.IntRange(min=1), default=4,
-              show_default=True)
-def init(path, from_url, backend, backend_options, auth, filters, fmt,
-         with_download, max_workers):
-    """Initialize a hallmark repository at PATH.
+              help="Catalog paths matching a glob. May be repeated.")
+@click.option("--format",
+              help="Filename template overriding automatic detection. "
+                   "Unmatched files remain cataloged.")
+def init(path, source, release, collections, filters, format):
+    """Initialize a local repository or discover metadata without downloading files.
 
-    Use --from URL to discover a remote dataset without downloading payloads.
-    If PATH ends with `.hm`, a bare repository is created.
-    Otherwise, a `.hm` directory is created inside PATH.
+    --from accepts a source name such as desi or a dataset URL. Omit --collection
+    and --filter to catalog the whole release or URL root. Filename formats are
+    detected automatically; --format supplies an explicit template instead.
+    Format matching adds columns without filtering files. Use download separately
+    to select and approve transfers. Plain init creates an empty repository without
+    scanning existing local files.
+    A PATH ending in .hm creates a bare catalog; otherwise metadata lives in PATH/.hm.
     """
     with _translate_cli_errors(
         GitError, DownloadError, ValueError, OSError, yaml.YAMLError,
         prefix=f'Failed to initialize hallmark repository at "{path}"'):
-        options = _backend_options_file(backend_options)
-        if with_download and not from_url:
-            raise ValueError("--with-download requires --from")
-        if with_download and Repo.lwpaths(path)[1] is None:
-            raise ValueError("Use a worktree destination for --with-download")
-        kwargs = dict(from_url=from_url, backend=backend, backend_options=options,
-                      auth=auth, filter=filters or None, fmt=fmt,
-                      progress=True, max_workers=max_workers)
-        if from_url is None and all(value is None for value in
-                                    (backend, options, auth, filters or None, fmt)):
-            repo = Repo.init(path)
+        if source is not None and "://" not in source and release is None:
+            descriptor = get_source(source)
+            if not sys.stdin.isatty():
+                raise ValueError("--release is required in noninteractive use; "
+                                 f"choose from {', '.join(descriptor.releases)}")
+            release = click.prompt(
+                "Release", type=click.Choice(list(descriptor.releases)))
+        if (source is None and release is None and format is None
+                and not collections and not filters):
+            Repo.init(path)
         else:
-            repo = Repo.init(path, **kwargs)
-        if from_url is not None:
+            Repo.init(path, source=source, release=release,
+                      collections=collections or None, filter=filters or None,
+                      format=format, progress=True)
+        if source is not None:
             click.echo(f'Successfully initialized "{path}"')
-        if with_download:
-            _run_download(repo, repo.plan_download(), max_workers=max_workers)
+            click.echo("From this repository, use hallmark download --interactive "
+                       "to choose files, or hallmark download --filter 'PATTERN' "
+                       "--dry-run to preview a selection.")
 
 
 @hallmark.command(short_help="Show information of the current directory.")
@@ -318,21 +506,14 @@ def add(repo, encoding, inputs):
 @click.option("--fmt")
 @click.option("--remote-name")
 @click.option("--remote-url")
-@click.option("--remote-auth",
-              help="Local SSH profile name. An empty string removes the reference.")
-@click.option("--remote-backend", help="Registered data backend name.")
-@click.option("--remote-backend-options", type=click.Path(exists=True, dir_okay=False),
-              help="YAML mapping of backend-specific options.")
 @click.option("--encoding", "encodings", multiple=True)
 @click.pass_obj
-def set_config(repo, fmt, remote_name, remote_url, remote_auth, remote_backend,
-               remote_backend_options, encodings):
+def set_config(repo, fmt, remote_name, remote_url, encodings):
     """Update the current branch config.yml."""
     # if no config changes are requested, raise a ClickException to inform the user
     if (
     fmt is None and remote_name is None and remote_url is None
-    and remote_auth is None and remote_backend is None
-    and remote_backend_options is None and not encodings):
+    and not encodings):
         raise ClickException("No config changes requested.")
     encoding_updates = {}
     for item in encodings:
@@ -345,16 +526,11 @@ def set_config(repo, fmt, remote_name, remote_url, remote_auth, remote_backend,
 
     # use the _translate_cli_errors context manager to handle specific exceptions
     with _translate_cli_errors(RuntimeError, ValueError, OSError, yaml.YAMLError):
-        options = _backend_options_file(remote_backend_options)
         repo.set_config(
             fmt=fmt,
             remote_name=remote_name,
             remote_url=remote_url,
-            encoding_updates=encoding_updates or None,
-            **({"remote_auth": remote_auth} if remote_auth is not None else {}),
-            **({"remote_backend": remote_backend}
-               if remote_backend is not None else {}),
-            **({"remote_backend_options": options} if options is not None else {}))
+            encoding_updates=encoding_updates or None)
 
     click.echo("Updated hallmark config.")
 
@@ -434,7 +610,6 @@ def checkout(repo, target_branch):
 @click.option("--filter", "filters", multiple=True,
               help="Select paths matching a glob. ** matches recursively. "
                    "May be repeated.")
-@click.option("--fmt", help="Select paths matching a filename format.")
 @click.option("--remote", "remote_name",
               help="Name of the configured data remote to use.")
 @click.option("--output", type=click.Path(file_okay=False),
@@ -443,20 +618,35 @@ def checkout(repo, target_branch):
               show_default=True)
 @click.option("--dry-run", is_flag=True,
               help="Show the download plan using only local catalog metadata.")
+@click.option("--interactive", is_flag=True,
+              help="Choose cataloged files and review sizes before approval.")
 @click.option("-y", "--yes", is_flag=True, hidden=True)
 @click.pass_obj
-def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
-             output, max_workers, dry_run, yes):
+def download(repo, files, tsv_names, download_all, filters, remote_name,
+             output, max_workers, dry_run, interactive, yes):
     """
     Download selected files from a configured data remote.
 
     Preview the selection with --dry-run. Every nonempty download displays
     its plan and asks for confirmation before transferring files.
+    Use --interactive to choose patterns or all files in a terminal.
     """
+    if interactive:
+        if files or tsv_names or download_all or filters:
+            raise ClickException(
+                "--interactive cannot be combined with paths, --filter, "
+                "--tsv, or --all")
+        if yes:
+            click.echo("--yes is deprecated; downloads still require confirmation.",
+                       err=True)
+        with _translate_cli_errors(DownloadError, ValueError, OSError):
+            _interactive_download(repo, output=output, remote_name=remote_name,
+                                  max_workers=max_workers, dry_run=dry_run)
+        return
     if download_all and (files or tsv_names):
         raise ClickException("--all cannot be combined with file paths or --tsv")
-    if not files and not tsv_names and not download_all and not filters and not fmt:
-        raise ClickException("Provide file paths, --tsv, --all, --filter, or --fmt")
+    if not files and not tsv_names and not download_all and not filters:
+        raise ClickException("Provide file paths, --tsv, --all, or --filter")
     if repo.worktree is None and output is None:
         raise ClickException("--output is required when downloading from a bare repo")
     if yes:
@@ -465,13 +655,9 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
     with _translate_cli_errors(DownloadError, ValueError):
         plan = repo.plan_download(
             output, file_paths=files, tsv_names=tsv_names, all_files=download_all,
-            filter=filters or None, fmt=fmt, remote_name=remote_name)
+            filter=filters or None, remote_name=remote_name)
         if dry_run:
-            click.echo(plan.summary())
-            for item in plan.items[:20]:
-                click.echo(f"  {item.relative_path.as_posix()}")
-            if plan.file_count > 20:
-                click.echo(f"  ... {plan.file_count - 20} more file(s)")
+            _show_download_plan(plan, show_paths=True)
             return
         _run_download(repo, plan, max_workers=max_workers)
 
@@ -479,56 +665,43 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
 @hallmark.command(short_help="Clone an existing Hallmark catalog.")
 @click.argument("url")
 @click.argument("path")
-@click.option("--auth", help="Optional local SSH authentication profile.")
-@click.option("--filter", "filters", multiple=True,
-              help="Select paths matching a glob. ** matches recursively. "
-                   "May be repeated.")
-@click.option("--fmt",
-              help="Select downloads using a filename format; "
-                   "requires --with-download.")
 @click.option("--source-type", default="auto", show_default=True,
               type=click.Choice(["auto", "git", "catalog"]),
               help="Override automatic source detection.")
-@click.option("--with-download", "--download", "fetch_data", is_flag=True,
-              help="Request a download after catalog creation, with confirmation.")
-@click.option("--no-fetch-data", is_flag=True, hidden=True)
-@click.option("--max-workers", type=click.IntRange(min=1), default=4,
-              show_default=True)
-@click.option("-y", "--yes", is_flag=True, hidden=True)
-def clone(url, path, auth, filters, fmt, source_type, fetch_data, no_fetch_data,
-          max_workers, yes):
-    """
-    Clone an existing Git catalog or published catalog snapshot at PATH.
+@click.option("--no-download", is_flag=True,
+              help="Copy the complete catalog without reviewing or downloading files.")
+@click.option("--filter", "filters", multiple=True,
+              help="Select downloads by relative-path glob; keep the full catalog. "
+                   "May be repeated.")
+@click.option("--interactive", is_flag=True,
+              help="Choose files interactively instead of reviewing the whole catalog.")
+@click.option("--output", type=click.Path(file_okay=False),
+              help="Download directory. Defaults to the worktree; "
+                   "prompted for bare repos.")
+def clone(url, path, source_type, no_download, filters, interactive, output):
+    """Clone a complete Git catalog or published catalog snapshot at PATH.
 
-    Dataset files are not downloaded by default. Use --with-download to review
-    and approve a transfer. --filter and --fmt select downloads while preserving
-    the complete catalog and Git history. Use init --from for raw datasets.
+    Copy the complete catalog first, then review a download plan and confirm
+    transfers. --filter selects downloads without trimming the catalog.
+    --no-download skips review; --interactive opens the selection chooser.
+    Without a terminal, keep the catalog and print download commands for later.
+    Use init --from for raw datasets.
     """
-    if fetch_data and no_fetch_data:
-        raise ClickException("--download conflicts with --no-fetch-data")
-    if (filters or fmt is not None) and not fetch_data:
-        raise ClickException("--filter and --fmt require --with-download")
-    if fetch_data and Repo.lwpaths(path)[1] is None:
-        raise ClickException("Use a worktree destination for --with-download")
-    if yes:
-        click.echo("--yes is deprecated; downloads still require confirmation.",
-                   err=True)
+    if no_download and (interactive or filters or output is not None):
+        raise ClickException(
+            "--no-download cannot be combined with --interactive, "
+            "--filter, or --output")
+    if interactive and filters:
+        raise ClickException("--interactive cannot be combined with --filter")
     with _translate_cli_errors(DownloadError, GitError, ValueError):
-        path_matches("validation", filter=filters or None, fmt=fmt)
         try:
-            repo = Repo.clone(url, path, auth=auth,
-                              source_type=source_type, progress=True,
-                              max_workers=max_workers)
+            repo = Repo.clone(url, path, source_type=source_type, progress=True)
         except CloneError as exc:
             click.echo(str(exc), err=True)
             raise SystemExit(1) from exc
         click.echo(f'Successfully cloned to "{path}"')
-        if fetch_data:
-            if repo.worktree is None:
-                raise ClickException("Use a worktree destination for --download")
-            plan = repo.plan_download(filter=filters or None, fmt=fmt)
-            _run_download(repo, plan, max_workers=max_workers)
-
+    if not no_download:
+        _offer_download(repo, filters=filters, output=output, interactive=interactive)
 
 
 @hallmark.command(short_help="Deprecated: use init --from for remote datasets.")
@@ -554,14 +727,13 @@ def clone(url, path, auth, filters, fmt, source_type, fetch_data, no_fetch_data,
 @click.option("--dataset-url",
               help="Exact dataset URL to search recursively. Recorded remotes "
                    "do not change this root.")
-@click.option("--dataset-auth", help="Local SSH profile for the dataset source.")
 @click.option("--index-format", type=click.Choice(["cyverse-html"]), hidden=True)
 @click.option("--allow-remote-commands", is_flag=True,
               hidden=True, help="Deprecated; discovery uses SFTP.")
 @click.option("--remote-hash", is_flag=True,
               hidden=True, help="Unsupported; discovery does not hash dataset files.")
 def build(directory, dataset_name, remotes, config_file, fmts, overwrite,
-          dataset_url, dataset_auth, index_format, allow_remote_commands, remote_hash):
+          dataset_url, index_format, allow_remote_commands, remote_hash):
     """
     Build a catalog at DIRECTORY/DATASET_NAME.hm.
 
@@ -620,7 +792,7 @@ def build(directory, dataset_name, remotes, config_file, fmts, overwrite,
             fmt_entries.append({"fmt": fmt, "db": db})
 
     source_options = {key: value for key, value in {
-        "dataset_url": dataset_url, "dataset_auth": dataset_auth,
+        "dataset_url": dataset_url,
         "index_format": index_format, "allow_remote_commands": allow_remote_commands,
         "remote_hash": remote_hash}.items() if value is not None and value is not False}
     # build the hallmark repository with the specified parameters

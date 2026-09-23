@@ -303,8 +303,11 @@ def test_multi_server_example_uses_shared_discovery_and_verified_downloads(tmp_p
     with local_server(tmp_path / "north", requests["north"]) as north:
         with local_server(tmp_path / "south", requests["south"]) as south:
             options = {"routes": {"north": north, "south": south}}
-            repo = Repo.init(tmp_path / "repo", from_url="https://logical.test/dataset/",
-                             backend="multi-server", backend_options=options,
+            from hallmark import DataSource, SourceRelease, register_source
+            register_source(DataSource("multi-example", "Multiple servers", {
+                "v1": SourceRelease("https://logical.test/dataset/", {},
+                                    backend="multi-server", backend_options=options)}))
+            repo = Repo.init(tmp_path / "repo", source="multi-example", release="v1",
                              filter="**/*.fits")
             assert repo.state.data["path"].tolist() == [
                 "north/file.fits", "south/file.fits"]

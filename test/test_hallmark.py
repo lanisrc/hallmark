@@ -1296,8 +1296,10 @@ def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
 
     monkeypatch.setattr("hallmark.downloader._fetch_file", fake_download_file)
 
-    clone = Repo.clone(str(source.dothm.path), tmp_path / "clone",
-                       download=True, approve=lambda plan: plan.file_count == 1)
+    clone = Repo.clone(str(source.dothm.path), tmp_path / "clone")
+    plan = clone.plan_download()
+    assert plan.file_count == 1
+    clone.download(plan, approved=True)
 
     assert captured == {
         "url": "https://example.com/data/a0_i0.h5",
@@ -1347,7 +1349,7 @@ def test_repo_clone_removes_incomplete_destination(tmp_path):
     destination = tmp_path / "clone"
 
     with pytest.raises(CloneError, match="missing required file"):
-        Repo.clone(str(source.dothm.path), destination, fetch_data=False)
+        Repo.clone(str(source.dothm.path), destination)
     assert not destination.exists(), f"Expected incomplete clone destination \
         {destination} to be removed after failed clone attempt"
 
@@ -2770,7 +2772,6 @@ def test_checkout_remote_branch(tmp_path):
     clone = Repo.clone(
         str(source.dothm.path),
         tmp_path / "clone",
-        fetch_data=False,
     )
 
     # The cloned repository should have the tracked file in its worktree.

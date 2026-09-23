@@ -9,7 +9,7 @@ from threading import Event, Lock, local
 
 import requests
 
-from .auth import resolve_settings
+from .settings import SSHSettings
 from .base import DataBackend, RemoteEntry, RemoteSpec, TransferCancelled
 
 
@@ -21,7 +21,7 @@ class OperationContext:
     also cancels active work.
 
     Args:
-        remote (RemoteSpec): Data source and optional local profile name.
+        remote (RemoteSpec): Data source and transport configuration.
         output_root (Path | str, optional): Root used to validate download paths.
     """
 
@@ -31,7 +31,7 @@ class OperationContext:
         output_root=None,
     ):
         self.remote = remote
-        self.settings = resolve_settings(remote)
+        self.settings = SSHSettings()
         self.output_root = Path(output_root) if output_root is not None else None
         self.cancelled = Event()
         self.on_bytes = None

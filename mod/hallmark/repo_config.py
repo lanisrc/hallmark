@@ -17,27 +17,24 @@ from .helper_functions import (
     validate_path_component, validate_relative_path)
 
 from .transport.base import (
-    RemoteSpec, backend_name, profile_name, reject_controls, thaw_backend_options)
+    RemoteSpec, backend_name, reject_controls, thaw_backend_options)
 
 
 def _update_remote_config(
     config: dict,
     remote_name: Optional[str],
     remote_url: Optional[str],
-    remote_auth: Optional[str] = None,
     remote_backend: Optional[str] = None,
     remote_backend_options=None,
     ) -> None:
     """
     Used by set_config.
-    Update the repository data remote and its local profile reference.
+    Update the repository data remote and its transport configuration.
 
     Args:
         config (dict): The repository configuration dictionary.
         remote_name (str, optional): New remote repository name.
         remote_url (str, optional): New remote repository URL.
-        remote_auth (str, optional): Local SSH profile name. An empty string
-            removes the reference; None leaves it unchanged.
         remote_backend (str, optional): Registered backend name. An empty string
             restores automatic selection; None leaves it unchanged.
         remote_backend_options (mapping, optional): Replace backend options.
@@ -95,10 +92,6 @@ def _update_remote_config(
         selected["name"] = remote_name
     if remote_url is not None:
         selected["url"] = remote_url
-    if remote_auth == "":
-        selected.pop("auth", None)
-    elif remote_auth is not None:
-        selected["auth"] = profile_name(remote_auth)
     if remote_backend == "":
         selected.pop("backend", None)
     elif remote_backend is not None:
@@ -181,12 +174,15 @@ def normalize_remotes(remotes) -> list[dict]:
         else:
             raise ValueError(f"remote {index} must be a string or dictionary")
 
-        if set(entry) - {"name", "url", "auth", "backend", "backend_options"}:
-            raise ValueError(
-                "Remote entries support only name, url, auth, backend and "
-                "backend_options fields")
         if "auth" in entry:
-            profile_name(entry["auth"])
+            raise ValueError(
+                "Hallmark auth profiles have been removed. Configure the host in "
+                "~/.ssh/config, use its alias in the remote URL, and remove the "
+                "obsolete auth field from config.yml.")
+        if set(entry) - {"name", "url", "backend", "backend_options"}:
+            raise ValueError(
+                "Remote entries support only name, url, backend and "
+                "backend_options fields")
         if "backend" in entry:
             entry["backend"] = backend_name(entry["backend"])
         if "backend_options" in entry:
@@ -196,7 +192,7 @@ def normalize_remotes(remotes) -> list[dict]:
             reject_controls(entry["url"], "Remote URL")
             # allow names without URLs while configuring a data remote
             RemoteSpec.parse(
-                entry["url"], entry.get("auth"), backend=entry.get("backend"),
+                entry["url"], backend=entry.get("backend"),
                 backend_options=entry.get("backend_options"))
         # for each required key ("name" and "url"), validate that it exists
         for key in ("name", "url"):
@@ -363,7 +359,6 @@ def set_config(
     remote_name: Optional[str] = None,
     remote_url: Optional[str] = None,
     encoding_updates: Optional[Dict[str, str]] = None,
-    remote_auth: Optional[str] = None,
     remote_backend: Optional[str] = None,
     remote_backend_options=None,
 ) -> dict:
@@ -378,8 +373,6 @@ def set_config(
         fmt (str, optional): Filename format.
         remote_name (str, optional): Remote repository name.
         remote_url (str, optional): Remote repository URL.
-        remote_auth (str, optional): Local SSH profile name. An empty string
-            removes the reference; None leaves it unchanged.
         remote_backend (str, optional): Registered backend name. An empty string
             restores automatic selection; None leaves it unchanged.
         remote_backend_options (mapping, optional): Replace backend options.
@@ -428,8 +421,6 @@ def set_config(
         if isinstance(remote_url, str):
             reject_controls(remote_url, "Remote URL")
         remote_url = normalize_nonempty_string(remote_url, label="remote_url")
-    if remote_auth not in (None, ""):
-        profile_name(remote_auth)
 
     # if a new format string or encoding updates are provided
     if fmt is not None or encoding_updates is not None:
@@ -465,11 +456,11 @@ def set_config(
         # update the first entry in the "data" list of the configuration
         config["data"][0] = updated_spec
 
-    # update the remote when its name, URL, or profile reference changes
+    # update the remote when its name, URL, or transport configuration changes
     if any(value is not None for value in (
-            remote_name, remote_url, remote_auth,
+            remote_name, remote_url,
             remote_backend, remote_backend_options)):
-        _update_remote_config(config, remote_name, remote_url, remote_auth,
+        _update_remote_config(config, remote_name, remote_url,
                               remote_backend, remote_backend_options)
 
     repo.state.config = config

@@ -12,16 +12,15 @@ import time
 import traceback
 from urllib.parse import quote
 
+import pandas as pd
 import pytest
 import requests
-import yaml
 
 from hallmark import Repo
 from hallmark.downloader import _download_file, download_remote_data
 from hallmark.repo_builder import _manifest_matches, build_repo
 from hallmark.repo_config import normalize_remotes
 from hallmark.transport import OperationContext, RemoteSpec
-from hallmark.transport.auth import resolve_settings
 from hallmark.transport.base import (
     CapabilityError,
     DownloadError,
@@ -108,83 +107,28 @@ def test_controls_rejected_at_all_path_boundaries(path, tmp_path):
         _download_file("ssh://campus/" + path, tmp_path / "out")
 
 
-def write_auth(monkeypatch, tmp_path, profiles, defaults=None):
-    """Write a local authentication file for a transport test."""
-    path = tmp_path / "auth.yml"
-    path.write_text(
-        yaml.safe_dump({"version": 1, "profiles": profiles, "defaults": defaults or {}})
-    )
-    monkeypatch.setenv("HALLMARK_AUTH_FILE", str(path))
-    return path
-
-
-def test_profile_precedence_binding_and_isolation(monkeypatch, tmp_path):
-    write_auth(
-        monkeypatch,
-        tmp_path,
-        {
-            "one": {
-                "hosts": ["campus"],
-                "user": "alice",
-                "port": 2200,
-                "identity_file": "~/key-one",
-            },
-            "two": {
-                "hosts": ["campus"],
-                "user": "bob",
-                "port": 2201,
-                "identity_file": "~/key-two",
-            },
-        },
-        {"transfer_timeout": 77},
-    )
-    first = resolve_settings(RemoteSpec.parse("ssh://carol@campus:2222/data", "one"))
-    second = resolve_settings(RemoteSpec.parse("sftp://campus/data", "two"))
-    assert (first.user, first.port, first.transfer_timeout) == ("carol", 2222, 77)
-    assert (second.user, second.port) == ("bob", 2201)
-    assert first.identity_file != second.identity_file
-    with pytest.raises(RemoteConfigurationError, match="not bound"):
-        resolve_settings(RemoteSpec.parse("ssh://other/data", "one"))
-    with pytest.raises(RemoteConfigurationError, match="Unresolved"):
-        resolve_settings(RemoteSpec.parse("ssh://campus/data", "missing"))
-
-
-@pytest.mark.parametrize(
-    "profile",
-    [
-        {"hosts": ["campus"], "password": "secret"},
-        {"hosts": ["campus"], "ssh_options": {"ProxyCommand": "anything"}},
-        {"hosts": ["campus"], "port": True},
-        {"hosts": ["campus"], "host_key_policy": "no"},
-        {"hosts": ["campus"], "identity_file": "%d/key"},
-        {"hosts": []},
-        {"hosts": ["$(id)"]},
-    ],
-)
-def test_invalid_profiles_fail_preflight(monkeypatch, tmp_path, profile):
-    write_auth(monkeypatch, tmp_path, {"campus": profile})
-    with pytest.raises(RemoteConfigurationError):
-        OperationContext(RemoteSpec.parse("ssh://campus/data", "campus"))
-
-
-def test_profile_xdg_and_removal(monkeypatch, tmp_path):
+def test_obsolete_auth_files_and_environment_are_ignored(monkeypatch, tmp_path):
     folder = tmp_path / "config" / "hallmark"
     folder.mkdir(parents=True)
-    (folder / "auth.yml").write_text(
-        "version: 1\nprofiles:\n  lab:\n    hosts: [campus]\n    user: alice\n"
-    )
-    assert (
-        resolve_settings(RemoteSpec.parse("ssh://campus/data", "lab")).user == "alice"
-    )
-    repo = Repo.init(tmp_path / "repo")
-    repo.set_config(remote_url="ssh://campus/data", remote_auth="lab")
-    assert repo.state.config["remote"]["auth"] == "lab"
-    repo.set_config(remote_auth="")
-    assert "auth" not in Repo(repo.worktree).state.config["remote"]
-    before = repo.state.config.copy()
-    with pytest.raises(ValueError):
-        repo.set_config(remote_auth="invalid.name", fmt="changed-{x}")
-    assert repo.state.config == before
+    obsolete = folder / "auth.yml"
+    obsolete.write_text("invalid: [yaml")
+    monkeypatch.setenv("HALLMARK_AUTH_FILE", str(obsolete))
+    with OperationContext(RemoteSpec.parse("ssh://carol@campus:2222/data")) as ctx:
+        options = ctx.transport._options()
+        assert "User=carol" in options
+        assert "Port=2222" in options
+        assert "-i" not in options
+    with OperationContext(RemoteSpec.parse("sftp://campus/data")) as ctx:
+        options = ctx.transport._options()
+        assert not any(option.startswith(("User=", "Port=")) for option in options)
+        assert "-i" not in options
+    assert obsolete.read_text() == "invalid: [yaml"
+
+
+@pytest.mark.parametrize("auth", ["lab", None, 3])
+def test_stored_auth_profiles_report_migration(auth):
+    with pytest.raises(ValueError, match="~/.ssh/config"):
+        normalize_remotes({"url": "ssh://campus/data", "auth": auth})
 
 
 @pytest.mark.parametrize(
@@ -578,7 +522,9 @@ def test_cli_dry_run_does_not_resolve_auth_or_start_clients(monkeypatch, tmp_pat
     from hallmark.cli import hallmark
 
     repo = Repo.init(tmp_path / "repo")
-    repo.set_config(remote_url="ssh://campus/data", remote_auth="missing")
+    repo.set_config(remote_url="ssh://campus/data")
+    repo.state.data = pd.DataFrame({"path": ["item.dat"]})
+    repo.dothm.dump(repo.state)
     monkeypatch.chdir(repo.worktree)
 
     def fail(*args, **kwargs):
@@ -590,22 +536,15 @@ def test_cli_dry_run_does_not_resolve_auth_or_start_clients(monkeypatch, tmp_pat
     assert "item.dat" in result.output
 
 
-def test_cli_profile_roundtrip(monkeypatch, tmp_path):
+def test_cli_rejects_removed_auth_flag(monkeypatch, tmp_path):
     from click.testing import CliRunner
     from hallmark.cli import hallmark
 
     repo = Repo.init(tmp_path / "repo")
     monkeypatch.chdir(repo.worktree)
-    runner = CliRunner()
-    result = runner.invoke(
-        hallmark,
-        ["set-config", "--remote-url", "ssh://campus/data", "--remote-auth", "lab"],
-    )
-    assert result.exit_code == 0, result.output
-    assert Repo(repo.worktree).state.config["remote"]["auth"] == "lab"
-    result = runner.invoke(hallmark, ["set-config", "--remote-auth", ""])
-    assert result.exit_code == 0, result.output
-    assert "auth" not in Repo(repo.worktree).state.config["remote"]
+    result = CliRunner().invoke(hallmark, ["set-config", "--remote-auth", "lab"])
+    assert result.exit_code == 2
+    assert "No such option" in result.output
 
 
 def test_http_manifest_auth_failure_is_not_optional(monkeypatch):
@@ -722,14 +661,11 @@ def test_build_cli_passes_source_controls(monkeypatch, tmp_path):
             "run_{i}.h5=data.tsv",
             "--dataset-url",
             "ssh://campus/data",
-            "--dataset-auth",
-            "lab",
             "--allow-remote-commands",
             "--remote-hash",
         ],
     )
     assert result.exit_code == 0, result.output
     assert calls[0]["dataset_url"] == "ssh://campus/data"
-    assert calls[0]["dataset_auth"] == "lab"
     assert calls[0]["allow_remote_commands"] is True
     assert calls[0]["remote_hash"] is True
