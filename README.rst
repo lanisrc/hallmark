@@ -95,15 +95,28 @@ is required. Omit the filter to catalog everything beneath the supplied URL.
 
 Every dataset transfer requires approval. Python callers can inspect
 ``repo.plan_download()`` and then execute ``repo.download(plan, approved=True)``.
-Optional authentication profiles remain local and can be selected with
-``init --auth PROFILE`` or ``set-config --remote-auth PROFILE``. Add
-``--with-download`` to ``init`` to review and approve a transfer after discovery.
+CLI users can run ``hallmark download --interactive`` to choose path globs or
+all cataloged files, review recorded sizes, then download, change the selection,
+or skip. Initialization never offers downloads. CLI cloning copies the complete
+catalog, then displays a download plan and requests confirmation by default.
+Use ``clone --interactive`` for the chooser, or ``clone --no-download`` to copy
+only the catalog. Without a terminal, clone keeps the catalog, skips downloading,
+and prints commands to use later.
+SSH and SFTP use standard ``~/.ssh/config`` aliases and the SSH agent.
+Use ``hallmark sources desi`` to inspect named sources, releases and collections.
+For example, ``hallmark init desi --from desi --release dr1 --collection redshifts``
+creates a catalog for that collection. Omit the collection to index the whole
+release. ``init --filter`` selects catalog entries. Filename formats are detected
+automatically from those paths; ``--format`` supplies an explicit template instead.
+Both retain unmatched files. Download selection belongs to the
+separate ``download --filter`` command.
 The older remote ``build`` command is deprecated in favor of ``init --from``.
 
 Use ``hallmark clone CATALOG PATH`` for an existing Git-hosted ``.hm`` or a
 published HTTP/SFTP catalog snapshot. Catalogs can live on GitHub or another
 server while their data remotes point elsewhere. Git clones preserve the full
-catalog and its history; clone filters select optional downloads only.
+catalog and its history. ``clone --filter`` narrows the planned downloads without
+removing catalog entries. No payloads transfer until the user approves the plan.
 
 The public ``DataBackend`` interface supports generic HTTP/SSH, CyVerse, and
 registered plugins for collaboration-specific APIs and multiple data servers.

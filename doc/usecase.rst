@@ -46,7 +46,7 @@ He initializes a bare |hallmark|_ catalog from a simulation export and
 verifies its location::
 
     hallmark init sim.hm --from ssh://campus/srv/export/ \
-        --fmt 'run{run:d}/frame{frame:d}.h5'
+        --format 'run{run:d}/frame{frame:d}.h5'
     cd sim.hm
     hallmark info
 
@@ -202,67 +202,13 @@ call may wait for its 10-second connection timeout or 30-second read
 timeout; a response that keeps sending small amounts of data can delay
 cancellation further.
 
-Local profiles
-~~~~~~~~~~~~~~
+SSH configuration
+~~~~~~~~~~~~~~~~~
 
-Frank can keep SSH settings in a local authentication profile and
-record its name in the repository.
-|hallmark|_ reads profiles from ``$HALLMARK_AUTH_FILE`` when set,
-otherwise from ``$XDG_CONFIG_HOME/hallmark/auth.yml``, or from
-``~/.config/hallmark/auth.yml`` if neither variable is set.
-Profiles apply to SSH and SFTP connections.
-
-For example, his authentication file can contain:
-
-.. code-block:: yaml
-
-    version: 1
-    defaults:
-      connect_timeout: 10
-      transfer_timeout: 3600
-      shutdown_timeout: 2
-      max_sessions: 4
-    profiles:
-      campus:
-        hosts: [campus]
-        user: researcher
-        port: 22
-        identity_file: ~/.ssh/id_ed25519
-        host_key_policy: strict
-
-He associates the profile with the data remote::
-
-    hallmark set-config --remote-name campus --remote-auth campus
-
-He can remove the reference later::
-
-    hallmark set-config --remote-name campus --remote-auth ''
-
-The Python equivalents use ``repo.set_config`` with
-``remote_name="campus"`` and ``remote_auth="campus"`` or ``remote_auth=""``.
-Passing ``None`` leaves the profile reference unchanged.
-The repository stores only the profile name; identity settings remain local.
-
-Profile names must match ``[A-Za-z0-9_-]{1,64}``.
-The ``hosts`` list contains the aliases or hostnames used in data URLs,
-before SSH resolves ``HostName``.
-A missing profile or a host outside this list causes an error before
-connecting. A username or port in the URL overrides the profile setting;
-remaining values come from SSH configuration and OpenSSH defaults.
-
-Profiles accept the fields shown above and may override the four
-timeout and concurrency defaults. Global defaults cannot set ``hosts``,
-``user``, ``port``, or ``identity_file``.
-Passwords, tokens, arbitrary SSH options, executable paths, and SSH
-configuration paths are not supported profile fields.
-
-``transfer_timeout`` limits the total transfer time for each file in
-seconds, so large datasets may need a higher value.
-``max_sessions`` limits concurrent transfers within an operation to
-respect the server's session limit.
-The local profile or defaults may use ``host_key_policy: accept-new``
-to accept a host key on first contact. Changed host keys still cause
-an error. Repository configuration cannot enable this setting.
+Frank keeps connection settings in ``~/.ssh/config``. Hallmark passes the URL's
+host alias to OpenSSH, which resolves the user, port, identity and any proxy.
+Explicit URL user and port values take precedence. Hallmark does not read a
+separate authentication file or prompt to create one.
 
 Initialize a private catalog
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -270,13 +216,13 @@ Initialize a private catalog
 Frank can prepare a catalog directly from the files on the server::
 
     hallmark init lab --from ssh://campus/srv/export/ \
-      --auth campus --fmt 'runs/run_{i:d}.h5'
+      --filter 'runs/run_*.h5' --format 'runs/run_{i:d}.h5'
     cd lab
     hallmark download --all --dry-run
     hallmark download --all
 
 This creates ``lab/.hm`` with only the matching run files in ``data.tsv``.
-Without a filter or format, the catalog contains all discovered files below
+Without an inclusion glob, the catalog contains all discovered files below
 the supplied URL. Initialization downloads no dataset contents.
 The final command displays the transfer plan and asks Frank for confirmation.
 
@@ -286,11 +232,10 @@ both discovery and downloads. Symlinks and special files are skipped.
 Authentication and permission failures stop discovery rather than producing
 an apparently complete catalog.
 
-The generated data remote ``origin`` records the source URL and optional
-profile name.
+The generated data remote ``origin`` records the source URL.
 Existing Git-hosted catalogs keep their complete catalog, history and
-recorded data remotes when cloned. Clone filters select optional downloads
-and require ``--with-download``; they leave the catalog and history unchanged.
+recorded data remotes when cloned. Select and approve transfers afterward with
+``download --filter``; downloads leave the catalog and history unchanged.
 The Git catalog can be hosted separately from its data servers.
 
 Published manifest checksums are recorded in the catalog. Missing checksums

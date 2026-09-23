@@ -18,52 +18,53 @@ implementations:
 * ``CyVerseBackend`` extends HTTP support with CyVerse directory and metadata
   parsing.
 
-Without an explicit backend, Hallmark selects one from the data URL. Explicit
-selection takes precedence. For example:
+Users select data sources with ``--from NAME`` or provide a raw dataset URL.
+For raw URLs, Hallmark selects the transport automatically. Source authors can
+specify an adapter and its nonsecret configuration in a release definition;
+users do not need backend flags or an options file.
 
-.. code-block:: bash
+Define a source and register it for the current Python process:
 
-   hallmark init ./observations --from 'https://data.example.org/export/' \
-       --backend http --filter '**/*.fits'
+.. code-block:: python
 
-For an installed plugin, pass its registered name and an optional YAML mapping:
+   from hallmark import DataSource, SourceRelease, Repo, register_source
 
-.. code-block:: bash
+   survey = DataSource("survey", "Example survey", {
+       "dr1": SourceRelease(
+           "https://survey.example.org/release/",
+           {"redshifts": ("catalogs/redshifts",)},
+       ),
+   })
+   register_source(survey)
+   repo = Repo.init("survey", source="survey", release="dr1",
+                    collections=["redshifts"], filter="**/*.fits")
 
-   hallmark init ./survey --from 'https://survey.example.org/release/' \
-       --backend survey --backend-options ./survey-options.yml
+Collection roots are relative directories, and catalog paths remain relative
+to the release URL. An omitted collection catalogs the entire release. To
+expose this descriptor to other Python processes and the CLI, publish the
+``survey`` instance in the plugin's ``pyproject.toml``:
 
-``Repo.init(..., from_url=url, backend="survey", backend_options=options)``
-accepts the same settings in Python. The data remote stores ``backend`` and
-``backend_options`` alongside its ``name``, ``url`` and optional ``auth``:
+.. code-block:: toml
 
-.. code-block:: yaml
+   [project.entry-points."hallmark.sources"]
+   survey = "my_survey.sources:survey"
 
-   remote:
-     - name: origin
-       url: https://survey.example.org/release/
-       backend: survey
-       backend_options:
-         release: dr1
+Users can then run ``hallmark sources survey`` to see available releases and
+roots, or ``hallmark init ./survey --from survey --release dr1``. Source
+registration and listing must not contact the service. Source names are unique
+across registered and installed descriptors.
 
-Options contain ordinary configuration that can be shared with the catalog.
-Keep tokens, passwords and private keys outside them. The built-in SSH backend
-uses local auth profiles; HTTP retains Requests' authentication and environment
-behavior. A plugin documents how it obtains any additional credentials locally.
-The example ``release`` option above is interpreted by the plugin, not Hallmark.
-
-Update an existing remote in Python with
-``repo.set_config(remote_backend="survey", remote_backend_options=options)``.
-Passing ``remote_backend=""`` returns to URL-based selection; passing
-``remote_backend_options={}`` clears the options. ``None`` leaves the respective
-setting unchanged. Configurations without backend fields remain valid.
+The saved data remote retains its resolved URL and transport ``backend`` and
+``backend_options``. Existing catalog transport metadata remains supported.
+The developer API ``repo.set_config(remote_backend=...,
+remote_backend_options=...)`` can update this configuration; it has no CLI
+counterpart. Options contain shareable configuration, never credentials.
+SSH uses ``~/.ssh/config`` and its agent; HTTP retains Requests authentication.
 
 ``repo.plan_download()`` reads the local catalog without opening a connection.
-The plan captures its selected backend name and deeply immutable options, in
-addition to its source URL, profile reference, destination and file metadata.
-Changes to repository settings or the caller's original options mapping do not
-redirect an approved plan. Install or register the selected plugin before
-executing a transfer that uses it.
+The plan captures its backend and immutable options, source URL, destination
+and file metadata. Later configuration changes cannot redirect an approved
+plan. Install the selected transport plugin before executing a transfer.
 
 Writing a backend
 -----------------
@@ -151,14 +152,15 @@ transfer:
 
 .. code-block:: python
 
-   from hallmark import Repo, register_backend
+   from hallmark import DataSource, SourceRelease, Repo, register_backend, register_source
    from my_survey.backend import SurveyBackend
 
    register_backend("survey", SurveyBackend)
-   repo = Repo.init(
-       "survey", from_url="https://survey.example.org/release/",
-       backend="survey",
-   )
+   register_source(DataSource("survey", "Manifest survey", {
+       "dr1": SourceRelease("https://survey.example.org/release/", {},
+                            backend="survey"),
+   }))
+   repo = Repo.init("survey", source="survey", release="dr1")
 
 For CLI use and other collaborators, publish the class as an entry point in
 the plugin package's ``pyproject.toml``:
@@ -179,8 +181,8 @@ Mapping one catalog across servers
 ----------------------------------
 
 The :download:`multiple-server backend example <../demo/multi_server_backend.py>`
-combines HTTP roots beneath logical prefixes. For example, the options file
-can contain:
+combines HTTP roots beneath logical prefixes. Its source definition supplies
+the following adapter options:
 
 .. code-block:: yaml
 
@@ -198,24 +200,23 @@ From the source checkout, register the demonstration backend explicitly:
 
 .. code-block:: python
 
-   from hallmark import Repo
+   from hallmark import DataSource, SourceRelease, Repo, register_source
    from demo.multi_server_backend import register
 
    register()
-   repo = Repo.init(
-       "combined",
-       from_url="https://north.example.org/export/",
-       backend="multi-server",
-       backend_options={"routes": {
-           "north": "https://north.example.org/export/",
-           "south": "https://south.example.org/export/",
-       }},
-   )
+   register_source(DataSource("combined", "Two data servers", {
+       "v1": SourceRelease("https://north.example.org/export/", {},
+           backend="multi-server", backend_options={"routes": {
+               "north": "https://north.example.org/export/",
+               "south": "https://south.example.org/export/",
+           }}),
+   }))
+   repo = Repo.init("combined", source="combined", release="v1")
    plan = repo.plan_download(filter="north/**/*.fits")
    print(plan.summary())
 
 The example is tested with two disposable local HTTP servers. The URLs above
-are illustrative. Collaboration-specific adapters for DESI, LSST, Roman, JWST
-or Euclid can implement their own manifests, directory conventions or API
+are illustrative. Collaboration-specific adapters for LSST, Roman, JWST or
+Euclid can implement their own manifests, directory conventions or API
 routing through the same contract; those service-specific plugins are not
 included with Hallmark.
