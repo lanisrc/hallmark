@@ -307,10 +307,12 @@ def test_multi_server_example_uses_shared_discovery_and_verified_downloads(tmp_p
             register_source(DataSource("multi-example", "Multiple servers", {
                 "v1": SourceRelease("https://logical.test/dataset/", {},
                                     backend="multi-server", backend_options=options)}))
-            repo = Repo.init(tmp_path / "repo", source="multi-example", release="v1",
-                             filter="**/*.fits")
-            assert repo.state.data["path"].tolist() == [
-                "north/file.fits", "south/file.fits"]
+            repo = Repo.init(tmp_path / "repo")
+            # the template inherits the release's backend and routes
+            repo.add("https://logical.test/dataset/{site}/file.fits")
+            assert repo.state.data["site"].tolist() == ["north", "south"]
+            assert repo.state.data["checksum_algorithm"].tolist() == [
+                "sha256", "sha256"]
             assert requests == {"north": ["/", "/sha256sums"],
                                 "south": ["/", "/sha256sums"]}
             repo = Repo(repo.worktree)

@@ -725,7 +725,8 @@ def build_repo(
     """
     Build a remote catalog using the deprecated builder interface.
 
-    Prefer ``Repo.init(path, source=url)`` for remote datasets.
+    Prefer ``Repo.init(path)`` followed by ``Repo.add(url_template)`` for
+    remote datasets.
     Discovery reads listings and published checksum manifests without
     downloading dataset files.
 
@@ -763,7 +764,8 @@ def build_repo(
         DownloadError: If remote discovery fails.
     """
     warnings.warn(
-        "build_repo is deprecated; use Repo.init(path, source=url)",
+        "build_repo is deprecated; use Repo.init(path) and "
+        "Repo.add(url_template)",
         DeprecationWarning, stacklevel=2)
     if remote_hash:
         raise CapabilityError(

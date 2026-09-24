@@ -39,33 +39,6 @@ def _glob_matches(path, pattern):
     return match(0, 0)
 
 
-CATALOG_COLUMNS = ("path", "checksum_algorithm", "checksum", "size_bytes", "mtime")
-
-
-@lru_cache(maxsize=128)
-def extraction_parser(template):
-    """Validate a named filename template and return its parser and columns."""
-    if not isinstance(template, str) or not template.strip():
-        raise ValueError("format must be a nonempty filename template")
-    fields = []
-    for _, name, _, conversion in Formatter().parse(template):
-        if name is None:
-            continue
-        if not name.isidentifier() or conversion is not None:
-            raise ValueError(
-                "Extraction fields must be simple names without conversions")
-        if name in {*CATALOG_COLUMNS, *RESERVED_FIELDS}:
-            raise ValueError(f"Extraction field {name!r} is reserved catalog metadata")
-        if name not in fields:
-            fields.append(name)
-    if not fields:
-        raise ValueError("Extraction templates require at least one named field")
-    parser = parse.compile(template, case_sensitive=True)
-    # Force regular-expression compilation now, before accessing the source.
-    parser.parse("")
-    return parser, tuple(fields)
-
-
 def _template_parts(segment: str):
     """Split one template segment into literal text and field definitions."""
     try:
@@ -298,7 +271,7 @@ def _manifest_checksums(context, entries):
                     previous, checksum_algorithm=algorithm, checksum=digest.lower())
 
 
-def discover(context, *, filter=None, progress=False, path_prefix="",
+def discover(context, *, filter=None, progress=False,
              descend=None) -> list[RemoteEntry]:
     """
     Discover remote files and their published metadata recursively.
@@ -309,8 +282,6 @@ def discover(context, *, filter=None, progress=False, path_prefix="",
     Args:
         context (OperationContext): Source connection and cancellation state.
         filter (str | list[str], optional): Relative path glob or globs.
-        path_prefix (str): Release-relative root for collection selection.
-            Returned entry paths remain relative to the context root.
         descend (callable, optional): Predicate receiving a relative directory
             path ending in ``/``; listings skip directories for which it
             returns False. Checksum manifests in skipped directories are
@@ -332,8 +303,7 @@ def discover(context, *, filter=None, progress=False, path_prefix="",
     # Validate selectors before contacting the source, even for an empty index.
     path_matches("", filter=filter)
     def matches(path):
-        logical_path = path_prefix + "/" + path if path_prefix else path
-        return path_matches(logical_path, filter=filter)
+        return path_matches(path, filter=filter)
 
     entries = {}
     counts = {"directories": 0, "files": 0, "matched": 0, "current": ""}

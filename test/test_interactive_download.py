@@ -519,40 +519,41 @@ def test_clone_without_downloadable_data_completes(catalog, tmp_path, kind):
 
 
 @pytest.mark.parametrize("remote", [False, True])
-def test_init_never_scans_local_files_or_offers_downloads(
+def test_init_and_remote_add_never_scan_local_files_or_offer_downloads(
         catalog, tmp_path, monkeypatch, remote):
     _, transfers = catalog
     destination = tmp_path / "initialized"
     destination.mkdir()
     local = destination / "existing.h5"
     local.write_bytes(b"untouched")
-    arguments = ["init", str(destination)]
-    if remote:
-        init_pages(monkeypatch)
-        arguments += ["--from", ROOT, "--filter", "runs/*.h5",
-                      "--format", "runs/run_{run:03d}.h5"]
-    else:
+    if not remote:
         def no_remote_access(*args, **kwargs):
             raise AssertionError("Local init must not contact a remote")
         monkeypatch.setattr(OperationContext, "__enter__", no_remote_access)
 
     def no_download(*args, **kwargs):
-        raise AssertionError("Init must not offer, plan, or execute downloads")
+        raise AssertionError("Init and add must not offer, plan, or execute downloads")
 
     monkeypatch.setattr(cli, "_offer_download", no_download)
     monkeypatch.setattr(Repo, "plan_download", no_download)
     monkeypatch.setattr(Repo, "download", no_download)
-    result = TerminalRunner().invoke(hallmark, arguments)
+    result = TerminalRunner().invoke(hallmark, ["init", str(destination)])
     assert result.exit_code == 0, result.output
+    if remote:
+        init_pages(monkeypatch)
+        monkeypatch.chdir(destination)
+        result = TerminalRunner().invoke(
+            hallmark, ["add", ROOT + "{group}/run_{run:03d}.h5"])
+        assert result.exit_code == 0, result.output
     repo = Repo(destination)
     assert local.read_bytes() == b"untouched"
     assert transfers == []
     assert "Download these files?" not in result.output
     assert "Select files" not in result.output
     if remote:
-        assert "hallmark download --interactive" in result.output
-        assert repo.state.data["path"].tolist() == [
-            "runs/run_001.h5", "runs/run_002.h5"]
+        assert "then hallmark download" in result.output
+        assert repo.state.data[["group", "run"]].values.tolist() == [
+            ["runs", "001"], ["runs", "002"]]
     else:
         assert repo.state.data.empty
         assert not list((repo.dothm.path / "objects").rglob("*"))

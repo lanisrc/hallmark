@@ -265,43 +265,19 @@ class Repo:
         pf["sha1"] = [checksums[path] for path in full_paths]
 
     @classmethod
-    def init(cls, path: Union[Path, str], *, source=None, release=None,
-             collections=None, filter=None, format=None, progress=False) -> "Repo":
-        """Initialize a local repository or catalog a named source or raw URL.
+    def init(cls, path: Union[Path, str]) -> "Repo":
+        """Initialize an empty local repository.
 
-        Discovery reads listings and published checksums without fetching data.
-        Existing destination files are preserved; an existing catalog is rejected.
+        Catalog local or remote files afterwards with ``add``; a URL template
+        such as ``https://host/ER2/{src}_{day}.h5`` catalogs remote files
+        without downloading them.
 
         Args:
             path (Path | str): Worktree or bare ``.hm`` repository destination.
-            source (str, optional): Registered data source name or dataset URL.
-            release (str, optional): Explicit release for a named source.
-            collections (str | list[str], optional): Collections within the release.
-                Omission catalogs the entire release.
-            filter (str | list[str], optional): Relative path inclusion globs.
-            format (str, optional): Named filename template for extra columns,
-                overriding automatic detection from the filtered paths.
-                Unmatched files remain in the catalog. Detected templates and
-                their columns are combined in one table; literal paths remain
-                authoritative. No inferred template is required for cataloging.
-            progress (bool | callable): Display discovery progress or receive updates.
 
         Returns:
-            Repo: Initialized repository without downloaded data files.
-
-        Raises:
-            DestinationExistsError: If remote initialization would replace a catalog.
-            ValueError: If source options or the extraction template are invalid.
-            DownloadError: If remote discovery fails.
+            Repo: The initialized repository.
         """
-        from .catalog import initialize_remote
-
-        if source is not None:
-            return initialize_remote(
-                cls, path, source, release=release, collections=collections,
-                filter=filter, format=format, progress=progress)
-        if any(value is not None for value in (release, collections, filter, format)):
-            raise ValueError("Remote initialization options require source")
         dothm_path, worktree_path = cls.lwpaths(path)
         dothm = Dothm.init(dothm_path)
         (dothm.path / "config.yml").write_text(Dothm.config_template(),

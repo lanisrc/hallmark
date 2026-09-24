@@ -1,28 +1,23 @@
-"""Initialize remote datasets and clone existing Hallmark catalogs."""
+"""Clone existing Hallmark catalogs from Git or published snapshots."""
 
 from __future__ import annotations
 
 import re
-from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from shutil import rmtree
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 import pandas as pd
 import yaml
 
-from .discovery import CATALOG_COLUMNS, discover, extraction_parser, path_matches
-from .sources import resolve_source
 from .dothm import Dothm
 from .error import CloneError, DestinationExistsError
-from .fmt_detection import detect_fmt
 from .helper_functions import as_list_of_dicts
 from .repo_config import fmt_fields, normalize_remotes, normalize_tsv_name
 from .repo_manifest import row_relative_path
 from .transport import OperationContext, RemoteSpec
-from .transport.base import (RemoteObjectMissing, literal_path,
-                             thaw_backend_options)
+from .transport.base import RemoteObjectMissing, literal_path
 from .worktree import Worktree
 
 
@@ -119,116 +114,6 @@ def _metadata_commit(repo, files, message):
     repo.state = repo.dothm.load()
 
 
-def _write_inventory(repo, source, entries, format, provenance):
-    """Write discovered files and their source to a new catalog."""
-    columns = list(CATALOG_COLUMNS)
-    templates = [format] if format is not None else detect_fmt(
-        [entry.path for entry in entries])
-    parsers, formats, fields = [], [], []
-    for template in templates:
-        try:
-            parser, names = extraction_parser(template)
-        except ValueError:
-            if format is not None:
-                raise
-            # Inference can mistake literal braces for fields. Such filenames
-            # still belong in the catalog, without unsafe extraction columns.
-            continue
-        parsers.append(parser)
-        formats.append(template)
-        fields.extend(name for name in names if name not in fields)
-    rows = []
-    for entry in entries:
-        row = dict(zip(columns, (entry.path, entry.checksum_algorithm,
-                                entry.checksum, entry.size, entry.mtime)))
-        for parser in parsers:
-            matched = parser.parse(entry.path)
-            if matched is not None:
-                row.update({key: value for key, value in matched.named.items()
-                            if key not in columns})
-                # The detector returns formats in a stable order. A row uses
-                # the first matching template so overlapping guesses cannot
-                # overwrite one another's parameter values.
-                break
-        rows.append(row)
-    frame = pd.DataFrame(rows, columns=columns + list(fields), dtype=object)
-    data_spec = {"db": "data.tsv", "extraction": {
-        "automatic": format is None, "formats": formats}}
-    remote = {"name": "origin", "url": source.url}
-    if source.backend:
-        remote["backend"] = source.backend
-    if source.backend_options:
-        remote["backend_options"] = thaw_backend_options(source.backend_options)
-    repo.dothm.dump_yml({"data": [data_spec], "remote": [remote]}, "config")
-    repo.dothm.dump_yml({"source": provenance}, "meta")
-    repo.dothm.dump_tsv(frame, "data", na_rep="")
-    _metadata_commit(repo, ["config.yml", "meta.yml", "data.tsv"],
-                     "Discover remote catalog")
-
-
-def initialize_remote(cls, path, source, *, release=None, collections=None,
-                      filter=None, format=None, progress=False):
-    """Discover a dataset and initialize its catalog without replacing local files."""
-    destination = Path(path).expanduser().absolute()
-    if destination.is_symlink():
-        raise DestinationExistsError(f"Destination is a symbolic link: {path}")
-    dothm_path, _ = cls.lwpaths(destination)
-    if dothm_path.exists() or dothm_path.is_symlink():
-        raise DestinationExistsError(
-            f"Hallmark repository already exists: {dothm_path}")
-    if destination.exists() and not destination.is_dir():
-        raise NotADirectoryError(f"Destination is not a directory: {path}")
-    path_matches("validation", filter=filter)
-    if format is not None:
-        extraction_parser(format)
-    source, roots, provenance = resolve_source(source, release, collections)
-    # Claim only the metadata directory. On failure, existing dataset files stay put.
-    missing_parents = []
-    parent = dothm_path.parent
-    while not parent.exists():
-        missing_parents.append(parent)
-        parent = parent.parent
-    created_parents = []
-    owns_metadata = False
-    try:
-        for parent in reversed(missing_parents):
-            try:
-                parent.mkdir()
-                created_parents.append(parent)
-            except FileExistsError:
-                if not parent.is_dir():
-                    raise
-        try:
-            dothm_path.mkdir()
-            owns_metadata = True
-        except FileExistsError as exc:
-            raise DestinationExistsError(
-                f"Hallmark repository already exists: {dothm_path}") from exc
-        inventory = {}
-        for root in roots:
-            scoped = source if not root else RemoteSpec.parse(
-                source.url.rstrip("/") + "/" + quote(root, safe="/") + "/",
-                backend=source.backend, backend_options=source.backend_options)
-            with OperationContext(scoped) as context:
-                for entry in discover(context, filter=filter, progress=progress,
-                                      path_prefix=root):
-                    path = root + "/" + entry.path if root else entry.path
-                    inventory[path] = replace(entry, path=path)
-        entries = [inventory[path] for path in sorted(inventory)]
-        repo = cls.init(destination)
-        _write_inventory(repo, source, entries, format, provenance)
-        return repo
-    except BaseException:
-        if owns_metadata:
-            rmtree(dothm_path, ignore_errors=True)
-        for parent in reversed(created_parents):
-            try:
-                parent.rmdir()
-            except OSError:
-                pass
-        raise
-
-
 def _git_source(url, source_type):
     """Determine whether the selected source should be cloned with Git."""
     if source_type == "git":
@@ -251,7 +136,8 @@ def _clone_git(cls, url, destination, display_path):
         Dothm.clone(git_url, dothm_path, display_path=display_path)
     except CloneError as exc:
         raise CloneError(
-            f"{exc}\nFor a raw dataset, use hallmark init PATH --from URL.") from exc
+            f"{exc}\nFor a raw dataset, use hallmark init PATH, then "
+            "hallmark add 'URL/{field}...'.") from exc
     if worktree_path:
         Worktree.init(worktree_path)
     return cls(destination)
@@ -262,8 +148,8 @@ def clone_catalog(cls, url, path, *, source_type="auto"):
     Clone an existing Git catalog or published HTTP/SFTP catalog snapshot.
 
     Existing destinations are rejected before source access. An incomplete
-    destination created by this call is removed on failure. Dataset discovery
-    belongs to ``Repo.init(source=...)``.
+    destination created by this call is removed on failure. Raw datasets are
+    cataloged with ``Repo.add(url_template)`` in a new repository.
 
     Args:
         cls: Repository class used to initialize or open the result.
@@ -306,8 +192,9 @@ def clone_catalog(cls, url, path, *, source_type="auto"):
         if snapshot is None:
             if source_type == "auto" and source.scheme in {"http", "https"}:
                 return _clone_git(cls, url, destination, path)
-            raise CloneError("No published Hallmark catalog at this URL; "
-                             "use hallmark init PATH --from URL for a raw dataset")
+            raise CloneError("No published Hallmark catalog at this URL; for a "
+                             "raw dataset, use hallmark init PATH, then "
+                             "hallmark add 'URL/{field}...'")
         repo = cls.init(destination)
         for name, contents in snapshot.items():
             (repo.dothm.path / name).write_text(contents, encoding="utf-8")

@@ -326,7 +326,8 @@ def hallmark(ctx):
     manage data products in a complex workflow.
     """
     # if the invoked subcommand is one of the commands that does not require a repo
-    if ctx.invoked_subcommand in [None, "init", "clone", "build", "sources"]:
+    if ctx.invoked_subcommand in [
+            None, "init", "clone", "build", "sources", "ls-remote"]:
         # return early without attempting to open a repository
         return
     # attempt to open the hallmark repository in the current directory
@@ -354,54 +355,49 @@ def sources(name):
                         for root in roots:
                             click.echo(f"      {definition.url.rstrip('/')}/{root}/")
             if name:
-                click.echo("  Omit --collection to catalog the entire release.")
+                click.echo("  Run hallmark ls-remote URL to find filename templates, "
+                           "then hallmark add 'URL/TEMPLATE'.")
 
 
-@hallmark.command(short_help="Initialize a local repository or data catalog.")
+@hallmark.command(short_help="Initialize an empty local repository.")
 @click.argument("path")
-@click.option("--from", "source", help="Named data source or raw dataset URL.")
-@click.option("--release",
-              help="Release of a named source; prompted for in a terminal.")
-@click.option("--collection", "collections", multiple=True,
-              help="Source collection to catalog. Repeat to include several.")
-@click.option("--filter", "filters", multiple=True,
-              help="Catalog paths matching a glob. May be repeated.")
-@click.option("--format",
-              help="Filename template overriding automatic detection. "
-                   "Unmatched files remain cataloged.")
-def init(path, source, release, collections, filters, format):
-    """Initialize a local repository or discover metadata without downloading files.
+def init(path):
+    """Initialize an empty hallmark repository at PATH.
 
-    --from accepts a source name such as desi or a dataset URL. Omit --collection
-    and --filter to catalog the whole release or URL root. Filename formats are
-    detected automatically; --format supplies an explicit template instead.
-    Format matching adds columns without filtering files. Use download separately
-    to select and approve transfers. Plain init creates an empty repository without
-    scanning existing local files.
+    Plain init creates an empty repository without scanning existing files.
+    Catalog files afterwards with hallmark add: a filename template such as
+    `a{a}_i{i}.h5` tracks local files, and a URL template such as
+    `https://host/ER2/{src}_{day}.h5` catalogs remote files without
+    downloading them.
     A PATH ending in .hm creates a bare catalog; otherwise metadata lives in PATH/.hm.
     """
     with _translate_cli_errors(
-        GitError, DownloadError, ValueError, OSError, yaml.YAMLError,
+        GitError, ValueError, OSError, yaml.YAMLError,
         prefix=f'Failed to initialize hallmark repository at "{path}"'):
-        if source is not None and "://" not in source and release is None:
-            descriptor = get_source(source)
-            if not sys.stdin.isatty():
-                raise ValueError("--release is required in noninteractive use; "
-                                 f"choose from {', '.join(descriptor.releases)}")
-            release = click.prompt(
-                "Release", type=click.Choice(list(descriptor.releases)))
-        if (source is None and release is None and format is None
-                and not collections and not filters):
-            Repo.init(path)
-        else:
-            Repo.init(path, source=source, release=release,
-                      collections=collections or None, filter=filters or None,
-                      format=format, progress=True)
-        if source is not None:
-            click.echo(f'Successfully initialized "{path}"')
-            click.echo("From this repository, use hallmark download --interactive "
-                       "to choose files, or hallmark download --filter 'PATTERN' "
-                       "--dry-run to preview a selection.")
+        Repo.init(path)
+
+
+@hallmark.command("ls-remote",
+                  short_help="List a remote directory and suggest templates.")
+@click.argument("url")
+def ls_remote(url):
+    """List the files at a remote directory URL and suggest URL templates.
+
+    Nothing is downloaded and no repository is changed or required. Each
+    suggestion is a command that catalogs the matching files.
+    """
+    from .repo_remote import suggest_templates
+
+    with _translate_cli_errors(DownloadError, ValueError):
+        base, suggestions, total = suggest_templates(url, progress=True)
+    click.echo(f"{total} file(s) at {base}")
+    if not suggestions:
+        click.echo("No filename templates detected. Write one with {field} "
+                   "placeholders and preview it with hallmark add -n 'URL/TEMPLATE'.")
+        return
+    click.echo("Suggested templates (files matched):")
+    for template, count in suggestions:
+        click.echo(f"  hallmark add {shlex.quote(template)}  ({count})")
 
 
 @hallmark.command(short_help="Show information of the current directory.")
@@ -750,7 +746,7 @@ def clone(url, path, source_type, no_download, filters, interactive, output):
     transfers. --filter selects downloads without trimming the catalog.
     --no-download skips review; --interactive opens the selection chooser.
     Without a terminal, keep the catalog and print download commands for later.
-    Use init --from for raw datasets.
+    For raw datasets, use init, then add a URL template.
     """
     if no_download and (interactive or filters or output is not None):
         raise ClickException(
@@ -769,7 +765,7 @@ def clone(url, path, source_type, no_download, filters, interactive, output):
         _offer_download(repo, filters=filters, output=output, interactive=interactive)
 
 
-@hallmark.command(short_help="Deprecated: use init --from for remote datasets.")
+@hallmark.command(short_help="Deprecated: use init, then add a URL template.")
 @click.argument("directory")
 @click.argument("dataset_name")
 @click.option(
@@ -802,8 +798,8 @@ def build(directory, dataset_name, remotes, config_file, fmts, overwrite,
     """
     Build a catalog at DIRECTORY/DATASET_NAME.hm.
 
-    This command is deprecated. Use hallmark init --from URL PATH for remote
-    datasets, or hallmark init PATH to create a local repository.
+    This command is deprecated. Use hallmark init PATH, then
+    hallmark add 'URL/{field}...' to catalog remote datasets.
 
     --dataset-url selects the exact discovery root; otherwise DATASET_NAME
     identifies a dataset beneath the CyVerse curated-data directory.
@@ -813,7 +809,8 @@ def build(directory, dataset_name, remotes, config_file, fmts, overwrite,
     provided, existing formats are reused or a generic path catalog is
     created. Dataset files are not downloaded during catalog creation.
     """
-    click.echo("build is deprecated; use hallmark init --from URL PATH.", err=True)
+    click.echo("build is deprecated; use hallmark init PATH, then "
+               "hallmark add 'URL/{field}...'.", err=True)
     if config_file and fmts:
         raise ClickException("Use only one of --config-file or --fmt, not both.")
     # validate the dataset name to ensure it is a valid path component

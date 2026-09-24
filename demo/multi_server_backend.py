@@ -1,8 +1,10 @@
 """Example backend joining independent HTTP roots into one logical dataset.
 
 Call ``register()`` and define a ``DataSource`` release with
-``backend="multi-server"`` and ``backend_options={"routes": ...}``, then call
-``Repo.init(..., source=source_name, release=release_name)``.
+``backend="multi-server"`` and ``backend_options={"routes": ...}``. Then
+``repo.add(release_url + "{site}/file.fits")`` catalogs files under the release
+URL with this backend; ``Repo.add(..., backend=..., backend_options=...)``
+selects it without registering a source.
 An installed plugin instead exposes ``MultiServerBackend`` through the
 ``hallmark.backends`` entry-point group. No servers are contacted on import.
 """

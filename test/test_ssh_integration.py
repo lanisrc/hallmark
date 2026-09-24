@@ -378,12 +378,13 @@ def test_sftp_only_discovers_metadata_and_fetches(ssh_server, tmp_path):
 
 @pytest.mark.parametrize("ssh_server", ["sftp-only"], indirect=True)
 @pytest.mark.parametrize("scheme", ["ssh", "sftp"])
-def test_sftp_only_init_plans_then_requires_payload_approval(
+def test_sftp_only_add_plans_then_requires_payload_approval(
     ssh_server, tmp_path, monkeypatch, scheme,
 ):
     root = ssh_server["root"]
-    (root / "nested").mkdir()
+    (root / "nested" / "deeper").mkdir(parents=True)
     (root / "nested" / "science.fits").write_bytes(b"science")
+    (root / "nested" / "deeper" / "skipped.fits").write_bytes(b"deep")
     (root / "notes.txt").write_bytes(b"notes")
     fetched = []
     fetch = SshTransport._fetch
@@ -392,25 +393,22 @@ def test_sftp_only_init_plans_then_requires_payload_approval(
         fetched.append(path)
         return fetch(self, path, destination, file_limit)
 
-    def reject_git_probe(*args, **kwargs):
-        raise AssertionError("SFTP directory detection must not invoke remote Git")
-
     monkeypatch.setattr(SshTransport, "_fetch", record_fetch)
-    monkeypatch.setattr("hallmark.catalog.Dothm.clone", reject_git_probe)
     plans = []
 
     def decline(plan):
         plans.append(plan)
         return False
 
-    repo = Repo.init(
-        tmp_path / "initialized",
-        source=ssh_server["url"].replace("ssh:", scheme + ":"),
-        filter="**/*.fits",
-    )
+    repo = Repo.init(tmp_path / "initialized")
+    url = ssh_server["url"].replace("ssh:", scheme + ":").rstrip("/")
+    repo.add(url + "/{group}/{name}.fits")
+    assert repo.commit("Catalog remote science files")
+    assert not any(path.is_file() for path in repo.objects.root.rglob("*"))
     decline(repo.plan_download())
     assert fetched == []
-    assert repo.state.data["path"].tolist() == ["nested/science.fits"]
+    assert repo.state.data[["group", "name"]].values.tolist() == [
+        ["nested", "science"]]
     assert len(plans) == 1
     assert plans[0].total_bytes == 7
     assert not (repo.worktree / "nested").exists()
@@ -421,6 +419,7 @@ def test_sftp_only_init_plans_then_requires_payload_approval(
     assert result["succeeded"] == 1
     assert fetched == ["nested/science.fits"]
     assert (repo.worktree / "nested/science.fits").read_bytes() == b"science"
+    assert repo.status()["untracked"] == []
 
 
 @pytest.mark.parametrize("ssh_server", ["no-sftp"], indirect=True)
