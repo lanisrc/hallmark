@@ -605,3 +605,18 @@ def test_cli_download_dry_run_lists_every_source(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "3 file(s); 18 bytes" in result.output
     assert "Sources:" in result.output and SIMS in result.output
+
+
+def test_cli_status_omits_headers_of_empty_sections(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from hallmark.cli import hallmark
+
+    repo = Repo.init(tmp_path / "repo")
+    _catalog_remote(repo, {"M87": ""})
+    monkeypatch.chdir(repo.worktree)
+    staged = CliRunner().invoke(hallmark, ["status"])
+    assert "Changes to be committed:" in staged.output
+    assert "Changes not staged for commit:" not in staged.output
+    repo.commit("remote catalog")
+    clean = CliRunner().invoke(hallmark, ["status"])
+    assert clean.output == "On branch main\n\nnothing to commit, working tree clean\n"

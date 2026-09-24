@@ -428,7 +428,7 @@ def status(repo):
     untracked = snapshot["untracked"]
 
     def emit_section(title, entries, fg):
-        if not entries:
+        if not any(paths for _, paths in entries):
             return
         click.echo("")
         click.secho(title, fg=fg)
