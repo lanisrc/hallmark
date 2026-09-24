@@ -240,8 +240,10 @@ def test_cli_ls_remote_then_add_workflow(tmp_path, pages, monkeypatch):
     monkeypatch.chdir(tmp_path / "cli")
     preview = runner.invoke(hallmark, ["add", "-n", root + "run_{run:03d}.h5"])
     assert preview.exit_code == 0, preview.output
-    assert preview.stdout.splitlines()[:3] == ["Would add", "run_001.h5",
-                                               "run_002.h5"]
+    # Click 8.1, used on Python 3.9, mixes the stderr progress bar into stdout
+    lines = preview.stdout.splitlines()
+    start = lines.index("Would add")
+    assert lines[start:start + 3] == ["Would add", "run_001.h5", "run_002.h5"]
     assert not Repo(tmp_path / "cli").state.config["data"][0].get("fmt")
     added = runner.invoke(hallmark, ["add", root + "run_{run:03d}.h5"])
     assert added.exit_code == 0, added.output
