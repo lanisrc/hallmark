@@ -74,49 +74,59 @@ Or install from source for development purposes::
 Private data remotes
 --------------------
 
-|hallmark|_ can download data products from HTTP(S), SSH, and SFTP servers.
-A data remote specifies where the files are stored, while a Git remote
-is used to share the history of the data index.
+|hallmark|_ can catalog and download data products stored on HTTP(S), SSH, and
+SFTP servers. A data source specifies where the files are stored, while a Git
+remote is used to share the history of the data index.
 For a private server, |hallmark|_ uses OpenSSH 9.6 or newer with a trusted
 host key and key-based authentication that does not require a prompt.
 
-Initialize a catalog from a remote dataset, then select files to download::
+Add remote files to a repository with a URL template, then select files to
+download::
 
-    hallmark init campus --from ssh://campus/srv/export/ --filter '**/*.h5'
-    cd campus
+    hallmark init eht
+    cd eht
+    hallmark add 'https://archive.example.org/2026MOVIE/ER2/{src}_{day}.h5'
+    hallmark commit -m 'Add remote EHT data'
     hallmark download --all --dry-run
     hallmark download --all
 
-Remote initialization discovers files without downloading dataset contents.
+``add`` lists the remote directory and catalogs the matching files, with their
+sizes and published checksums, without downloading dataset contents. The URL
+up to the first path segment containing a ``{field}`` is recorded as the
+template's source; the rest is the filename template, and its fields become
+catalog columns. Adding the same URL template again syncs the catalog with the
+server, including files that were removed. A branch can track several
+templates, local or remote, such as ``{run}.dat`` files in the worktree and
+``.h5`` files on a server; ``hallmark rm --cached TEMPLATE`` stops tracking
+one. Remote files are committed as catalog entries, not as local objects.
+
+Use ``hallmark ls-remote URL`` to list a directory and print suggested
+templates, and ``hallmark add -n 'URL/TEMPLATE'`` to preview the matches.
 CyVerse and ordinary browsable HTTPS directories, including DESI, use the same
-workflow.
-SSH discovery also works with SFTP-only accounts; no server shell or Python
-is required. Omit the filter to catalog everything beneath the supplied URL.
+workflow. SSH listing also works with SFTP-only accounts; no server shell or
+Python is required.
 
 Every dataset transfer requires approval. Python callers can inspect
 ``repo.plan_download()`` and then execute ``repo.download(plan, approved=True)``.
 CLI users can run ``hallmark download --interactive`` to choose path globs or
 all cataloged files, review recorded sizes, then download, change the selection,
-or skip. Initialization never offers downloads. CLI cloning copies the complete
-catalog, then displays a download plan and requests confirmation by default.
-Use ``clone --interactive`` for the chooser, or ``clone --no-download`` to copy
-only the catalog. Without a terminal, clone keeps the catalog, skips downloading,
-and prints commands to use later.
+or skip. ``init`` and ``add`` never offer downloads. CLI cloning copies the
+complete catalog, then displays a download plan and requests confirmation by
+default. Use ``clone --interactive`` for the chooser, or ``clone --no-download``
+to copy only the catalog. Without a terminal, clone keeps the catalog, skips
+downloading, and prints commands to use later.
 SSH and SFTP use standard ``~/.ssh/config`` aliases and the SSH agent.
-Use ``hallmark sources desi`` to inspect named sources, releases and collections.
-For example, ``hallmark init desi --from desi --release dr1 --collection redshifts``
-creates a catalog for that collection. Omit the collection to index the whole
-release. ``init --filter`` selects catalog entries. Filename formats are detected
-automatically from those paths; ``--format`` supplies an explicit template instead.
-Both retain unmatched files. Download selection belongs to the
-separate ``download --filter`` command.
-The older remote ``build`` command is deprecated in favor of ``init --from``.
+Use ``hallmark sources desi`` to list the release and collection URLs of a
+named source for use with ``ls-remote`` and ``add``. Download selection belongs
+to the separate ``download --include`` command.
+The older remote ``build`` command is deprecated in favor of ``add``.
 
 Use ``hallmark clone CATALOG PATH`` for an existing Git-hosted ``.hm`` or a
 published HTTP/SFTP catalog snapshot. Catalogs can live on GitHub or another
-server while their data remotes point elsewhere. Git clones preserve the full
-catalog and its history. ``clone --filter`` narrows the planned downloads without
-removing catalog entries. No payloads transfer until the user approves the plan.
+server while their data sources point elsewhere. Git clones preserve the full
+catalog and its history. ``clone --include`` narrows the planned downloads
+without removing catalog entries. No payloads transfer until the user approves
+the plan.
 
 The public ``DataBackend`` interface supports generic HTTP/SSH, CyVerse, and
 registered plugins for collaboration-specific APIs and multiple data servers.

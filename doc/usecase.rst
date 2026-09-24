@@ -42,15 +42,19 @@ associated with each file in different rows.
 -----------------------------------------------
 
 Bob prefers keeping the data index separate from downloaded files.
-He initializes a bare |hallmark|_ catalog from a simulation export and
-verifies its location::
+He initializes a bare |hallmark|_ catalog, adds a simulation export from a
+campus server, and verifies its location::
 
-    hallmark init sim.hm --from ssh://campus/srv/export/ \
-        --format 'run{run:d}/frame{frame:d}.h5'
+    hallmark init sim.hm
     cd sim.hm
+    hallmark add 'ssh://campus/srv/export/run{run:d}/frame{frame:d}.h5'
+    hallmark commit -m "Catalog simulation export"
     hallmark info
 
 The ``.hm`` suffix selects a bare catalog without a data worktree.
+``add`` records ``ssh://campus/srv/export/`` as the source of the template
+``run{run:d}/frame{frame:d}.h5`` and catalogs the matching files without
+downloading them.
 Bob reviews the selection and approves downloading to an explicit directory::
 
     hallmark download --all --output ../outputs --dry-run
@@ -210,32 +214,62 @@ host alias to OpenSSH, which resolves the user, port, identity and any proxy.
 Explicit URL user and port values take precedence. Hallmark does not read a
 separate authentication file or prompt to create one.
 
-Initialize a private catalog
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Catalog files on the server
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Frank can prepare a catalog directly from the files on the server::
+Frank can catalog the run files directly on the server::
 
-    hallmark init lab --from ssh://campus/srv/export/ \
-      --filter 'runs/run_*.h5' --format 'runs/run_{i:d}.h5'
+    hallmark init lab
     cd lab
+    hallmark ls-remote ssh://campus/srv/export/runs/
+    hallmark add 'ssh://campus/srv/export/runs/run_{i:d}.h5'
+    hallmark commit -m "Catalog lab runs"
     hallmark download --all --dry-run
     hallmark download --all
 
-This creates ``lab/.hm`` with only the matching run files in ``data.tsv``.
-Without an inclusion glob, the catalog contains all discovered files below
-the supplied URL. Initialization downloads no dataset contents.
+``ls-remote`` lists the directory and suggests templates without changing the
+repository. ``add`` records ``ssh://campus/srv/export/runs/``, the URL up to
+the first path segment with a field, as the template's source, and catalogs
+only the files matching ``run_{i:d}.h5``. They download to ``lab/run_1.h5``
+and so on; to keep the ``runs`` directory in the local layout, make it part of
+the template, as in ``ssh://campus/srv/export/{group}/run_{i:d}.h5``.
+Fields never span a ``/``, and only directories the template can match are
+listed. A template that matches nothing is an error, and a file is cataloged
+only if the template re-creates its name exactly; ``hallmark add -n`` previews
+the matches. No dataset contents are downloaded.
 The final command displays the transfer plan and asks Frank for confirmation.
 
 Both SSH and SFTP sources use structured SFTP directory enumeration. The server
 needs no login shell, Python or Hallmark, and SFTP-only accounts work for
-both discovery and downloads. Symlinks and special files are skipped.
-Authentication and permission failures stop discovery rather than producing
+both listing and downloads. Symlinks and special files are skipped.
+Authentication and permission failures stop listing rather than producing
 an apparently complete catalog.
 
-The generated data remote ``origin`` records the source URL.
+When the server changes, Frank runs the same ``add`` command again. It syncs
+the template's catalog: new files are added, changed sizes or checksums are
+updated, and files no longer on the server are dropped. ``hallmark status``
+summarizes these catalog changes per template before he commits them.
+
+Frank keeps his reduced products in the worktree beside the server data. A
+branch can track several templates, local and remote::
+
+    hallmark add 'reduced/run_{i:d}.dat'
+    hallmark commit -m "Add reduced runs"
+
+Local templates are committed as objects, so ``checkout`` restores their
+files. Remote templates are committed as catalog entries only: checkout never
+removes or restores downloaded copies, and ``status`` does not report missing
+or downloaded copies as changes. After switching branches, downloading again
+replaces a stale copy. ``hallmark rm --cached TEMPLATE`` stops tracking a
+template and leaves its files in place.
+
+The data entry records the template's source URL. Data remotes configured
+with ``set-config`` act as mirrors: ``download --remote NAME`` downloads every
+selected file from that remote instead. Local templates download from the
+default data remote, when one is configured.
 Existing Git-hosted catalogs keep their complete catalog, history and
-recorded data remotes when cloned. Select and approve transfers afterward with
-``download --filter``; downloads leave the catalog and history unchanged.
+recorded sources when cloned. Select and approve transfers afterward with
+``download --include``; downloads leave the catalog and history unchanged.
 The Git catalog can be hosted separately from its data servers.
 
 Published manifest checksums are recorded in the catalog. Missing checksums
@@ -247,9 +281,8 @@ be cancelled.
 
 CyVerse and common HTTPS directory indexes are detected automatically::
 
-    hallmark init desi --from \
-        https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/23040/ \
-        --filter 'redrock-main-dark-23040.fits'
+    hallmark add \
+        'https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/{pixel}/redrock-main-dark-{pixel}.fits'
 
 A server with no usable listing needs a published Hallmark catalog or a
 backend plugin that understands its API. See :doc:`backends` for the shared
@@ -262,7 +295,7 @@ Frank can also inspect and approve a transfer in Python::
     from hallmark import Repo
 
     repo = Repo('lab')
-    plan = repo.plan_download(filter='runs/run_1.h5')
+    plan = repo.plan_download(include='run_1.h5')
     print(plan.summary())
 
 After reviewing the plan, he approves the download and checks for failures::
@@ -275,10 +308,10 @@ Plans are built from local metadata without contacting the server. Missing
 sizes and duration estimates are reported as unknown. During transfer,
 progress reports bytes and estimates remaining time when possible.
 ``build`` and ``build_repo`` remain available but are deprecated in favor of
-``init --from``.
-Local ``add``, ``commit`` and ``checkout`` retain their existing format and
-local-object requirements; preparing a remote catalog does not populate the
-local object store.
+``add`` with a URL template.
+Cataloging remote files does not populate the local object store. To version
+downloaded files locally, stop tracking the remote template with
+``hallmark rm --cached`` and add the same template as a local one.
 
 Transport validation
 ~~~~~~~~~~~~~~~~~~~~

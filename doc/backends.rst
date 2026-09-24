@@ -18,10 +18,10 @@ implementations:
 * ``CyVerseBackend`` extends HTTP support with CyVerse directory and metadata
   parsing.
 
-Users select data sources with ``--from NAME`` or provide a raw dataset URL.
-For raw URLs, Hallmark selects the transport automatically. Source authors can
-specify an adapter and its nonsecret configuration in a release definition;
-users do not need backend flags or an options file.
+Users catalog files with ``hallmark add 'URL/TEMPLATE'``, and Hallmark selects
+the transport from the URL automatically. Source authors can specify an adapter
+and its nonsecret configuration in a release definition; templates added
+beneath the release URL use it, so users need no backend flags or options file.
 
 Define a source and register it for the current Python process:
 
@@ -36,35 +36,38 @@ Define a source and register it for the current Python process:
        ),
    })
    register_source(survey)
-   repo = Repo.init("survey", source="survey", release="dr1",
-                    collections=["redshifts"], filter="**/*.fits")
+   repo = Repo.init("survey")
+   repo.add("https://survey.example.org/release/catalogs/redshifts/{name}.fits")
 
-Collection roots are relative directories, and catalog paths remain relative
-to the release URL. An omitted collection catalogs the entire release. To
-expose this descriptor to other Python processes and the CLI, publish the
-``survey`` instance in the plugin's ``pyproject.toml``:
+Collection roots are relative directories below the release URL. To expose
+this descriptor to other Python processes and the CLI, publish the ``survey``
+instance in the plugin's ``pyproject.toml``:
 
 .. code-block:: toml
 
    [project.entry-points."hallmark.sources"]
    survey = "my_survey.sources:survey"
 
-Users can then run ``hallmark sources survey`` to see available releases and
-roots, or ``hallmark init ./survey --from survey --release dr1``. Source
-registration and listing must not contact the service. Source names are unique
-across registered and installed descriptors.
+Users can then run ``hallmark sources survey`` to see the URLs of available
+releases and collections, and ``hallmark ls-remote`` and ``hallmark add`` with
+those URLs. Source registration and listing must not contact the service.
+Source names are unique across registered and installed descriptors.
 
-The saved data remote retains its resolved URL and transport ``backend`` and
-``backend_options``. Existing catalog transport metadata remains supported.
-The developer API ``repo.set_config(remote_backend=...,
-remote_backend_options=...)`` can update this configuration; it has no CLI
-counterpart. Options contain shareable configuration, never credentials.
-SSH uses ``~/.ssh/config`` and its agent; HTTP retains Requests authentication.
+A template's data entry records its URL and, when the URL alone would select a
+different transport, its ``backend`` and ``backend_options``. Python
+``repo.add(url_template, backend=..., backend_options=...)`` selects them
+explicitly. Data remotes configured with ``set-config`` keep their own
+transport settings; the developer API ``repo.set_config(remote_backend=...,
+remote_backend_options=...)`` updates them and has no CLI counterpart.
+Existing catalog transport metadata remains supported. Options contain
+shareable configuration, never credentials. SSH uses ``~/.ssh/config`` and its
+agent; HTTP retains Requests authentication.
 
 ``repo.plan_download()`` reads the local catalog without opening a connection.
-The plan captures its backend and immutable options, source URL, destination
-and file metadata. Later configuration changes cannot redirect an approved
-plan. Install the selected transport plugin before executing a transfer.
+The plan captures each source's backend and immutable options, URL, the
+destination and file metadata. Later configuration changes cannot redirect an
+approved plan. Install the selected transport plugins before executing a
+transfer.
 
 Writing a backend
 -----------------
@@ -89,6 +92,10 @@ operation has been cancelled.
      - Yield ``RemoteEntry`` records with literal logical paths relative to the
        dataset root. Report completed directories through the optional callback.
        Missing sizes, timestamps and published checksums remain ``None``.
+       When ``context.descend`` is set, skip each subdirectory for which it
+       returns False; it receives the relative path ending in ``/``. ``add``
+       uses it so templates list only directories they can match. Ignoring it
+       is correct but slower.
    * - ``read_text(relative_path, limit)``
      - Read metadata within the supplied byte limit and return decoded text.
        Reject oversized responses and propagate access or connection errors.
@@ -147,7 +154,7 @@ For example, an HTTP service can publish a small ``manifest.json`` array with
            if on_directory is not None:
                on_directory("")
 
-Register the class for the current Python process before initialization or
+Register the class for the current Python process before cataloging or
 transfer:
 
 .. code-block:: python
@@ -160,7 +167,8 @@ transfer:
        "dr1": SourceRelease("https://survey.example.org/release/", {},
                             backend="survey"),
    }))
-   repo = Repo.init("survey", source="survey", release="dr1")
+   repo = Repo.init("survey")
+   repo.add("https://survey.example.org/release/{field}/{name}.fits")
 
 For CLI use and other collaborators, publish the class as an entry point in
 the plugin package's ``pyproject.toml``:
@@ -211,8 +219,9 @@ From the source checkout, register the demonstration backend explicitly:
                "south": "https://south.example.org/export/",
            }}),
    }))
-   repo = Repo.init("combined", source="combined", release="v1")
-   plan = repo.plan_download(filter="north/**/*.fits")
+   repo = Repo.init("combined")
+   repo.add("https://north.example.org/export/{site}/run_{run}.fits")
+   plan = repo.plan_download(include="north/**/*.fits")
    print(plan.summary())
 
 The example is tested with two disposable local HTTP servers. The URLs above

@@ -32,10 +32,9 @@ Host lab-data
 ```
 
 The verified host key must already be in `known_hosts`. Load an encrypted key
-into your SSH agent first. SSH configuration alone is sufficient for this demo.
-For optional named profiles, see the [private data guide](../doc/private_data.rst).
-Each collaborator defines credentials locally; a catalog stores only the
-profile name.
+into your SSH agent first. SSH configuration alone is sufficient for this demo;
+see the [private data guide](../doc/private_data.rst) for details. Each
+collaborator configures SSH access locally; a catalog stores only the URL.
 
 3. Set the exact export root and create a new local workspace. Choose a different
 workspace name when repeating the demo; the data-server path below is an example.
@@ -47,27 +46,31 @@ mkdir "$HM_DEMO_WORKSPACE"
 cd "$HM_DEMO_WORKSPACE"
 ```
 
-4. Discover the two indexed runs and prepare a local `.hm`. The filter selects
-run files; the explicit format extracts their run numbers instead of inferring
-a template. Initialization does not authorize a download.
+4. Create a local repository and catalog the two runs with a URL template.
+The template selects the run files and extracts their run numbers; `{group}`
+keeps the `runs` directory in the local layout. Cataloging does not authorize
+a download.
 
 ```bash
-hallmark init ./client --from "$HM_DEMO_URL" --filter 'runs/*.dat' --format 'runs/run_{run:03d}.dat'
+hallmark init ./client
 cd client
+hallmark ls-remote "$HM_DEMO_URL"
+hallmark add "${HM_DEMO_URL}{group}/run_{run:03d}.dat"
+hallmark commit -m 'Catalog lab runs'
 ```
 
-The destination can contain existing files when `.hm` is absent; those files
-are preserved. An existing `.hm` is rejected before contacting the data server.
-Only listings and published metadata are read. Available sizes, modification
-times, and published checksums are retained; missing checksums stay unknown.
-Dataset files are not downloaded to calculate checksums.
+`ls-remote` lists the export and suggests templates without changing the
+repository. `add` records the export root as the template's source and lists
+only the directories the template can match. Only listings and published
+metadata are read. Available sizes, modification times, and published checksums
+are retained; missing checksums stay unknown. Dataset files are not downloaded
+to calculate checksums, and remote files are committed as catalog entries only.
 
-Omit `--filter` to catalog every file below the dataset root. Omit `--format`
-to detect filename templates automatically from the selected paths. An explicit
-format overrides detection; either way, unmatched files remain cataloged.
-Use `hallmark sources`
-to inspect named sources; `--release` and `--collection` select their contents.
-See [data backends](../doc/backends.rst) for source registration and adapter routing.
+The README does not match the template and is not cataloged; add another
+template to track it, as in `hallmark add "${HM_DEMO_URL}README.md"`. Running the
+same `add` command later syncs the catalog with the export. Use `hallmark
+sources` to find the URLs of named sources. See
+[data backends](../doc/backends.rst) for source registration and adapter routing.
 
 5. Review an offline plan for one run, then approve its transfer. The second
 command displays the plan again and asks for confirmation; answer `y` only when
@@ -92,13 +95,15 @@ A failed transfer preserves an existing destination and removes its temporary
 file. Cancellation closes connections started for the operation. Repeating a
 download transfers the selection again.
 
-6. Use the equivalent SFTP URL for this data remote. Changing the configuration
-does not transfer files; the dry run shows the new source and another destination.
+6. Configure the equivalent SFTP URL as a data remote and select it with
+`--remote`, which downloads every selected file from that remote instead of the
+template's source. Changing the configuration does not transfer files; the dry
+run shows the new source and another destination.
 
 ```bash
-hallmark set-config --remote-name origin \
+hallmark set-config --remote-name via-sftp \
     --remote-url "sftp://${HM_DEMO_URL#ssh://}"
-hallmark download runs/run_001.dat --output ../via-sftp --dry-run
+hallmark download runs/run_001.dat --remote via-sftp --output ../via-sftp --dry-run
 ```
 
 Both `ssh://` and `sftp://` use SFTP for discovery and data transfer. Relative
@@ -114,7 +119,7 @@ authentication-profile file or flags.
 failures. A plan retains its source, backend settings,
 destination, paths, and checksums even if repository configuration later changes.
 
-8. Plain initialization and cloning do not download payloads. To choose files
+8. `init`, `add` and cloning do not download payloads. To choose files
 interactively from the completed catalog, run the following command. Choose
 `patterns` and enter one raw relative-path glob per line, ending with a blank
 line, or choose `all`. Review recorded sizes, then choose `download`, `change`,
@@ -124,25 +129,26 @@ or `skip` (the default). Unknown file sizes remain unknown.
 hallmark download --interactive
 ```
 
-Add `--dry-run` to stop after the preview. Initialization never offers downloads.
-CLI cloning reviews a download plan after copying the complete catalog by default;
-use `clone --filter` to narrow transfers or `clone --interactive` for this chooser.
-Use `clone --no-download` to skip review. Without a terminal, clone keeps the
-catalog, skips downloading, and prints commands reflecting the selected filters
-and output directory. Declining or EOF during clone's review preserves the catalog
+Add `--dry-run` to stop after the preview. `init` and `add` never offer
+downloads. CLI cloning reviews a download plan after copying the complete
+catalog by default; use `clone --include` to narrow transfers or
+`clone --interactive` for this chooser. Use `clone --no-download` to skip
+review. Without a terminal, clone keeps the catalog, skips downloading, and
+prints commands reflecting the selected globs and output directory. Declining or EOF during clone's review preserves the catalog
 and exits successfully; an interrupt or transfer failure preserves it but exits
 with an error. Python continues to use `repo.plan_download()` and then
 `repo.download(plan, approved=True)`. The
 [private data guide](../doc/private_data.rst) describes both interfaces.
 
-9. Use the same discovery workflow for public datasets. The
-[scientific CLI workflows](scientific_workflows_cli.md) select one EHT file from
+9. Use the same `add` workflow for public datasets. The
+[scientific CLI workflows](scientific_workflows_cli.md) catalog one EHT file from
 its [UVFITS directory](https://data.cyverse.org/dav-anon/iplant/commons/cyverse_curated/EHTC_FirstM87Results_Apr2019/uvfits/)
 and one DESI redrock product from
 [HEALPixel 23040](https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/23040/).
-These narrow dataset roots avoid listing an entire archive. HTTPS requires a
-usable directory index or a backend that can enumerate the dataset; arbitrary
-URLs cannot reveal hidden files.
+A template lists only the directories it can match, so a URL deep in an archive
+avoids listing the entire archive. HTTPS requires a usable directory index or a
+backend that can enumerate the dataset; arbitrary URLs cannot reveal hidden
+files.
 
 10. Reuse the existing catalog without downloading dataset files. This local
 clone retains the committed catalog and its Git history, including the original
@@ -153,22 +159,22 @@ cd "$HM_DEMO_WORKSPACE"
 hallmark clone ./client/.hm ./catalog-copy --no-download
 ```
 
-`clone` copies existing catalogs; raw dataset URLs belong to `init --from`.
+`clone` copies existing catalogs; raw dataset URLs belong to `hallmark add`.
 A Git catalog can live on GitHub while its data remains on the SSH server. A
 published HTTP/SFTP catalog snapshot can likewise use a different data server;
 snapshot imports start local history. Cloning metadata does not require the
 dataset credentials. Git catalog authentication and
 data authentication are independent.
 
-Clone preserves the complete catalog. `download --filter` selects transfers
-without removing catalog rows. Plain `init` creates a local repository; the
-legacy remote `build` command is deprecated in favor of `init --from`.
-Downloading files alone does not populate the local object store; the scientific
-workflows show how to add and commit selected local inputs before branching.
+Clone preserves the complete catalog. `download --include` selects transfers
+without removing catalog rows. `init` creates an empty repository; the legacy
+remote `build` command is deprecated in favor of `add`. Downloading files does
+not populate the local object store; the scientific workflows show how to
+version local settings beside cataloged inputs before branching.
 
-This demo passed on Python 3.9 and 3.13 using a disposable local SFTP export
-with two 30-byte run files and published checksums. Discovery, one approved
-30-byte transfer, refusal before transfer, configuration changes, and catalog
-cloning passed on both versions. These checks do not establish availability or
-credentials for any external server. Keep the workspace for inspection and
-remove it manually when finished.
+For this revision, steps 4, 5, 6 and 10 were run on Python 3.13 against a
+disposable loopback SFTP-only export with two 30-byte run files and a published
+`SHA256SUMS`. Cataloging, one approved 30-byte transfer, a declined transfer,
+the mirror dry run, and catalog cloning passed. These checks do not establish
+availability or credentials for any external server. Keep the workspace for
+inspection and remove it manually when finished.

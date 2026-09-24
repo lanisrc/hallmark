@@ -483,8 +483,7 @@ class Repo:
         Returns:
             dict[str, object]: Status summary including:
             - branch (str)
-            - staged changes (dict), including per-template ``catalog``
-              summaries
+            - staged changes (dict), with per-template ``catalog`` summaries
             - worktree changes (dict)
             - untracked files (list[str])
         """

@@ -27,34 +27,37 @@ mkdir "$HM_ROOT"
 Use your normal Git author configuration. No optional scientific-processing
 packages are needed for these examples. Each remote workflow selects one file;
 review its size before approving the transfer. Allow space for the downloaded
-input and a stored baseline copy. Settings changes store only the changed
-settings file; they do not duplicate an unchanged scientific input.
+input. A remote input is cataloged by its source and checksum rather than
+copied into the object store, and settings changes store only the changed
+settings file.
 
-`init --from` discovers a raw dataset and creates a catalog using directory
-listings and published metadata. It does not download dataset files. Its
-`--filter` globs select catalog entries. Filename templates are detected from
-those paths automatically; `--format` overrides detection without excluding
-unmatched files. A single selected file may have no inferable template and is
-still cataloged. `clone` copies a complete existing
-catalog. Select transfers separately with `download --filter`. Every nonempty
-CLI transfer displays its plan and prompts for approval. `--dry-run` prepares an
-offline plan without transferring files. Unknown sizes remain unknown.
+`hallmark add URL` catalogs remote files using directory listings and
+published metadata. It does not download dataset files. A URL template such as
+`.../uvfits/SR1_M87_2017_{day}_lo_hops_netcal_StokesI.uvfits` catalogs every
+matching file and records `day` as a column; the examples below name one file
+exactly, without fields, so each catalogs a single input. `hallmark ls-remote
+URL` lists a directory and suggests templates, and `hallmark add -n` previews
+the matches. `clone` copies a complete existing catalog. Select transfers
+separately with `download --include`. Every nonempty CLI transfer displays its
+plan and prompts for approval. `--dry-run` prepares an offline plan without
+transferring files. Unknown sizes remain unknown.
 
 For interactive selection, use `hallmark download --interactive`. It accepts
 one raw glob per line or an all-files choice, shows recorded sizes, and lets you
-download, change the selection, or skip. Initialization never offers downloads.
-CLI cloning copies the complete catalog and then reviews a download plan by
-default. Use `clone --interactive` for the chooser, `clone --filter` to narrow
-transfers, or `clone --no-download` for metadata alone. Without a terminal, clone
-keeps the catalog and prints commands for downloading later.
+download, change the selection, or skip. `init` and `add` never offer
+downloads. CLI cloning copies the complete catalog and then reviews a download
+plan by default. Use `clone --interactive` for the chooser, `clone --include`
+to narrow transfers, or `clone --no-download` for metadata alone. Without a
+terminal, clone keeps the catalog and prints commands for downloading later.
 The examples below keep explicit selections so their intended inputs are clear.
 
-Each example uses a working directory containing `.hm`. After download,
-`hallmark add '{name}'` indexes the selected local input and settings file;
-`commit` stores their contents so branch checkout can restore them. The catalog
-URL and data URL can be hosted separately. See the
-[private data guide](../doc/private_data.rst) for authentication and catalog
-hosting, and [data backends](../doc/backends.rst) for backend extensions.
+Each example uses a working directory containing `.hm`. The remote input and
+the local `analysis-settings.txt` are two templates in the same branch. `commit`
+stores the settings file's contents so branch checkout can restore it; checkout
+leaves the downloaded input in place. The catalog URL and data URL can be
+hosted separately. See the [private data guide](../doc/private_data.rst) for
+authentication and catalog hosting, and [data backends](../doc/backends.rst)
+for backend extensions.
 
 ## 1. CyVerse: EHT M87 visibility provenance
 
@@ -65,16 +68,18 @@ amplitudes before imaging; here we only record that intended quality check.
 
 ### Catalog and approve a selected download
 
-Initialize the selected catalog, enter its working directory, and review the
-offline download plan. Run the transfer only after checking the selection and
+Create a repository, catalog the selected product, and review the offline
+download plan. Run the transfer only after checking the selection and
 answering `y` at its prompt. Declining leaves the catalog available.
-The final check stops the workflow if discovery selected no input file.
+`add` stops the workflow if the listing does not contain the product, and the
+final check stops it if the file was not downloaded.
 
 ```bash
-hallmark init "$HM_ROOT/eht" --from \
-    'https://data.cyverse.org/dav-anon/iplant/commons/cyverse_curated/EHTC_FirstM87Results_Apr2019/uvfits/' \
-    --filter 'SR1_M87_2017_095_lo_hops_netcal_StokesI.uvfits'
+hallmark init "$HM_ROOT/eht"
 cd "$HM_ROOT/eht"
+hallmark add \
+    'https://data.cyverse.org/dav-anon/iplant/commons/cyverse_curated/EHTC_FirstM87Results_Apr2019/uvfits/SR1_M87_2017_095_lo_hops_netcal_StokesI.uvfits'
+hallmark commit -m 'Catalog EHT input'
 hallmark download --all --dry-run
 hallmark download --all
 test -f 'SR1_M87_2017_095_lo_hops_netcal_StokesI.uvfits'
@@ -82,14 +87,14 @@ test -f 'SR1_M87_2017_095_lo_hops_netcal_StokesI.uvfits'
 
 ### Commit, annotate a branch, and recover
 
-Store the original input with an analysis setting, then record a different
+Store an analysis setting beside the cataloged input, then record a different
 quality-review choice on `eht-provenance`. Returning to `main` restores the
 original settings; the final command prints `qa=positive-weights`.
 
 ```bash
 printf '%s\n' 'qa=positive-weights' > analysis-settings.txt
-hallmark add '{name}'
-hallmark commit -m 'Preserve EHT input and analysis settings'
+hallmark add 'analysis-settings.txt'
+hallmark commit -m 'Record EHT analysis settings'
 hallmark checkout eht-provenance
 printf '%s\n' 'qa=positive-weights-and-amplitude-review' > analysis-settings.txt
 hallmark add .
@@ -111,15 +116,16 @@ statistics; applying those cuts remains a separate analysis step.
 
 ### Catalog and download by product
 
-Discover only `redrock-main-dark-23040.fits` in this HEALPixel, inspect the plan,
-and approve its download. The selection excludes coadds and other products;
-the final check stops the workflow if discovery selected no input file.
+Catalog only `redrock-main-dark-23040.fits` in this HEALPixel, inspect the
+plan, and approve its download. The selection excludes coadds and other
+products; the final check stops the workflow if the file was not downloaded.
 
 ```bash
-hallmark init "$HM_ROOT/desi" --from \
-    'https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/23040/' \
-    --filter 'redrock-main-dark-23040.fits'
+hallmark init "$HM_ROOT/desi"
 cd "$HM_ROOT/desi"
+hallmark add \
+    'https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/23040/redrock-main-dark-23040.fits'
+hallmark commit -m 'Catalog DESI input'
 hallmark download --all --dry-run
 hallmark download --all
 test -f 'redrock-main-dark-23040.fits'
@@ -127,14 +133,14 @@ test -f 'redrock-main-dark-23040.fits'
 
 ### Compare two selection branches
 
-Commit the input with an illustrative fit-quality threshold. Record a stricter
+Commit an illustrative fit-quality threshold. Record a stricter
 threshold on `desi-quality`, then return to `main`; the restored setting is
 `min_deltachi2=25`. No target rows are filtered by these commands.
 
 ```bash
 printf '%s\n' 'min_deltachi2=25' > analysis-settings.txt
-hallmark add '{name}'
-hallmark commit -m 'Preserve DESI input and analysis settings'
+hallmark add 'analysis-settings.txt'
+hallmark commit -m 'Record DESI analysis settings'
 hallmark checkout desi-quality
 printf '%s\n' 'min_deltachi2=40' > analysis-settings.txt
 hallmark add .
@@ -167,16 +173,17 @@ Host lab-data
     StrictHostKeyChecking yes
 ```
 
-Use the `stars/` directory as the dataset root so the selected product has a
-simple local filename. Discover it, review the plan, and approve the transfer.
-SSH configuration supplies authentication; no Hallmark profile is required.
-The final check stops the workflow if discovery selected no input file.
+The URL's `stars/` directory becomes the template's source, so the selected
+product has a simple local filename. Catalog it, review the plan, and approve
+the transfer. SSH configuration supplies authentication; no Hallmark profile is
+required. The final check stops the workflow if the file was not downloaded.
 
 ```bash
-hallmark init "$HM_ROOT/roman-rubin" --from \
-    'sftp://lab-data/home/researcher/hallmark-exports/openuniverse2024/stars/' \
-    --filter 'pointsource_10307.parquet'
+hallmark init "$HM_ROOT/roman-rubin"
 cd "$HM_ROOT/roman-rubin"
+hallmark add \
+    'sftp://lab-data/home/researcher/hallmark-exports/openuniverse2024/stars/pointsource_10307.parquet'
+hallmark commit -m 'Catalog Roman-Rubin input'
 hallmark download --all --dry-run
 hallmark download --all
 test -f 'pointsource_10307.parquet'
@@ -184,14 +191,14 @@ test -f 'pointsource_10307.parquet'
 
 ### Save and compare an analysis choice
 
-Store the selected input and an illustrative magnitude limit. Change that limit
+Store an illustrative magnitude limit beside the cataloged input. Change that limit
 on `roman-rubin-selection`, then return to `main`. The restored value is
 `magnitude_limit=24`; the Parquet catalog has not been filtered or converted.
 
 ```bash
 printf '%s\n' 'magnitude_limit=24' > analysis-settings.txt
-hallmark add '{name}'
-hallmark commit -m 'Preserve Roman-Rubin input and analysis settings'
+hallmark add 'analysis-settings.txt'
+hallmark commit -m 'Record Roman-Rubin analysis settings'
 hallmark checkout roman-rubin-selection
 printf '%s\n' 'magnitude_limit=23' > analysis-settings.txt
 hallmark add .
@@ -247,17 +254,17 @@ Use `du -sh "$HM_ROOT"` to inspect the workspace. Keep it while comparing
 branches; remove it manually when finished. No example changes the original
 remote data or the local DES source file.
 
-All four CLI workflows passed with tiny local HTTP/SFTP fixtures on Python 3.9
-and 3.13. Each full run downloaded 66 bytes across the three remote inputs and
-copied a 21-byte local input. The checks covered discovery, published checksums,
-approval, settings commits, and branch restoration. Declined downloads and
-empty selections stopped before versioning. Notebook copies also passed from
-both the repository root and `demo/` on both Python versions.
-Separate Python 3.13 runs confirmed that CLI and notebook transfer failures
-stop before versioning and leave the catalog available.
+For this revision, the command blocks above were run in order on Python 3.13
+against tiny local HTTP fixtures that mirror the EHT, DESI and export paths,
+including published MD5 and SHA-256 manifests. The SFTP workflow's commands
+were run over HTTP; SFTP cataloging and transfer are covered by the OpenSSH
+integration tests with a loopback server. Each remote workflow cataloged and
+downloaded one input, stored only its settings files as objects, and restored
+the baseline setting on `main`. Declined downloads stop the shell before
+versioning.
 
-The 95 CLI regression tests passed on each Python version. Bash syntax, notebook
-structure and Python 3.9 syntax, local links, Ruff, and strict Sphinx checks
-passed. These fixtures do not validate scientific file formats, analysis
-choices, public-server availability, or public download sizes. No research
-servers were contacted and no public datasets were downloaded.
+The complete test suite, including the OpenSSH integration tests, Ruff, and a
+strict Sphinx build passed; CI runs the suite on Python 3.9 through 3.14. These
+fixtures do not validate scientific file formats, analysis choices,
+public-server availability, or public download sizes. No research servers were
+contacted and no public datasets were downloaded.

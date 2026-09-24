@@ -95,24 +95,26 @@ Create a local repository::
 
    hallmark init ./local-project
 
-Initialize a catalog from a remote dataset without downloading dataset files::
+Catalog remote files with a URL template, without downloading dataset files::
 
-   hallmark init ./desi --from \
-       https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/23040/ \
-       --filter 'redrock-main-dark-23040.fits'
-   hallmark init ./lab --from ssh://lab-data/srv/data/ --filter 'run*.h5' --format 'run{run:d}.h5'
+   hallmark add 'https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/{pixel}/redrock-main-dark-{pixel}.fits'
+   hallmark add 'ssh://lab-data/srv/data/run{run:d}.h5'
+   hallmark commit -m 'Catalog remote data'
 
-``--filter`` selects catalog entries. Without ``--format``, filename templates
-are detected automatically from the selected paths. An explicit ``--format``
-overrides detection. Both retain unmatched files, with empty parameter values;
-if no template can be inferred, paths and available metadata are still cataloged.
-Python uses the same ``filter=`` and ``format=`` arguments to ``Repo.init``.
+The URL up to the first path segment containing a ``{field}`` is recorded as
+the template's source; the rest is matched against the listed files, one path
+segment at a time, and its fields become catalog columns. Each template is
+tracked beside the others; adding one again syncs it with the server, and
+``hallmark rm --cached TEMPLATE`` stops tracking it. ``hallmark add -n`` previews
+the matches, and ``hallmark ls-remote URL`` lists a directory and suggests
+templates. Python uses ``repo.add(url_template)``.
 
 Use ``hallmark clone SOURCE PATH`` for an existing Hallmark Git repository
 or published HTTP/SFTP snapshot. Git clones retain the full catalog and its
 history; snapshots start new local history. Use ``--source-type git`` or
 ``--source-type catalog`` to override automatic detection. The older ``build``
-command remains available but is deprecated in favor of ``init --from``.
+command remains available but is deprecated in favor of ``add`` with a URL
+template.
 
 Downloading remote data
 -----------------------
@@ -120,31 +122,35 @@ Downloading remote data
 Preview the selected files using the local catalog, then confirm a download::
 
    hallmark download --all --dry-run
-   hallmark download --filter 'runs/**'
+   hallmark download --include 'runs/**'
 
 Explicit cataloged paths and ``--tsv data.tsv`` also select files. Every nonempty
-transfer requires interactive confirmation. Initialization only creates the
-repository or discovers its catalog; it never offers downloads. CLI cloning
-copies the complete catalog, then reviews a download plan by default. Use
-``clone --filter`` to narrow that plan, ``clone --interactive`` for a chooser,
-or ``clone --no-download`` to skip review. ``clone --output`` specifies the download
-directory; bare catalogs prompt for one if omitted. These download options cannot
-be combined with ``--no-download``; ``--interactive`` also conflicts with ``--filter``.
-``download --filter`` narrows the saved catalog without changing it.
+transfer requires interactive confirmation. ``init`` and ``add`` only create the
+repository or catalog files; they never offer downloads. Each remote template's
+files download from its source, so one plan can span several servers;
+``--remote NAME`` selects a configured data remote for every file instead. CLI
+cloning copies the complete catalog, then reviews a download plan by default.
+Use ``clone --include`` to narrow that plan, ``clone --interactive`` for a
+chooser, or ``clone --no-download`` to skip review. ``clone --output`` specifies
+the download directory; bare catalogs prompt for one if omitted. These download
+options cannot be combined with ``--no-download``; ``--interactive`` also
+conflicts with ``--include``. ``download --include`` narrows the saved catalog
+without changing it.
 The old download ``--yes`` option does not bypass approval.
 
 Use ``hallmark download --interactive`` to choose patterns or all cataloged files,
 review recorded sizes, then download, revise, or skip. Add ``--dry-run`` to stop at
 the preview. Without a terminal, clone keeps the catalog and prints commands for
-later; standalone ``download --interactive`` reports an error. Python
-initialization and cloning remain metadata-only and never open this CLI chooser.
+later; standalone ``download --interactive`` reports an error. Python ``add``
+and cloning remain metadata-only and never open this CLI chooser.
 
 Python uses the same plan. First inspect the selected files::
 
    from hallmark import Repo
 
-   repo = Repo.init('lab', source='ssh://lab-data/srv/data/', progress=True)
-   plan = repo.plan_download(filter='runs/**')
+   repo = Repo.init('lab')
+   repo.add('ssh://lab-data/srv/data/{group}/run{run:d}.h5', progress=True)
+   plan = repo.plan_download(include='runs/**')
    print(plan.summary())
 
 After reviewing the plan, approve the download and check for failures::
@@ -153,7 +159,7 @@ After reviewing the plan, approve the download and check for failures::
    if result['failed']:
        raise RuntimeError('\n'.join(result['errors']))
 
-Plans preserve their selected remote, backend settings, destination and
+Plans preserve their selected sources, backend settings, destination and
 checksums even when repository configuration later changes. Size estimates
 require recorded file sizes; duration estimates also require a supplied
 transfer rate.
@@ -179,8 +185,8 @@ Dataset builders and data remotes
 
 .. autofunction:: hallmark.repo_builder.list_remote_files
 
-SSH/SFTP uses standard ``~/.ssh/config`` and the SSH agent. Set a remote URL
-containing the configured host alias; no Hallmark authentication profile is used.
+SSH/SFTP uses standard ``~/.ssh/config`` and the SSH agent. Use URLs containing
+the configured host alias; no Hallmark authentication profile is used.
 
 The legacy ``download_remote_data`` function also requires ``approved=True``.
 Both download APIs return a dictionary containing ``succeeded``,
@@ -197,8 +203,11 @@ supported server configurations.
 Named data sources
 ------------------
 
-List sources with ``hallmark sources`` and release/collection roots with
-``hallmark sources desi``. See :doc:`private_data` for selection and migration.
+List sources with ``hallmark sources`` and release/collection URLs with
+``hallmark sources desi``, then catalog files beneath them with ``ls-remote`` and
+``add``. See :doc:`private_data` for templates and migration.
+
+.. autofunction:: hallmark.repo_remote.suggest_templates
 
 .. automodule:: hallmark.sources
    :members: DataSource, SourceRelease, register_source, get_source, list_sources

@@ -16,7 +16,7 @@ def effective_cwd(repo) -> Path:
     Args:
         repo (repo): repository object
     Returns:
-        path: The current working directory if it is inside the repository
+        Path: The current working directory if it is inside the repository
         worktree; otherwise, the worktree root.
     '''
     if repo.worktree is None:
