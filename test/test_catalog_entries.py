@@ -327,3 +327,171 @@ def test_add_worktree_restores_only_local_files(tmp_path):
     assert (experiment / "1.dat").read_text(encoding="utf-8") == "run\n"
     assert not (experiment / "M87.h5").exists()
     assert Repo(experiment).state.table("data-2.tsv")["name"].tolist() == ["M87"]
+
+
+def test_templates_accumulate_and_round_trip_through_checkout(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write(repo, "M87_095.h5", "h5\n")
+    _write(repo, "runs/run_1.dat", "dat\n")
+    repo.add("{src}_{day}.h5")
+    repo.add("runs/run_{run}.dat")
+    assert [entry.db for entry in catalog_entries(repo.state.config)] == [
+        "data.tsv", "data-2.tsv"]
+    repo.commit("two templates")
+    repo.checkout("empty")
+    repo.rm_cached("{src}_{day}.h5")
+    repo.rm_cached("runs/run_{run}.dat")
+    repo.commit("nothing tracked")
+    repo.checkout("main")
+    assert (repo.worktree / "M87_095.h5").read_text(encoding="utf-8") == "h5\n"
+    assert (repo.worktree / "runs/run_1.dat").read_text(encoding="utf-8") == "dat\n"
+    assert repo.status()["untracked"] == []
+
+
+def test_new_template_must_match_files_and_leaves_config_unchanged(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    before = (repo.dothm.path / "config.yml").read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="did not match any files"):
+        repo.add("{src}.fits")
+    assert (repo.dothm.path / "config.yml").read_text(encoding="utf-8") == before
+
+
+def test_new_template_cannot_claim_files_of_another_template(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write(repo, "M87_095.h5", "h5\n")
+    repo.add("{src}_{day}.h5")
+    with pytest.raises(ValueError, match=r"tracked by another template \(M87_095.h5\)"):
+        repo.add("{name}.h5")
+    assert len(catalog_entries(repo.state.config)) == 1
+
+
+def test_reserved_fields_are_rejected(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write(repo, "a.h5", "a\n")
+    for fmt in ("{path}.h5", "{sha256}.h5", "{size_bytes}.h5"):
+        with pytest.raises(ValueError, match="reserved catalog metadata"):
+            repo.add(fmt)
+
+
+def test_local_add_refuses_a_template_tracked_remotely(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _catalog_remote(repo, {"M87": ""})
+    _write(repo, "M87.h5", "downloaded\n")
+    with pytest.raises(ValueError, match="rm --cached"):
+        repo.add("{name}.h5")
+
+
+def test_dry_run_lists_matches_without_hashing_or_staging(tmp_path, monkeypatch):
+    repo = Repo.init(tmp_path / "repo")
+    _write(repo, "M87_095.h5", "h5\n")
+    staged = {key: entry.binsha for key, entry in repo.dothm.index.entries.items()}
+    monkeypatch.setattr(Repo, "checksum_many",
+                        lambda paths: pytest.fail("dry run must not hash"))
+    result = repo.add("{src}_{day}.h5", dry_run=True)
+    assert result["path"].tolist() == ["M87_095.h5"]
+    assert catalog_entries(repo.state.config) == []
+    assert {key: entry.binsha
+            for key, entry in repo.dothm.index.entries.items()} == staged
+
+
+def test_dot_rescans_every_local_template_and_skips_downloads(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write(repo, "M87_095.h5", "h5\n")
+    _write(repo, "runs/run_1.dat", "dat\n")
+    repo.add("{src}_{day}.h5")
+    repo.add("runs/run_{run}.dat")
+    _write(repo, "SGRA_096.h5", "new\n")
+    (repo.worktree / "runs/run_1.dat").unlink()
+    result = repo.add(".")
+    assert sorted(result["path"]) == ["M87_095.h5", "SGRA_096.h5"]
+    assert repo.state.data["src"].tolist() == ["M87", "SGRA"]
+    assert repo.state.table("data-2.tsv").empty
+
+
+def test_dot_from_a_subdirectory_keeps_rows_outside_it(tmp_path, monkeypatch):
+    repo = Repo.init(tmp_path / "repo")
+    _write(repo, "a/1.dat", "a1\n")
+    _write(repo, "b/1.dat", "b1\n")
+    repo.add("{group}/{run}.dat")
+    (repo.worktree / "a/1.dat").unlink()
+    _write(repo, "a/2.dat", "a2\n")
+    monkeypatch.chdir(repo.worktree / "a")
+    assert repo.add(".")["path"].tolist() == ["a/2.dat"]
+    rows = repo.state.data.sort_values("group")[["group", "run"]]
+    assert rows.values.tolist() == [["a", "2"], ["b", "1"]]
+
+
+def test_dot_rejects_a_file_matching_two_local_templates(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write(repo, "x.h5", "x\n")
+    _write(repo, "y_1.dat", "y\n")
+    repo.add("{name}.h5")
+    repo.add("{name}_{run}.dat")
+    repo.state.config["data"][1]["fmt"] = "{name}_{run}.{ext}"
+    _write(repo, "z_2.h5", "z\n")
+    with pytest.raises(ValueError, match="matches templates"):
+        repo.add(".")
+
+
+def test_rm_cached_untracks_a_template_and_keeps_its_files(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write(repo, "M87_095.h5", "h5\n")
+    _write(repo, "runs/run_1.dat", "dat\n")
+    repo.add("{src}_{day}.h5")
+    repo.add("runs/run_{run}.dat")
+    repo.commit("two templates")
+    removed = repo.rm_cached("runs/run_{run}.dat")
+    assert removed.db == "data-2.tsv"
+    assert not (repo.dothm.path / "data-2.tsv").exists()
+    assert (repo.worktree / "runs/run_1.dat").exists()
+    assert repo.status()["staged"]["deleted"] == ["runs/run_1.dat"]
+    repo.commit("drop runs")
+    repo.add("runs/run_{run}.dat")
+    # the removed table's history is never reused by a new template
+    assert find_db(repo, "runs/run_{run}.dat") == "data-3.tsv"
+
+
+def find_db(repo, fmt):
+    return next(entry.db for entry in catalog_entries(repo.state.config)
+                if entry.fmt == fmt)
+
+
+def test_rm_cached_accepts_a_remote_url_template_and_reports_unknown_ones(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _catalog_remote(repo, {"M87": ""})
+    with pytest.raises(ValueError,
+                       match=r"not tracked; tracked templates: '\{name\}.h5'"):
+        repo.rm_cached("{src}.h5")
+    repo.rm_cached(REMOTE + "{name}.h5")
+    assert catalog_entries(repo.state.config) == []
+
+
+def test_rm_cached_refuses_tables_shared_by_builder_templates(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    repo.state.config["data"] = [{"fmt": "x{x}.fits", "db": "built.tsv"},
+                                 {"fmt": "y{y}.fits", "db": "built.tsv"}]
+    with pytest.raises(ValueError, match="shares its catalog table"):
+        repo.rm_cached("x{x}.fits")
+
+
+def test_cli_add_dry_run_and_rm_cached(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from hallmark.cli import hallmark
+
+    repo = Repo.init(tmp_path / "repo")
+    _write(repo, "M87_095.h5", "h5\n")
+    monkeypatch.chdir(repo.worktree)
+    runner = CliRunner()
+    preview = runner.invoke(hallmark, ["add", "-n", "{src}_{day}.h5"])
+    assert preview.exit_code == 0, preview.output
+    assert preview.output.splitlines() == ["Would add", "M87_095.h5"]
+    assert runner.invoke(hallmark, ["add", "{src}_{day}.h5"]).exit_code == 0
+    refused = runner.invoke(hallmark, ["rm", "{src}_{day}.h5"])
+    assert refused.exit_code != 0
+    assert "requires --cached" in refused.output
+    removed = runner.invoke(hallmark, ["rm", "--cached", "{src}_{day}.h5"])
+    assert removed.exit_code == 0, removed.output
+    assert "files were left in place" in removed.output
+    missing = runner.invoke(hallmark, ["add", "{src}.fits"])
+    assert missing.exit_code != 0
+    assert "did not match any files" in missing.output

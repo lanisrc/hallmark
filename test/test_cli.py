@@ -277,18 +277,20 @@ def test_cli_add_regex_flag(monkeypatch):
         with chdir("repo"):
             called = {}
 
-            def fake_add(self, fmt, encoding=False):
+            def fake_add(self, fmt, encoding=False, *, dry_run=False):
                 """Fake add method to capture arguments passed to Repo.add."""
                 called["fmt"] = fmt
                 called["encoding"] = encoding
+                called["dry_run"] = dry_run
                 return ParaFrame([{"path": "am0.5_i30.h5"}])
             monkeypatch.setattr("hallmark.cli.Repo.add", fake_add)
             result = runner.invoke(hallmark, ["add", "--regex", "."])
 
             assert result.exit_code == 0, f"Expected exit code 0 for add with \
                 '--regex', got {result.exit_code}"
-            assert called == {"fmt": ".", "encoding": True}, f"Expected add to be \
-                called with fmt='.' and encoding=True, got {called}"
+            assert called == {"fmt": ".", "encoding": True, "dry_run": False}, \
+                f"Expected add to be called with fmt='.' and encoding=True, \
+                got {called}"
 
 
 def test_cli_status():

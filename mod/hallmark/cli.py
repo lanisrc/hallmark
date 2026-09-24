@@ -483,22 +483,26 @@ def status(repo):
     default=False,
     show_default=True,
     help="Enable regex-based encoding rules from config.yml.")
+@click.option("-n", "--dry-run", is_flag=True,
+              help="List the matching files without staging them.")
 @click.argument("inputs", nargs=-1, required=True)
 @click.pass_obj
-def add(repo, encoding, inputs):
+def add(repo, encoding, dry_run, inputs):
     """Add files to the hallmark index.
 
-    `hallmark add [--regex] FORMAT` uses the branch format string workflow.
-    `hallmark add "."` rebuilds the manifest from current files that match
-    the branch `fmt` in `config.yml`.
-    Explicit path inputs such as shell-expanded `*` are not supported yet
-    with the parameter-based manifest format.
+    `hallmark add [--regex] FORMAT` stages the files matching a filename
+    template such as `a{a}_i{i}.h5`. Each new template is tracked alongside
+    the existing ones; `hallmark rm --cached FORMAT` stops tracking one.
+    A new template must match at least one file.
+    `hallmark add "."` rescans every tracked template within the current
+    directory. Explicit path inputs such as shell-expanded `*` are not
+    supported yet with the parameter-based manifest format.
     """
     # attempt to add the specified files to the hallmark index, handling any errors
     with _translate_cli_errors(RuntimeError, ValueError, FileNotFoundError):
         # if there is only one input, use the add method for a single input
         if len(inputs) == 1:
-            pf = repo.add(inputs[0], encoding)
+            pf = repo.add(inputs[0], encoding, dry_run=dry_run)
         # oterhwise, use the add_paths method for multiple inputs
         else:
             pf = repo.add_paths(list(inputs))
@@ -506,8 +510,28 @@ def add(repo, encoding, inputs):
     if pf.empty:
         click.echo("No files matched the format string.")
     else:
-        click.echo("Changes to be committed")
+        click.echo("Would add" if dry_run else "Changes to be committed")
         click.echo(pf.path.to_string(index=False, header=False))
+
+
+@hallmark.command(short_help="Stop tracking a template.")
+@click.option("--cached", is_flag=True,
+              help="Remove the template from the catalog and keep its files.")
+@click.argument("template")
+@click.pass_obj
+def rm(repo, cached, template):
+    """Stop tracking TEMPLATE, like `git rm --cached`.
+
+    The template's catalog is removed from the index; files are left in
+    place. TEMPLATE is the tracked filename template, or the full URL
+    template of a remote one.
+    """
+    if not cached:
+        raise ClickException(
+            "hallmark rm requires --cached; files are never deleted")
+    with _translate_cli_errors(RuntimeError, ValueError, GitError):
+        entry = repo.rm_cached(template)
+    click.echo(f"Stopped tracking {entry.fmt or entry.db}; files were left in place.")
 
 
 @hallmark.command("set-config", short_help="Update hallmark branch config.")

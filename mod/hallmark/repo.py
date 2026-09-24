@@ -23,34 +23,84 @@ from tempfile import TemporaryDirectory
 from typing import Dict, List, Optional, Tuple, Union
 from git.exc import GitCommandError
 
+import pandas as pd
+
 from .dothm import Dothm
 from .state import State
 from .worktree import Worktree
 from .objects import Objects
 from .paraframe import ParaFrame
 from .repo_manifest import (
-    catalog_map, iter_catalog_rows, manifest_frame_from_pf, row_fingerprint,
-    table_groups)
+    catalog_map, is_local_table, iter_catalog_rows, manifest_frame_from_pf,
+    row_fingerprint, table_groups)
 from .repo_state import (
     load_branch_data, load_head_state, find_remote_branch,
     fetch_missing_objects_from_remote)
 from .error import CheckoutError, DestinationExistsError, DothmError
 from .helper_functions import (
     FILE_IO_CHUNK_SIZE,
+    as_list_of_dicts,
     chdir,
     iter_repository_files,
     normalize_nonempty_string,
     resolve_contained_path)
 from .repo_worktree import (
+    effective_cwd,
     ensure_clean_tracked_files,
-    filtered_paraframe,
     tracked_paths,
     worktree_changes)
 from .repo_config import (
-    branch_encodings,
-    branch_fmt,
+    CatalogEntry,
+    DEFAULT_DB,
+    add_entry,
+    catalog_entries,
+    check_template_fields,
+    entry_encodings,
+    find_entry,
+    is_placeholder,
+    next_db_name,
     normalize_remotes,
+    remove_entry,
+    row_to_path,
     set_config)
+
+def _encoding_spec(config: dict) -> Optional[dict]:
+    """
+    Used by add.
+    Return the entry holding encoding rules for a template not tracked yet:
+    the placeholder, or the only catalog entry.
+    """
+    entries = as_list_of_dicts(config.get("data")) or []
+    placeholder = next((entry for entry in entries if is_placeholder(entry)), None)
+    if placeholder is not None:
+        return placeholder
+    catalog = catalog_entries(config)
+    return entries[catalog[0].index] if len(catalog) == 1 else None
+
+
+def _row_within(record: dict, fmt: str, within_root) -> bool:
+    """
+    Used by add.
+    Return True if a row's file lies within the rescanned subtree, or if the
+    row no longer renders with its template and should be replaced.
+    """
+    try:
+        return within_root(row_to_path(record, fmt).as_posix())
+    except (KeyError, ValueError):
+        return True
+
+
+def _entry_names(entry: CatalogEntry) -> set[str]:
+    """
+    Used by rm_cached.
+    Return the spellings that identify an entry: its template, and for a remote
+    entry its full URL template.
+    """
+    names = {entry.fmt} if entry.fmt else {entry.db}
+    if entry.url and entry.fmt:
+        names.add(entry.url.rstrip("/") + "/" + entry.fmt)
+    return names
+
 
 def _catalog_changes(head_state: State, state: State) -> list[dict]:
     """
@@ -516,15 +566,26 @@ class Repo:
             "untracked": untracked,
         }
 
-    def add(self, fmt: str, encoding: bool = False) -> ParaFrame:
+    def add(self, fmt: str, encoding: bool = False, *,
+            dry_run: bool = False) -> ParaFrame:
         '''
-        Stage files or updated repository indecing from the worktree.
+        Stage the files matching a template, or rescan the tracked templates.
+
+        A new template becomes another data entry with its own catalog table;
+        existing templates are kept. Adding a tracked template again merges
+        its current files. ``"."`` rescans every local template within the
+        current directory, dropping rows of files that no longer exist there.
 
         Args:
             fmt (string): Format string or "." for full directory scan.
             encoding (boolean): Whether to apply encoding rules.
+            dry_run (boolean): List matching files without hashing or staging.
         Returns:
             paraframe Parsed and filtered file index (without checksums).
+        Raises:
+            ValueError: If the template is invalid, matches no files when new,
+                or matches files tracked by another template.
+            RuntimeError: If the repository has no worktree.
         '''
         if self.worktree is None:
             raise RuntimeError(
@@ -532,44 +593,195 @@ class Repo:
 
         # Normalize the format string to ensure it is a non-empty string
         fmt = normalize_nonempty_string(fmt, label="format")
-        # "." means rescan the whole worktree using the already-configured format
-        rescanning = fmt == "."
-        # use the current branch format; otherwise, use the provided format
-        if rescanning:
-            resolved_fmt = branch_fmt(self)
-            previous_fmt = resolved_fmt
-        else:
-            resolved_fmt = fmt
-            try:
-                previous_fmt = branch_fmt(self)
-            except RuntimeError:
-                previous_fmt = None
+        # "." means rescan the worktree using the already-configured templates
+        if fmt == ".":
+            return self._rescan_local(encoding=encoding, dry_run=dry_run)
+
+        check_template_fields(fmt)
+        config = self.state.config
+        entry = find_entry(config, fmt)
+        if entry is not None and entry.is_remote:
+            raise ValueError(
+                f"template {fmt!r} is tracked from a remote URL; run "
+                f"hallmark rm --cached {fmt!r} before adding local files")
+        encodings = None
+        if encoding:
+            spec = (config["data"][entry.index] if entry is not None
+                    else _encoding_spec(config))
+            encodings = entry_encodings(spec, fmt)
         # with the working directory set to the worktree, parse files into a ParaFrame
         with chdir(self.worktree):
             pf = ParaFrame.parse(
-                resolved_fmt,
+                fmt,
                 base_path=self.worktree,
-                encodings=branch_encodings(self) if encoding else None,
+                encodings=encodings,
                 encoding=encoding)
-        # if rescanning, filter to include only files that match the configured format
-        if rescanning:
-            pf = filtered_paraframe(self, pf)
+        if dry_run:
+            return pf
+        if entry is None:
+            # like git add, a new pathspec must match something
+            if pf.empty:
+                raise ValueError(f"template {fmt!r} did not match any files")
+            self._check_ownership(fmt, pf["path"])
         # Compute checksums for all files in the ParaFrame in parallel
         self._populate_checksums(pf)
-
-        manifest = manifest_frame_from_pf(pf, resolved_fmt)
-        # if not rescanning, update the repository configuration with the new format
-        if not rescanning:
-            set_config(self, fmt=resolved_fmt)
-        # an explicit fmt replaces only if the format actually changed
-        if rescanning or previous_fmt != resolved_fmt:
-            self.state.replace(manifest)
-        # if the format is unchanged, update the existing state with new entries
+        manifest = manifest_frame_from_pf(pf, fmt)
+        if entry is None:
+            db = next_db_name(config, used=self._used_table_names())
+            add_entry(config, {"fmt": fmt, **({"db": db} if db != DEFAULT_DB else {})})
+            self.state.replace(manifest, db=db)
+        # adding a tracked template again merges its current files
         else:
-            self.state.update(manifest)
+            self.state.update(manifest, db=entry.db)
         self.dothm.dump(self.state)
         # return a ParaFrame without the "sha1" column for display purposes
         return pf.drop(columns=["sha1"], errors="ignore")
+
+    def _rescan_local(self, *, encoding: bool, dry_run: bool) -> ParaFrame:
+        """
+        Used by add.
+        Rescan every local template within the current directory's subtree.
+
+        Rows of files outside the subtree are kept. Files cataloged by a remote
+        template, such as downloaded copies, are skipped.
+
+        Args:
+            encoding (bool): Apply the encoding rules of templates defining them.
+            dry_run (bool): List matching files without hashing or staging.
+
+        Returns:
+            ParaFrame: The matching files of every local template.
+
+        Raises:
+            RuntimeError: If no local template is tracked.
+            ValueError: If a file matches more than one local template.
+        """
+        config = self.state.config
+        local = [entries[0] for name, entries in table_groups(config).items()
+                 if is_local_table(entries, self.state.table(name))]
+        if not local:
+            raise RuntimeError(
+                "no local templates to rescan; run hallmark add TEMPLATE first")
+        with_encodings = [entry for entry in local
+                          if entry_encodings(config["data"][entry.index], entry.fmt)]
+        if encoding and not with_encodings:
+            raise ValueError("no encoding rules are configured; use hallmark "
+                             "set-config --encoding FIELD=REGEX")
+        worktree = Path(self.worktree).resolve()
+        relative_root = effective_cwd(self).relative_to(worktree)
+        catalog_only = {row.path for row in iter_catalog_rows(self.state, local=False)}
+
+        def within_root(path) -> bool:
+            return relative_root == Path(".") or relative_root in Path(path).parents
+
+        scans, claimed = [], {}
+        for entry in local:
+            use_encoding = encoding and entry in with_encodings
+            with chdir(self.worktree):
+                pf = ParaFrame.parse(
+                    entry.fmt, base_path=self.worktree,
+                    encodings=(entry_encodings(config["data"][entry.index], entry.fmt)
+                               if use_encoding else None),
+                    encoding=use_encoding)
+            if not pf.empty:
+                pf = pf[pf["path"].map(within_root) & ~pf["path"].isin(catalog_only)]
+            for path in pf["path"] if not pf.empty else ():
+                if path in claimed:
+                    raise ValueError(
+                        f'"{path}" matches templates {claimed[path]!r} and '
+                        f"{entry.fmt!r}; use more specific templates")
+                claimed[path] = entry.fmt
+            scans.append((entry, pf))
+        frames = [pf for _, pf in scans if not pf.empty]
+        combined = (ParaFrame(pd.concat(frames, ignore_index=True)) if frames
+                    else ParaFrame(columns=["path"]))
+        if dry_run:
+            return combined
+        for entry, pf in scans:
+            self._populate_checksums(pf)
+            manifest = manifest_frame_from_pf(pf, entry.fmt)
+            if relative_root != Path("."):
+                # keep rows of files outside the rescanned subtree
+                kept = [record for record in
+                        self.state.table(entry.db).to_dict(orient="records")
+                        if not _row_within(record, entry.fmt, within_root)]
+                manifest = pd.concat([pd.DataFrame(kept, columns=manifest.columns),
+                                      manifest], ignore_index=True)
+            self.state.replace(manifest, db=entry.db)
+        self.dothm.dump(self.state)
+        return combined.drop(columns=["sha1"], errors="ignore")
+
+    def _check_ownership(self, fmt: str, paths) -> None:
+        """
+        Used by add.
+        Reject a new template that matches files tracked by another template.
+
+        Args:
+            fmt (str): The new template.
+            paths: Relative POSIX paths the template matches.
+
+        Raises:
+            ValueError: If any path is already cataloged.
+        """
+        owned = catalog_map(self.state)
+        overlap = sorted(path for path in set(paths) if path in owned)
+        if overlap:
+            shown = ", ".join(overlap[:5])
+            more = f" and {len(overlap) - 5} more" if len(overlap) > 5 else ""
+            raise ValueError(
+                f"template {fmt!r} matches files tracked by another template "
+                f"({shown}{more}); use a more specific template or run "
+                "hallmark rm --cached TEMPLATE first")
+
+    def _used_table_names(self) -> set[str]:
+        """
+        Used by add.
+        Return catalog TSV names present now or at any point in history, so a
+        new template never reuses the history of a removed one.
+        """
+        names = {path.name for path in self.dothm.path.glob("*.tsv")}
+        try:
+            history = self.dothm.git.log(
+                "--all", "--format=", "--name-only", "--", "*.tsv")
+        # a repository without commits has no history to consult
+        except GitCommandError:
+            history = ""
+        names.update(line.strip() for line in history.splitlines() if line.strip())
+        return names
+
+    def rm_cached(self, template: str) -> CatalogEntry:
+        '''
+        Stop tracking a template without deleting any files, like
+        ``git rm --cached``.
+
+        Args:
+            template (str): The tracked template, or a remote template's full
+                URL template.
+
+        Returns:
+            CatalogEntry: The removed entry.
+
+        Raises:
+            ValueError: If the template is not tracked or shares its catalog
+                table with another template.
+        '''
+        template = normalize_nonempty_string(template, label="template")
+        entries = catalog_entries(self.state.config)
+        entry = next((candidate for candidate in entries
+                      if template in _entry_names(candidate)), None)
+        if entry is None:
+            tracked = ", ".join(repr(candidate.fmt) for candidate in entries
+                                if candidate.fmt) or "none"
+            raise ValueError(
+                f"template {template!r} is not tracked; tracked templates: {tracked}")
+        if any(other.db == entry.db for other in entries if other is not entry):
+            raise ValueError(
+                f"template {entry.fmt!r} shares its catalog table {entry.db} with "
+                "another template; edit config.yml to remove it")
+        remove_entry(self.state.config, entry.index)
+        self.state.drop_table(entry.db)
+        self.dothm.dump(self.state)
+        return entry
 
     def commit(self, msg: str, allow_empty: bool = False) -> bool:
         '''

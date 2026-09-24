@@ -353,7 +353,7 @@ def test_repo_add_pattern_keeps_deleted_manifest_rows(tmp_path):
     ]
 
 
-def test_repo_add_pattern_replaces_manifest_when_fmt_changes(tmp_path):
+def test_repo_add_new_pattern_appends_a_template(tmp_path):
     repo = Repo.init(tmp_path / "repo")
     _write_files(repo.worktree, ["a0.4_i30_w3.h5", "b0.4_i30_w3.h5"])
 
@@ -362,8 +362,18 @@ def test_repo_add_pattern_replaces_manifest_when_fmt_changes(tmp_path):
     repo.checkout("experiment")
     repo.add("b{a}_i{i}_w{w}.h5")
 
-    assert repo.state.config["data"] == [{"fmt": "b{a}_i{i}_w{w}.h5", "encoding": None}]
+    assert repo.state.config["data"] == [
+        {"fmt": "a{a}_i{i}_w{w}.h5", "encoding": None},
+        {"fmt": "b{a}_i{i}_w{w}.h5", "db": "data-2.tsv"}]
     assert repo.state.data.to_dict(orient="records") == [
+        {
+            "sha1": Repo.checksum(repo.worktree / "a0.4_i30_w3.h5"),
+            "a": "0.4",
+            "i": "30",
+            "w": "3",
+        }
+    ]
+    assert repo.state.table("data-2.tsv").to_dict(orient="records") == [
         {
             "sha1": Repo.checksum(repo.worktree / "b0.4_i30_w3.h5"),
             "a": "0.4",
@@ -940,6 +950,7 @@ def test_checkout_rebuilds_worktree_for_branch_specific_nested_fmt(tmp_path):
     repo.commit("main data")
 
     repo.checkout("experiment")
+    repo.rm_cached("main/a{a}_i{i}.h5")
     (repo.worktree / "exp" / "run1").mkdir(parents=True)
     _write_files(repo.worktree, ["exp/run1/b0_i0.h5"])
     repo.add("exp/run{run}/b{a}_i{i}.h5")
@@ -1029,6 +1040,7 @@ def test_checkout_rejects_symlink_destination_escape(tmp_path):
     repo.add("main/a{a}_i{i}.h5")
     repo.commit("main data")
     repo.checkout("experiment")
+    repo.rm_cached("main/a{a}_i{i}.h5")
     (repo.worktree / "main/a0_i0.h5").unlink()
     (repo.worktree / "exp").mkdir()
     _write_files(repo.worktree, ["exp/a1_i45.h5"])
@@ -1164,6 +1176,7 @@ def test_checkout_rejects_directory_at_target_file_path(tmp_path):
     repo.add("data_{number}.txt")
     repo.commit("main data")
     repo.checkout("experiment")
+    repo.rm_cached("data_{number}.txt")
     data_path.unlink()
     experiment_path = (repo.worktree / "experiment_1.txt")
     experiment_path.write_text("experiment\n", encoding="utf-8")

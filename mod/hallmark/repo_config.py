@@ -17,7 +17,7 @@ from typing import Dict, Iterable, Optional
 from .helper_functions import (
     as_list_of_dicts, coerce_fmt_value, normalize_nonempty_string,
     validate_path_component, validate_relative_path)
-from .state import DEFAULT_DB
+from .state import DEFAULT_DB, METADATA_COLUMNS
 
 from .transport.base import (
     RemoteSpec, backend_name, reject_controls, thaw_backend_options)
@@ -293,6 +293,33 @@ def single_data_fmt(config: dict) -> Optional[str]:
     if not isinstance(fmt, str) or not fmt.strip():
         return None
     return fmt.strip()
+
+
+# Template fields that would collide with catalog columns. The checksum
+# algorithm names are read as digests when a download plan is built.
+RESERVED_FIELDS = frozenset(
+    {"path", "sha1", "md5", "sha256", "sha512", *METADATA_COLUMNS})
+
+
+def check_template_fields(fmt: str) -> list[str]:
+    """
+    Validate the field names of a filename template.
+
+    Args:
+        fmt (str): Filename template.
+
+    Returns:
+        list[str]: Unique field names in the order they appear.
+
+    Raises:
+        ValueError: If a field name is reserved catalog metadata.
+    """
+    fields = fmt_fields(fmt)
+    reserved = [name for name in fields if name in RESERVED_FIELDS]
+    if reserved:
+        raise ValueError(
+            f"Template field {reserved[0]!r} is reserved catalog metadata")
+    return fields
 
 
 @dataclass(frozen=True)
@@ -573,38 +600,6 @@ def require_branch_data_spec(repo) -> dict:
         raise RuntimeError(
             'branch config must define an entry under "data" in config.yml')
     return spec
-
-
-def branch_fmt(repo) -> str:
-    """
-    Return the template of a single-template branch. Raises RuntimeError if
-    no valid template is defined.
-
-    Args:
-        repo: Repository object.
-
-    Returns:
-        str: The format string of the branch's data entry.
-    """
-    return normalize_nonempty_string(
-        require_branch_data_spec(repo).get("fmt"),
-        label="branch data fmt",
-        exception_type=RuntimeError)
-
-
-def branch_encodings(repo) -> list[dict]:
-    """
-    Return the filename encodings of a single-template branch.
-
-    Args:
-        repo: Repository object.
-
-    Returns:
-        list[dict]: A list containing the encoding specification, or an
-        empty list if no encodings are defined.
-    """
-    spec = require_branch_data_spec(repo)
-    return [spec] if isinstance(spec.get("encoding"), dict) else []
 
 
 def set_config(
