@@ -72,7 +72,7 @@ def test_published_snapshot_preserves_data_remote(tmp_path, metadata_server, nes
     pages[prefix + "data.tsv"] = "path\tsize_bytes\na.h5\t12\nb.txt\t20\n"
     plans = []
     repo = Repo.clone(root, tmp_path / "clone")
-    plans.append(repo.plan_download(filter="**/*.h5"))
+    plans.append(repo.plan_download(include="**/*.h5"))
     assert repo.state.data["path"].tolist() == ["a.h5", "b.txt"]
     assert plans[0].total_bytes == 12
     assert repo.plan_download().remote_url == "https://mirror.test/data/"
@@ -96,7 +96,7 @@ def test_filtered_git_clone_preserves_history_without_objects(tmp_path, monkeypa
     monkeypatch.setattr("hallmark.downloader._fetch_file", fail)
     plans = []
     repo = Repo.clone(str(source.dothm.path), tmp_path / "clone")
-    plans.append(repo.plan_download(filter="run1.h5"))
+    plans.append(repo.plan_download(include="run1.h5"))
     assert repo.dothm.head.commit.hexsha == head
     assert repo.dothm.index.diff("HEAD") == []
     assert len(repo.state.data) == 2
@@ -153,7 +153,7 @@ def test_snapshot_filter_normalizes_legacy_db_names(tmp_path, metadata_server):
     pages[root + "data.tsv"] = "i\n1\n2\n"
     plans = []
     repo = Repo.clone(root, tmp_path / "clone")
-    plans.append(repo.plan_download(filter="item_1.dat"))
+    plans.append(repo.plan_download(include="item_1.dat"))
     assert repo.state.data["i"].astype(str).tolist() == ["1", "2"]
     assert [item.relative_path for item in plans[0].items] == [Path("item_1.dat")]
 

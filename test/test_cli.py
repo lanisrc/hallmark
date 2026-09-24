@@ -1128,7 +1128,7 @@ def test_build_cli_reports_missing_config_yml_in_directory(tmp_path):
 @pytest.mark.parametrize(
     "arguments, message",
     [
-        (["download"], "Provide file paths, --tsv, --all, or --filter"),
+        (["download"], "Provide file paths, --tsv, --all, or --include"),
         (["download", "file.dat", "--all"], "--all cannot be combined"),
         (["download", "--tsv", "data", "--all"], "--all cannot be combined")])
 def test_download_cli_rejects_invalid_selection_combinations(
@@ -1237,12 +1237,12 @@ def test_download_cli_passes_selection_and_options_to_downloader(monkeypatch):
     repo.download = fake_download
     result = CliRunner().invoke(hallmark, [
         "download", "nested/file.dat", "--remote", "mirror", "--max-workers", "2",
-        "--filter", "**/*.dat"], input="y\n")
+        "--include", "**/*.dat"], input="y\n")
     assert result.exit_code == 0, result.output
     assert "Successfully downloaded 1 files (1.0 MB)" in result.output
     assert captured["plan"] == (None, {
         "file_paths": ("nested/file.dat",), "tsv_names": (), "all_files": False,
-        "filter": ("**/*.dat",), "remote_name": "mirror"})
+        "include": ("**/*.dat",), "remote_name": "mirror"})
     assert captured["download"][0] is plan
     assert captured["download"][1] == {
         "max_workers": 2, "progress": True, "approved": True}
@@ -1366,11 +1366,11 @@ def test_cli_downloads_only_approved_selected_payload(
             "clone", str(source.dothm.path), str(target)])
         assert cloned.exit_code == 0, cloned.output
         monkeypatch.chdir(target)
-        arguments = ["download", "--filter", "*.fits"]
+        arguments = ["download", "--include", "*.fits"]
     else:
         target = source.worktree
         monkeypatch.chdir(target)
-        arguments = ["download", "--filter", "*.fits"]
+        arguments = ["download", "--include", "*.fits"]
     result = CliRunner().invoke(hallmark, arguments, input=answer)
     assert "1 file(s); 4 bytes" in result.output
     assert "Download these files? [y/N]" in result.output
@@ -1387,7 +1387,7 @@ def test_cli_downloads_only_approved_selected_payload(
 
 
 @pytest.mark.parametrize("arguments", [
-    ["--interactive", "--filter", "*.fits"], ["--fmt", "{name}.fits"],
+    ["--interactive", "--include", "*.fits"], ["--fmt", "{name}.fits"],
     ["--with-download", "--fmt", "{name:invalid}"],
 ])
 def test_clone_cli_rejects_invalid_selection_before_source_access(

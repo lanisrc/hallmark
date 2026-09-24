@@ -70,7 +70,7 @@ def match_remote_template(url: str, *, progress=False, backend=None,
     matcher = TemplateMatcher(template)
     remote = _remote(base, backend, backend_options)
     with OperationContext(remote) as context:
-        entries = discover(context, filter=matcher.glob, progress=progress,
+        entries = discover(context, include=matcher.glob, progress=progress,
                            descend=matcher.may_contain)
     rows, mismatched = [], 0
     for entry in entries:

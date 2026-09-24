@@ -76,7 +76,7 @@ def test_sizes_survive_nullable_numeric_tsv_serialization(catalog):
 
 
 def test_plan_filters_without_authorizing_download(catalog):
-    plan = plan_download(catalog, filter="**/*.fits")
+    plan = plan_download(catalog, include="**/*.fits")
     assert [item.relative_path.as_posix() for item in plan.items] == [
         "nested/a.fits", "empty.fits"]
     assert plan.total_bytes == 6
@@ -225,7 +225,7 @@ def test_execution_rejects_changed_output_root(catalog, tmp_path):
 
 
 def test_empty_plan_needs_no_approval(catalog):
-    plan = plan_download(catalog, filter="**/*.absent")
+    plan = plan_download(catalog, include="**/*.absent")
     assert execute_download_plan(catalog, plan) == {
         "succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
 

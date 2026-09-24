@@ -317,7 +317,7 @@ class Repo:
         return clone_catalog(cls, url, path, source_type=source_type)
 
     def plan_download(self, output_path=None, *, file_paths=None, tsv_names=None,
-                      all_files=False, filter=None, remote_name=None,
+                      all_files=False, include=None, remote_name=None,
                       estimated_bytes_per_second=None):
         """
         Plan a download using the local catalog without contacting a server.
@@ -333,7 +333,7 @@ class Repo:
             tsv_names (sequence[str], optional): Catalog TSVs to select.
             all_files (bool): Select all configured files. Cannot be combined
                 with explicit paths or TSVs. Defaults to False.
-            filter (str | list[str], optional): Relative path glob or globs.
+            include (str | list[str], optional): Relative path glob or globs.
             remote_name (str, optional): Configured data remote to use.
             estimated_bytes_per_second (float, optional): Positive transfer
                 rate for duration estimates. No rate is measured while planning.
@@ -351,7 +351,7 @@ class Repo:
 
         return plan_download(
             self, output_path, file_paths=file_paths, tsv_names=tsv_names,
-            all_files=all_files, filter=filter, remote_name=remote_name,
+            all_files=all_files, include=include, remote_name=remote_name,
             estimated_bytes_per_second=estimated_bytes_per_second)
 
     def download(self, plan, *, approved=False, max_workers=4, progress=False):

@@ -197,7 +197,7 @@ def _choose_download_plan(repo, *, output, remote_name, dry_run):
                 continue
         output = _download_output(repo, output)
         plan = repo.plan_download(output, all_files=choice == "all",
-                                  filter=patterns or None, remote_name=remote_name)
+                                  include=patterns or None, remote_name=remote_name)
         _show_download_plan(plan, show_paths=True)
         if not plan.file_count:
             click.echo("No cataloged files match. Choose another selection or skip.")
@@ -233,7 +233,7 @@ def _interactive_download(repo, *, output=None, remote_name=None, max_workers=4,
     """Select and approve cataloged files in a terminal, without network preflight."""
     if not sys.stdin.isatty():
         raise ClickException(
-            "--interactive requires a terminal. Use --filter 'PATTERN' --dry-run "
+            "--interactive requires a terminal. Use --include 'PATTERN' --dry-run "
             "to preview a selection; run in a terminal to approve a download.")
     if not _download_available(repo, remote_name):
         return
@@ -256,7 +256,7 @@ def _interactive_download(repo, *, output=None, remote_name=None, max_workers=4,
     _execute_download(repo, plan, max_workers=max_workers)
 
 
-def _offer_download(repo, *, filters=(), output=None, interactive=False):
+def _offer_download(repo, *, includes=(), output=None, interactive=False):
     """Review downloads after cloning, or print equivalent commands for later."""
     if not sys.stdin.isatty():
         click.echo("Warning: download approval is unavailable without "
@@ -269,9 +269,9 @@ def _offer_download(repo, *, filters=(), output=None, interactive=False):
             click.echo(f"Before downloading: {exc}", err=True)
         directory = repo.worktree if repo.worktree is not None else repo.dothm.path
         arguments = ["hallmark", "download"]
-        if filters:
-            for pattern in filters:
-                arguments.extend(["--filter", pattern])
+        if includes:
+            for pattern in includes:
+                arguments.extend(["--include", pattern])
         else:
             arguments.append("--all")
         if output is not None:
@@ -282,7 +282,7 @@ def _offer_download(repo, *, filters=(), output=None, interactive=False):
         needs_output = repo.worktree is None and output is None
         if needs_output:
             command += " --output '/path/to/downloads'"
-        click.echo("Preview this selection locally; use --filter 'PATTERN' "
+        click.echo("Preview this selection locally; use --include 'PATTERN' "
                    "instead of --all to narrow it:")
         click.echo(f"  cd -- {shlex.quote(str(directory))}")
         click.echo(f"  {command} --dry-run")
@@ -302,7 +302,7 @@ def _offer_download(repo, *, filters=(), output=None, interactive=False):
                    "transfers can consume substantial bandwidth and disk space.")
         try:
             output = _download_output(repo, output)
-            plan = repo.plan_download(output, all_files=True, filter=filters or None)
+            plan = repo.plan_download(output, all_files=True, include=includes or None)
             approved = _confirm_download_plan(
                 plan, decline_is_skip=True, show_paths=True)
         except click.Abort as exc:
@@ -668,7 +668,7 @@ def checkout(repo, target_branch):
               help="Select a catalog TSV. May be repeated.")
 @click.option("--all", "download_all", is_flag=True,
               help="Select all cataloged files.")
-@click.option("--filter", "filters", multiple=True,
+@click.option("--include", "includes", multiple=True,
               help="Select paths matching a glob. ** matches recursively. "
                    "May be repeated.")
 @click.option("--remote", "remote_name",
@@ -683,7 +683,7 @@ def checkout(repo, target_branch):
               help="Choose cataloged files and review sizes before approval.")
 @click.option("-y", "--yes", is_flag=True, hidden=True)
 @click.pass_obj
-def download(repo, files, tsv_names, download_all, filters, remote_name,
+def download(repo, files, tsv_names, download_all, includes, remote_name,
              output, max_workers, dry_run, interactive, yes):
     """
     Download selected files from a configured data remote.
@@ -693,9 +693,9 @@ def download(repo, files, tsv_names, download_all, filters, remote_name,
     Use --interactive to choose patterns or all files in a terminal.
     """
     if interactive:
-        if files or tsv_names or download_all or filters:
+        if files or tsv_names or download_all or includes:
             raise ClickException(
-                "--interactive cannot be combined with paths, --filter, "
+                "--interactive cannot be combined with paths, --include, "
                 "--tsv, or --all")
         if yes:
             click.echo("--yes is deprecated; downloads still require confirmation.",
@@ -706,8 +706,8 @@ def download(repo, files, tsv_names, download_all, filters, remote_name,
         return
     if download_all and (files or tsv_names):
         raise ClickException("--all cannot be combined with file paths or --tsv")
-    if not files and not tsv_names and not download_all and not filters:
-        raise ClickException("Provide file paths, --tsv, --all, or --filter")
+    if not files and not tsv_names and not download_all and not includes:
+        raise ClickException("Provide file paths, --tsv, --all, or --include")
     if repo.worktree is None and output is None:
         raise ClickException("--output is required when downloading from a bare repo")
     if yes:
@@ -716,7 +716,7 @@ def download(repo, files, tsv_names, download_all, filters, remote_name,
     with _translate_cli_errors(DownloadError, ValueError):
         plan = repo.plan_download(
             output, file_paths=files, tsv_names=tsv_names, all_files=download_all,
-            filter=filters or None, remote_name=remote_name)
+            include=includes or None, remote_name=remote_name)
         if dry_run:
             _show_download_plan(plan, show_paths=True)
             return
@@ -731,7 +731,7 @@ def download(repo, files, tsv_names, download_all, filters, remote_name,
               help="Override automatic source detection.")
 @click.option("--no-download", is_flag=True,
               help="Copy the complete catalog without reviewing or downloading files.")
-@click.option("--filter", "filters", multiple=True,
+@click.option("--include", "includes", multiple=True,
               help="Select downloads by relative-path glob; keep the full catalog. "
                    "May be repeated.")
 @click.option("--interactive", is_flag=True,
@@ -739,21 +739,21 @@ def download(repo, files, tsv_names, download_all, filters, remote_name,
 @click.option("--output", type=click.Path(file_okay=False),
               help="Download directory. Defaults to the worktree; "
                    "prompted for bare repos.")
-def clone(url, path, source_type, no_download, filters, interactive, output):
+def clone(url, path, source_type, no_download, includes, interactive, output):
     """Clone a complete Git catalog or published catalog snapshot at PATH.
 
     Copy the complete catalog first, then review a download plan and confirm
-    transfers. --filter selects downloads without trimming the catalog.
+    transfers. --include selects downloads without trimming the catalog.
     --no-download skips review; --interactive opens the selection chooser.
     Without a terminal, keep the catalog and print download commands for later.
     For raw datasets, use init, then add a URL template.
     """
-    if no_download and (interactive or filters or output is not None):
+    if no_download and (interactive or includes or output is not None):
         raise ClickException(
             "--no-download cannot be combined with --interactive, "
-            "--filter, or --output")
-    if interactive and filters:
-        raise ClickException("--interactive cannot be combined with --filter")
+            "--include, or --output")
+    if interactive and includes:
+        raise ClickException("--interactive cannot be combined with --include")
     with _translate_cli_errors(DownloadError, GitError, ValueError):
         try:
             repo = Repo.clone(url, path, source_type=source_type, progress=True)
@@ -762,7 +762,8 @@ def clone(url, path, source_type, no_download, filters, interactive, output):
             raise SystemExit(1) from exc
         click.echo(f'Successfully cloned to "{path}"')
     if not no_download:
-        _offer_download(repo, filters=filters, output=output, interactive=interactive)
+        _offer_download(repo, includes=includes, output=output,
+                        interactive=interactive)
 
 
 @hallmark.command(short_help="Deprecated: use init, then add a URL template.")

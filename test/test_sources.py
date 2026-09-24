@@ -69,7 +69,7 @@ def test_collection_urls_from_sources_feed_add(tmp_path, pages):
     assert repo.state.data["kind"].tolist() == ["pix", "tilecumulative"]
     # the template has one segment, so subdirectories are never listed
     assert reads == [zcatalog]
-    plan = repo.plan_download(filter="*pix*")
+    plan = repo.plan_download(include="*pix*")
     assert plan.remote_url == zcatalog
     assert [item.relative_path.as_posix() for item in plan.items] == [
         "zall-pix-iron.fits"]
@@ -248,7 +248,7 @@ def test_cli_ls_remote_then_add_workflow(tmp_path, pages, monkeypatch):
     assert set(Repo(tmp_path / "cli").state.data["run"]) == {"001", "002"}
 
 
-@pytest.mark.parametrize("option", ["--extract", "--format", "--fmt"])
+@pytest.mark.parametrize("option", ["--extract", "--format", "--fmt", "--filter"])
 def test_download_rejects_removed_and_initialization_only_flags(
         tmp_path, monkeypatch, option):
     repo = Repo.init(tmp_path / "repo")

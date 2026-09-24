@@ -139,19 +139,19 @@ def test_encoded_unsafe_paths_are_rejected(href):
     ("root.txt", ["**/*.fits", "**/*.txt"], True),
 ])
 def test_recursive_globs(path, pattern, matched):
-    assert path_matches(path, filter=pattern) is matched
+    assert path_matches(path, include=pattern) is matched
 
 
 def test_globs_are_case_sensitive():
-    assert path_matches("sample_001.fits", filter="sample_*.fits")
-    assert not path_matches("Sample_001.fits", filter="sample_*.fits")
+    assert path_matches("sample_001.fits", include="sample_*.fits")
+    assert not path_matches("Sample_001.fits", include="sample_*.fits")
 
 
 @pytest.mark.parametrize("invalid", [12, {"*.fits": True}, iter(["*.fits"])])
 def test_invalid_filter_types_fail_before_source_access(invalid):
     source = Source({"": index("file.fits")})
     with pytest.raises(ValueError, match="glob string"):
-        discover(source, filter=invalid)
+        discover(source, include=invalid)
     assert source.reads == []
 
 
@@ -175,7 +175,7 @@ def test_redirected_listing_uses_final_directory_and_deduplicates_crawl(final_ur
 def test_filter_traverses_unmatched_directories_and_excludes_other_payloads():
     source = Source({"": index("root.fits", "nested/", "notes.txt"),
                      "nested/": index("other.fits", "other.bin")})
-    assert [entry.path for entry in discover(source, filter="**/*.fits")] == [
+    assert [entry.path for entry in discover(source, include="**/*.fits")] == [
         "nested/other.fits", "root.fits"]
     assert source.reads == ["", "nested/"]
 
@@ -186,7 +186,7 @@ def test_only_conventional_checksum_metadata_is_read():
         "": index("data.fits", "sha256sums.txt", "custom_checksum_payload.bin"),
         "sha256sums.txt": f"{digest}  data.fits\n",
     })
-    entries = discover(source, filter="*.fits")
+    entries = discover(source, include="*.fits")
     assert entries == [RemoteEntry(path="data.fits", checksum_algorithm="sha256",
                                    checksum=digest)]
     assert source.reads == ["", "sha256sums.txt"]
@@ -205,7 +205,7 @@ def test_nested_manifest_accepts_published_directory_prefixed_paths():
         "release/project/": index("sha256sums", "file.fits"),
         "release/project/sha256sums": "a" * 64 + "  project/file.fits\n",
     })
-    assert discover(source, filter="**/*.fits")[0].checksum == "a" * 64
+    assert discover(source, include="**/*.fits")[0].checksum == "a" * 64
 
 
 def test_conflicting_manifests_fail():
@@ -229,7 +229,7 @@ def test_sftp_metadata_and_progress_callback():
 
     source.transport = SimpleNamespace(iter_entries=entries, prepare=lambda: None)
     snapshots = []
-    selected = discover(source, filter="**/*.fits", progress=snapshots.append)
+    selected = discover(source, include="**/*.fits", progress=snapshots.append)
     assert selected == [RemoteEntry(path="root.fits", size=12, mtime=123)]
     assert snapshots[-1] == {"directories": 2, "files": 2,
                              "matched": 1, "current": "nested"}

@@ -905,7 +905,7 @@ def plan_download(
     file_paths: Optional[Sequence[str]] = None,
     tsv_names: Optional[Sequence[str]] = None,
     all_files: bool = False,
-    filter: Optional[Union[str, Sequence[str]]] = None,
+    include: Optional[Union[str, Sequence[str]]] = None,
     remote_name: Optional[str] = None,
     estimated_bytes_per_second: Optional[float] = None,
 ) -> DownloadPlan:
@@ -913,7 +913,8 @@ def plan_download(
     Plan a download using local catalog metadata.
 
     No network requests are made. With no explicit paths or TSVs, select
-    the complete catalog before applying filters. Missing sizes remain unknown.
+    the complete catalog before applying inclusion globs. Missing sizes remain
+    unknown.
 
     Args:
         repo: The hallmark repository object.
@@ -923,7 +924,7 @@ def plan_download(
         tsv_names (sequence[str], optional): Catalog TSVs to select.
         all_files (bool): Select all configured files. Cannot be combined
             with explicit paths or TSVs. Defaults to False.
-        filter (str | list[str], optional): Relative path glob or globs.
+        include (str | list[str], optional): Relative path glob or globs.
         remote_name (str, optional): Configured data remote to use.
         estimated_bytes_per_second (float, optional): Positive rate used
             to estimate duration when every file size is known.
@@ -955,11 +956,11 @@ def plan_download(
         repo, file_paths=file_paths, tsv_names=tsv_names,
         all_files=all_files or (not file_paths and not tsv_names), catalog_only=True,
         resolve_source=_source_resolver(repo, remote_name))
-    if filter is not None:
+    if include is not None:
         from .discovery import path_matches
-        path_matches("validation", filter=filter)
+        path_matches("validation", include=include)
         items = [item for item in items if path_matches(
-            item.relative_path.as_posix(), filter=filter)]
+            item.relative_path.as_posix(), include=include)]
     unsourced = [item for item in items if item.source is None]
     if unsourced and (file_paths or tsv_names or len(unsourced) == len(items)):
         # explicitly requested files, or a selection with nothing downloadable

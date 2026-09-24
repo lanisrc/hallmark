@@ -201,16 +201,16 @@ class TemplateMatcher:
             for index, part in enumerate(parts))
 
 
-def path_matches(path: str, filter=None) -> bool:
+def path_matches(path: str, include=None) -> bool:
     """Match a relative path against any supplied case-sensitive inclusion glob.
 
     ``**`` spans zero or more directories. With no patterns every path matches.
     """
-    if filter is None:
+    if include is None:
         return True
-    if not isinstance(filter, (str, list, tuple)):
-        raise ValueError("filter must be a glob string or a list of glob strings")
-    patterns = [filter] if isinstance(filter, str) else list(filter)
+    if not isinstance(include, (str, list, tuple)):
+        raise ValueError("include must be a glob string or a list of glob strings")
+    patterns = [include] if isinstance(include, str) else list(include)
     if not all(isinstance(pattern, str) and pattern for pattern in patterns):
         raise ValueError("Inclusion patterns must be nonempty glob strings")
     return any(_glob_matches(str(path), pattern) for pattern in patterns)
@@ -271,7 +271,7 @@ def _manifest_checksums(context, entries):
                     previous, checksum_algorithm=algorithm, checksum=digest.lower())
 
 
-def discover(context, *, filter=None, progress=False,
+def discover(context, *, include=None, progress=False,
              descend=None) -> list[RemoteEntry]:
     """
     Discover remote files and their published metadata recursively.
@@ -281,7 +281,7 @@ def discover(context, *, filter=None, progress=False,
 
     Args:
         context (OperationContext): Source connection and cancellation state.
-        filter (str | list[str], optional): Relative path glob or globs.
+        include (str | list[str], optional): Relative path glob or globs.
         descend (callable, optional): Predicate receiving a relative directory
             path ending in ``/``; listings skip directories for which it
             returns False. Checksum manifests in skipped directories are
@@ -301,9 +301,9 @@ def discover(context, *, filter=None, progress=False,
         DownloadError: If discovery fails, paths are unsafe, or manifests conflict.
     """
     # Validate selectors before contacting the source, even for an empty index.
-    path_matches("", filter=filter)
+    path_matches("", include=include)
     def matches(path):
-        return path_matches(path, filter=filter)
+        return path_matches(path, include=include)
 
     entries = {}
     counts = {"directories": 0, "files": 0, "matched": 0, "current": ""}

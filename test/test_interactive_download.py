@@ -173,7 +173,7 @@ def test_preview_truncates_paths_but_not_totals(catalog):
 
 
 @pytest.mark.parametrize("selectors", [["runs/run_001.h5"], ["--all"],
-                                       ["--filter", "*.h5"], ["--tsv", "data.tsv"]])
+                                       ["--include", "*.h5"], ["--tsv", "data.tsv"]])
 def test_interactive_rejects_explicit_selectors(catalog, selectors):
     _, transfers = catalog
     result = TerminalRunner().invoke(
@@ -299,7 +299,7 @@ def test_transfer_interrupt_is_not_caught_as_prompt_eof(catalog, monkeypatch):
 
 @pytest.mark.parametrize("bare", [False, True])
 @pytest.mark.parametrize("options", [[], ["--interactive"],
-                                    ["--filter", "runs/*001.h5", "--filter", README],
+                                    ["--include", "runs/*001.h5", "--include", README],
                                     ["--output", "../output 'files'"]])
 def test_noninteractive_clone_keeps_catalog_and_prints_equivalent_commands(
         catalog, tmp_path, bare, options):
@@ -320,7 +320,7 @@ def test_noninteractive_clone_keeps_catalog_and_prints_equivalent_commands(
     assert len(commands) == 2
     preview, execute = map(shlex.split, commands)
     assert preview == execute + ["--dry-run"]
-    if "--filter" in options:
+    if "--include" in options:
         assert execute[2:6] == options
     else:
         assert execute[2] == "--all"
@@ -342,9 +342,9 @@ def test_noninteractive_clone_keeps_catalog_and_prints_equivalent_commands(
     ([], "n\n", []),
     ([], "\n", []),
     ([], "", []),
-    (["--filter", "runs/*001.h5", "--filter", README], "y\n",
+    (["--include", "runs/*001.h5", "--include", README], "y\n",
      ["runs/run_001.h5", README]),
-    (["--filter", "omitted*"], "", []),
+    (["--include", "omitted*"], "", []),
     (["--interactive"], "patterns\nruns/*001.h5\n\ndownload\n", ["runs/run_001.h5"]),
     (["--interactive"], "skip\n", []),
 ])
@@ -412,8 +412,8 @@ def test_no_download_disables_review_and_planning(catalog, tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("options", [
-    ["--no-download", "--interactive"], ["--no-download", "--filter", "*.fits"],
-    ["--no-download", "--output", "output"], ["--interactive", "--filter", "*.fits"],
+    ["--no-download", "--interactive"], ["--no-download", "--include", "*.fits"],
+    ["--no-download", "--output", "output"], ["--interactive", "--include", "*.fits"],
     ["--with-download"],
 ])
 def test_clone_invalid_options_fail_before_source_access(
@@ -463,7 +463,7 @@ def test_clone_output_and_bare_prompt(catalog, tmp_path, bare, provided):
     destination = tmp_path / ("copy.hm" if bare else "copy")
     output = tmp_path / "downloads"
     arguments = ["clone", str(source.dothm.path), str(destination),
-                 "--filter", "runs/*001.h5"]
+                 "--include", "runs/*001.h5"]
     if provided:
         arguments += ["--output", str(output)]
     answer = (str(output) + "\n" if bare and not provided else "") + "y\n"
@@ -589,7 +589,7 @@ def test_snapshot_clone_reviews_downloads_from_saved_remote(
     destination = tmp_path / "snapshot"
     result = TerminalRunner().invoke(
         hallmark, ["clone", snapshot_url, str(destination), "--source-type", "catalog",
-                   "--filter", "runs/*001.h5"], input="y\n")
+                   "--include", "runs/*001.h5"], input="y\n")
     assert result.exit_code == 0, result.output
     assert set(reads) == {"config.yml", "meta.yml", "data.tsv"}
     assert transfers == [ROOT + "runs/run_001.h5"]
