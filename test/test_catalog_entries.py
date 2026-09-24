@@ -495,3 +495,113 @@ def test_cli_add_dry_run_and_rm_cached(tmp_path, monkeypatch):
     missing = runner.invoke(hallmark, ["add", "{src}.fits"])
     assert missing.exit_code != 0
     assert "did not match any files" in missing.output
+
+
+MIRROR = "https://mirror.test/export/"
+SIMS = "https://sims.test/runs/"
+
+
+def _two_archives(repo, *, local=True):
+    """Catalog a local run, archive images, and simulation files."""
+    entries = [{"fmt": "{name}.h5", "db": "data-2.tsv", "url": REMOTE},
+               {"fmt": "{run}.dat", "db": "data-3.tsv", "url": SIMS}]
+    if local:
+        entries.insert(0, {"fmt": "notes_{n}.txt", "encoding": None})
+        repo.state.replace(pd.DataFrame({
+            "sha1": [_write(repo, "notes_1.txt", "note\n")], "n": ["1"]}))
+    repo.state.config["data"] = entries
+    remote_columns = {"sha1": "", "checksum_algorithm": "", "checksum": "",
+                      "mtime": ""}
+    repo.state.replace(pd.DataFrame([
+        {**remote_columns, "size_bytes": "5", "name": "M87"},
+        {**remote_columns, "size_bytes": "6", "name": "SGRA"}]), db="data-2.tsv")
+    repo.state.replace(pd.DataFrame([
+        {**remote_columns, "size_bytes": "7", "run": "001"}]), db="data-3.tsv")
+    repo.dothm.dump(repo.state)
+
+
+def test_plan_downloads_each_template_from_its_own_url(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _two_archives(repo, local=False)
+    plan = repo.plan_download(all_files=True)
+    assert {item.relative_path.as_posix(): item.source.url
+            for item in plan.items} == {
+        "M87.h5": REMOTE, "SGRA.h5": REMOTE, "001.dat": SIMS}
+    assert [source.url for source in plan.sources] == [REMOTE, SIMS]
+    assert plan.remote_url is None
+    assert plan.total_bytes == 18
+    summary = plan.summary()
+    assert f"Sources:\n  {REMOTE} (2 file(s); transport http)" in summary
+    assert f"\n  {SIMS} (1 file(s); transport http)" in summary
+
+
+def test_plan_with_one_source_keeps_the_plan_level_fields(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _catalog_remote(repo, {"M87": ""})
+    plan = repo.plan_download()
+    assert plan.remote_url == REMOTE
+    assert plan.remote_backend == "http"
+    assert f"Source: {REMOTE}\nTransport: http" in plan.summary()
+
+
+def test_local_templates_use_the_default_remote_and_skip_without_one(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _two_archives(repo)
+    plan = repo.plan_download(all_files=True)
+    assert plan.file_count == 3
+    assert plan.unsourced_count == 1
+    assert "Skipped 1 cataloged file(s) without a data source" in plan.summary()
+    with pytest.raises(Exception, match="No data source is configured for: notes"):
+        repo.plan_download(file_paths=["notes_1.txt", "M87.h5"])
+
+    repo.set_config(remote_url=MIRROR)
+    plan = repo.plan_download(all_files=True)
+    assert {item.relative_path.as_posix(): item.source.url
+            for item in plan.items}["notes_1.txt"] == MIRROR
+    assert plan.unsourced_count == 0
+
+
+def test_named_remote_overrides_every_source(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _two_archives(repo)
+    repo.set_config(remote_name="mirror", remote_url=MIRROR)
+    plan = repo.plan_download(all_files=True, remote_name="mirror")
+    assert {item.source.url for item in plan.items} == {MIRROR}
+    assert plan.remote_name == "mirror"
+
+
+def test_nothing_downloadable_reports_the_missing_remote(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write(repo, "a1.h5", "one\n")
+    repo.add("a{a}.h5")
+    with pytest.raises(Exception, match="No remote URL is configured"):
+        repo.plan_download(all_files=True)
+
+
+def test_execute_downloads_each_source_in_turn(tmp_path, monkeypatch):
+    repo = Repo.init(tmp_path / "repo")
+    _two_archives(repo, local=False)
+    fetched = []
+
+    def fake_fetch(context, relative_path, destination, checksum, chunk_size):
+        fetched.append(context.remote.file_url(relative_path.as_posix()))
+        return 1
+
+    monkeypatch.setattr("hallmark.downloader._fetch_file", fake_fetch)
+    result = repo.download(repo.plan_download(all_files=True), approved=True)
+    assert result == {"succeeded": 3, "failed": 0, "total_bytes": 3, "errors": []}
+    assert sorted(fetched) == [
+        REMOTE + "M87.h5", REMOTE + "SGRA.h5", SIMS + "001.dat"]
+
+
+def test_cli_download_dry_run_lists_every_source(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from hallmark.cli import hallmark
+
+    repo = Repo.init(tmp_path / "repo")
+    _two_archives(repo, local=False)
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["download", "--all", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "3 file(s); 18 bytes" in result.output
+    assert "Sources:" in result.output and SIMS in result.output

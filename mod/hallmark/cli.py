@@ -31,7 +31,7 @@ from .repo_builder import build_repo
 from .downloader import DownloadError, _select_download_items, _select_remote_config
 from .sources import get_source, list_sources
 from .error import CheckoutError, CloneError
-from .repo_config import normalize_tsv_name
+from .repo_config import catalog_entries, normalize_tsv_name
 
 
 # use a context manager to translate application errors into clean Click errors
@@ -215,7 +215,9 @@ def _choose_download_plan(repo, *, output, remote_name, dry_run):
 def _download_available(repo, remote_name=None):
     """Explain an empty catalog or absent remote without contacting the server."""
     remote = _select_remote_config(repo, remote_name)
-    if not remote or not remote.get("url"):
+    template_urls = remote_name is None and any(
+        entry.is_remote for entry in catalog_entries(repo.state.config))
+    if not template_urls and (not remote or not remote.get("url")):
         click.echo("No data remote is configured; skipping download. "
                    "Configure one with hallmark set-config --remote-url URL.")
         return False

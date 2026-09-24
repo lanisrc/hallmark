@@ -15,7 +15,7 @@ import pandas as pd
 
 from .transport import OperationContext, RemoteSpec
 from .transport.base import DownloadError, literal_path
-from .download_plan import DownloadItem, DownloadPlan
+from .download_plan import DownloadItem, DownloadPlan, DownloadSource
 from .helper_functions import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
     SUPPORTED_CHECKSUM_ALGORITHMS,
@@ -26,6 +26,7 @@ from .helper_functions import (
     resolve_contained_path,
     valid_checksum)
 from .repo_config import (
+    catalog_entries,
     normalize_remotes,
     normalize_tsv_name,
     row_to_path)
@@ -631,34 +632,43 @@ def _select_download_items(
     tsv_names: Sequence[str] = (),
     all_files: bool = False,
     catalog_only: bool = False,
+    resolve_source=None,
     ) -> list[DownloadItem]:
     """
     Select files to download from a hallmark repository based on the provided
     file paths, TSV names, and the repository's configuration.
+
+    With no paths or TSVs, every cataloged file is selected.
 
     Args:
         repo: The hallmark repository object.
         file_paths: A sequence of specific file paths to download.
         tsv_names: A sequence of TSV names to download files from.
         all_files: If True, include all files from the repository's configuration.
+        catalog_only: If True, explicit paths must be cataloged.
+        resolve_source: Optional callable receiving the data entries of a
+            catalog table (empty for static files) and returning the
+            ``DownloadSource`` of its files, or None if none is configured.
 
     Returns:
-        list[DownloadItem]: Relative paths, checksums, and available file metadata.
+        list[DownloadItem]: Relative paths, checksums, available file metadata,
+        and sources when ``resolve_source`` is given.
     """
     # Get the repository configuration, defaulting to an empty dictionary if not found.
     config = _repository_config(repo)
 
-    # get the data configuration entries from the "data" section of the config
-    data_config = _config_section_entries(config, "data")
     # dictionary to store selected files with relative paths and optional checksums.
     selected: dict[str, tuple[Path, Optional[ChecksumSpec]]] = {}
     metadata = {}
+    sources: dict[str, Optional[DownloadSource]] = {}
     explicit_paths = {_safe_remote_path(path).as_posix() for path in file_paths}
+    all_files = all_files or (not file_paths and not tsv_names)
 
     def add_file(
             value: Union[str, Path],
             expected_checksum: Optional[ChecksumSpec] = None,
             row=None,
+            source: Optional[DownloadSource] = None,
             ) -> None:
         """Add a file and its catalog metadata, checking for conflicting records."""
         # Resolve the input value to a safe relative path
@@ -666,22 +676,26 @@ def _select_download_items(
         # Merge the selected file into the dictionary of selected files, ensuring no
         # conflicting checksums exist.
         _merge_selected_file(selected, relative_path, expected_checksum)
+        key = relative_path.as_posix()
+        if source is not None:
+            if sources.get(key) not in (None, source):
+                raise DownloadError(f"Conflicting sources for {key!r}")
+            sources[key] = source
         if row is not None:
             size = _catalog_size(row.get("size_bytes"))
             modified = row.get("mtime")
             modified = (None if modified is None or pd.isna(modified)
                         or str(modified).strip() == "" else str(modified))
-            previous_size, previous_modified = metadata.get(
-                relative_path.as_posix(), (None, None))
+            previous_size, previous_modified = metadata.get(key, (None, None))
             if size is not None and previous_size not in (None, size):
                 raise DownloadError(
                     f"Conflicting sizes for {relative_path.as_posix()!r}")
-            metadata[relative_path.as_posix()] = (
+            metadata[key] = (
                 size if size is not None else previous_size,
                 modified if modified is not None else previous_modified)
 
     def add_frame(frame: pd.DataFrame, fmt_entries: list[dict],
-                  *, explicit_only=False) -> None:
+                  *, explicit_only=False, source=None) -> None:
         """Add matching catalog rows, retaining their checksums and file metadata."""
         # if the DataFrame is None or empty, return early without adding any files
         if frame is None or frame.empty:
@@ -695,23 +709,28 @@ def _select_download_items(
             # add the resolved remote path and its checksum to the selected files
             relative_path = _safe_remote_path(_resolve_remote_path(row, fmt_entries))
             if not explicit_only or relative_path.as_posix() in explicit_paths:
-                add_file(relative_path, _row_checksum(row), row)
+                add_file(relative_path, _row_checksum(row), row, source)
 
     # Add explicitly requested file paths to the selected files.
     if not catalog_only:
         for file_path in file_paths:
             add_file(file_path)
-    # Organize data configuration entries by their TSV names for easier access.
-    entries_by_tsv: dict[str, list[dict]] = {}
-    for entry in data_config:
-        # Path catalogs need no parameterized filename format.
-        if not entry.get("db"):
-            continue
-        # download_tsv_name will normalize and validate the TSV name
-        tsv_name = _download_tsv_name(entry["db"])
-        # Add the entry to the list of entries for the corresponding TSV name
-        entries_by_tsv.setdefault(tsv_name, []).append(entry)
-
+    # Group data entries by the TSV holding their rows. Entries without an
+    # explicit "db" share data.tsv, whose rows are loaded in the repository state.
+    try:
+        catalog = catalog_entries(config)
+    except ValueError as exc:
+        raise DownloadError(str(exc)) from exc
+    raw_entries = as_list_of_dicts(config.get("data")) or []
+    tables: dict[str, list] = {}
+    for entry in catalog:
+        tables.setdefault(entry.db, []).append(entry)
+    in_state = {name for name, entries in tables.items()
+                if not any(raw_entries[entry.index].get("db") for entry in entries)}
+    # rows of an unreferenced data.tsv are cataloged by their path column
+    if "data.tsv" not in tables and not repo.state.data.empty:
+        tables["data.tsv"] = []
+        in_state.add("data.tsv")
 
     requested_tsvs = []
     seen_tsvs = set()
@@ -725,24 +744,31 @@ def _select_download_items(
 
     # if the all_files flag is set, include all TSVs in the requested list and seen set
     if all_files:
-        for tsv_name in entries_by_tsv:
+        for tsv_name in tables:
             if tsv_name not in seen_tsvs:
                 requested_tsvs.append(tsv_name)
                 seen_tsvs.add(tsv_name)
 
     lookup_tsvs = list(requested_tsvs)
     if explicit_paths:
-        lookup_tsvs.extend(name for name in entries_by_tsv
+        lookup_tsvs.extend(name for name in tables
                            if name not in requested_tsvs)
     for tsv_name in lookup_tsvs:
-        fmt_entries = entries_by_tsv.get(tsv_name)
+        entries = tables.get(tsv_name)
         # if there are no format entries for the requested TSV
-        if fmt_entries is None:
-            configured = ", ".join(entries_by_tsv) or "<none>"
+        if entries is None:
+            configured = ", ".join(tables) or "<none>"
             # raise an error indicating that the TSV is not configured in the repository
             raise DownloadError(
                 f"TSV {tsv_name!r} is not configured. "
                 f"Configured TSVs: {configured}")
+        fmt_entries = [raw_entries[entry.index] for entry in entries]
+        source = resolve_source(entries) if resolve_source is not None else None
+        explicit_only = tsv_name not in requested_tsvs
+        if tsv_name in in_state:
+            add_frame(repo.state.data, fmt_entries, explicit_only=explicit_only,
+                      source=source)
+            continue
 
         # Construct the path to the TSV file in the repository's dothm directory.
         tsv_path = repo.dothm.path / tsv_name
@@ -758,8 +784,8 @@ def _select_download_items(
                 keep_default_na=False,
                 chunksize=TSV_READ_CHUNK_SIZE)
             for frame in frames:
-                add_frame(frame, fmt_entries,
-                          explicit_only=tsv_name not in requested_tsvs)
+                add_frame(frame, fmt_entries, explicit_only=explicit_only,
+                          source=source)
         # skip empty TSV files without raising an error
         except pd.errors.EmptyDataError:
             continue
@@ -768,6 +794,7 @@ def _select_download_items(
             raise DownloadError(f"Unable to read TSV {tsv_path}: {exc}") from exc
 
     if all_files or explicit_paths:
+        static_source = resolve_source(()) if resolve_source is not None else None
         # for each section ("data" and "meta") in the repository configuration
         for section_name in ("data", "meta"):
             # iterate through each entry in the section
@@ -777,27 +804,59 @@ def _select_download_items(
                 # if a file path is specified in the entry, add it to the selected files
                 if file_path and (all_files or _safe_remote_path(file_path).as_posix()
                                   in explicit_paths):
-                    add_file(file_path, _entry_checksum(entry), entry)
-
-    # Determine whether to use legacy data formats based on the presence of file paths,
-    # TSV names, and all_files flag.
-    use_legacy_data = (not file_paths and not tsv_names and not all_files
-                        ) or (all_files and not entries_by_tsv)
-    if use_legacy_data:
-        # legacy_formats are entries in the data configuration that have a "fmt" key
-        legacy_formats = [entry for entry in data_config if entry.get("fmt")]
-        # add files from legacy formats to the selected files
-        add_frame(repo.state.data, legacy_formats)
-    elif explicit_paths and not entries_by_tsv:
-        add_frame(repo.state.data, data_config, explicit_only=True)
+                    add_file(file_path, _entry_checksum(entry), entry, static_source)
 
     missing = explicit_paths - set(selected)
     if missing:
         raise DownloadError(
             "Paths are not in the catalog: " + ", ".join(sorted(missing)))
 
-    return [DownloadItem(path, checksum, *metadata.get(path.as_posix(), (None, None)))
+    return [DownloadItem(path, checksum, *metadata.get(path.as_posix(), (None, None)),
+                         source=sources.get(path.as_posix()))
             for path, checksum in selected.values()]
+
+
+def _download_source(remote: Optional[dict]) -> Optional[DownloadSource]:
+    """
+    Used by _source_resolver.
+    Validate a configured data remote and describe it as a download source.
+    """
+    if not remote or not remote.get("url"):
+        return None
+    spec = RemoteSpec.parse(remote["url"], backend=remote.get("backend"),
+                            backend_options=remote.get("backend_options"))
+    return DownloadSource(remote["url"], remote.get("name"), spec.backend,
+                          remote.get("backend_options") or {})
+
+
+def _source_resolver(repo, remote_name: Optional[str] = None):
+    """
+    Used by plan_download.
+    Return a function choosing the download source of a catalog table.
+
+    A named remote overrides every source. Otherwise files come from their
+    data entry's URL, or from the default configured remote.
+    """
+    override = (_download_source(_select_remote_config(repo, remote_name))
+                if remote_name is not None else None)
+    default = []
+
+    def resolve(entries) -> Optional[DownloadSource]:
+        if override is not None:
+            return override
+        entry = next((entry for entry in entries if entry.url), None)
+        if entry is not None:
+            spec = RemoteSpec.parse(entry.url, backend=entry.backend,
+                                    backend_options=entry.backend_options)
+            return DownloadSource(entry.url, None, spec.backend,
+                                  entry.backend_options or {})
+        # the default remote is resolved only when a table needs it, since
+        # several unnamed choices are an error only then
+        if not default:
+            default.append(_download_source(_select_remote_config(repo)))
+        return default[0]
+
+    return resolve
 
 
 def _catalog_size(value) -> Optional[int]:
@@ -894,33 +953,45 @@ def plan_download(
         raise DownloadError("all_files cannot be combined with paths or TSVs")
     items = _select_download_items(
         repo, file_paths=file_paths, tsv_names=tsv_names,
-        all_files=all_files or (not file_paths and not tsv_names), catalog_only=True)
+        all_files=all_files or (not file_paths and not tsv_names), catalog_only=True,
+        resolve_source=_source_resolver(repo, remote_name))
     if filter is not None:
         from .discovery import path_matches
         path_matches("validation", filter=filter)
         items = [item for item in items if path_matches(
             item.relative_path.as_posix(), filter=filter)]
-    remote = _select_remote_config(repo, remote_name)
-    if items and (remote is None or not remote.get("url")):
-        raise DownloadError("No remote URL is configured in config.yml")
-    remote = remote or {}
-    source = None
-    if remote.get("url"):
-        source = RemoteSpec.parse(
-            remote["url"], backend=remote.get("backend"),
-            backend_options=remote.get("backend_options"))
+    unsourced = [item for item in items if item.source is None]
+    if unsourced and (file_paths or tsv_names or len(unsourced) == len(items)):
+        # explicitly requested files, or a selection with nothing downloadable
+        if len(unsourced) == len(items):
+            raise DownloadError("No remote URL is configured in config.yml")
+        shown = ", ".join(item.relative_path.as_posix() for item in unsourced[:5])
+        raise DownloadError(f"No data source is configured for: {shown}")
+    items = [item for item in items if item.source is not None]
     for item in items:
         try:
             resolve_contained_path(output_root, item.relative_path,
                                    label="download destination")
         except ValueError as exc:
             raise DownloadError(str(exc)) from exc
+    sources = list(dict.fromkeys(item.source for item in items))
+    if not sources and remote_name is None:
+        # describe the default source even when nothing is selected
+        try:
+            sources = [source for source in (
+                _download_source(_select_remote_config(repo)),) if source]
+        except DownloadError:
+            sources = []
+    elif not sources:
+        sources = [_download_source(_select_remote_config(repo, remote_name))]
+    source = sources[0] if len(sources) == 1 else None
     return DownloadPlan(
-        tuple(items), remote.get("url"), output_root,
-        remote_name=remote.get("name"),
+        tuple(items), source.url if source else None, output_root,
+        remote_name=source.name if source else None,
         estimated_bytes_per_second=estimated_bytes_per_second,
-        remote_backend=source.backend if source is not None else None,
-        backend_options=remote.get("backend_options"))
+        remote_backend=source.backend if source else None,
+        backend_options=source.backend_options if source else {},
+        unsourced_count=len(unsourced))
 
 
 def execute_download_plan(
@@ -960,14 +1031,28 @@ def execute_download_plan(
         return {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
     if plan.output_path.resolve() != plan.output_path:
         raise DownloadError("Download destination changed since planning")
-    remote = RemoteSpec.parse(
-        plan.remote_url, backend=plan.remote_backend,
-        backend_options=plan.backend_options)
-    return _download_selected(
-        remote, plan.output_path,
-        [(item.relative_path, item.checksum) for item in plan.items],
-        max_workers=max_workers, show_progress=show_progress,
-        byte_progress=True, total_bytes=plan.total_bytes)
+    groups: dict = {}
+    for item in plan.items:
+        source = plan.source_for(item)
+        if source is None:
+            raise DownloadError(
+                f"No data source for {item.relative_path.as_posix()!r}")
+        groups.setdefault(source, []).append(item)
+    # validate every source before transferring any file
+    remotes = {source: source.remote() for source in groups}
+    results = {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
+    for source, items in groups.items():
+        sizes = [item.size_bytes for item in items]
+        group = _download_selected(
+            remotes[source], plan.output_path,
+            [(item.relative_path, item.checksum) for item in items],
+            max_workers=max_workers, show_progress=show_progress,
+            byte_progress=True,
+            total_bytes=None if None in sizes else sum(sizes))
+        for key in ("succeeded", "failed", "total_bytes"):
+            results[key] += group[key]
+        results["errors"].extend(group["errors"])
+    return results
 
 
 def download_remote_data(

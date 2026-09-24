@@ -376,8 +376,8 @@ def catalog_entries(config) -> list[CatalogEntry]:
     """
     Return the data entries that own catalog tables, in config order.
 
-    Placeholders and static ``file`` entries are skipped. An entry without an
-    explicit ``db`` uses ``data.tsv``.
+    Placeholders, static ``file`` entries and entries that are not mappings
+    are skipped. An entry without an explicit ``db`` uses ``data.tsv``.
 
     Args:
         config (dict): The repository configuration dictionary.
@@ -395,7 +395,7 @@ def catalog_entries(config) -> list[CatalogEntry]:
     entries = []
     for index, entry in enumerate(_data_entry_list(config)):
         if not isinstance(entry, dict):
-            raise ValueError(f"config data entry {index} must be a mapping")
+            continue
         fmt = _entry_fmt(entry)
         if fmt is None and not entry.get("db"):
             continue
