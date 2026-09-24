@@ -352,6 +352,7 @@ class SshBackend(DataBackend):
             DownloadError: If discovery fails or a path escapes the dataset root.
             CapabilityError: If the server omits required file types.
         """
+        descend = getattr(self.context, "descend", None)
         with self._metadata() as session:
             root = session.realpath(self.context.remote.root).rstrip("/") or "/"
             reject_controls(root, "SFTP root")
@@ -395,7 +396,8 @@ class SshBackend(DataBackend):
                     if mode is None:
                         raise CapabilityError("SFTP server omitted file type")
                     if stat.S_ISDIR(mode):
-                        pending.append((path + "/", absolute))
+                        if descend is None or descend(path + "/"):
+                            pending.append((path + "/", absolute))
                     elif stat.S_ISREG(mode):
                         entry = RemoteEntry(path, attrs["size"], attrs["mtime"])
                         yield entry

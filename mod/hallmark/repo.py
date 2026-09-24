@@ -29,6 +29,7 @@ from .dothm import Dothm
 from .state import State
 from .worktree import Worktree
 from .objects import Objects
+from .discovery import is_remote_url
 from .paraframe import ParaFrame
 from .repo_manifest import (
     catalog_map, is_local_table, iter_catalog_rows, manifest_frame_from_pf,
@@ -567,7 +568,8 @@ class Repo:
         }
 
     def add(self, fmt: str, encoding: bool = False, *,
-            dry_run: bool = False) -> ParaFrame:
+            dry_run: bool = False, progress=False, backend: Optional[str] = None,
+            backend_options: Optional[dict] = None) -> ParaFrame:
         '''
         Stage the files matching a template, or rescan the tracked templates.
 
@@ -576,17 +578,40 @@ class Repo:
         its current files. ``"."`` rescans every local template within the
         current directory, dropping rows of files that no longer exist there.
 
+        A URL template such as ``https://host/ER2/{src}_{day}.h5`` catalogs
+        the matching remote files without downloading them. The URL up to the
+        first segment with a field is recorded on the data entry. Adding the
+        URL template again syncs it with the remote directory.
+
         Args:
-            fmt (string): Format string or "." for full directory scan.
+            fmt (string): Format string, URL template, or "." for full
+                directory scan.
             encoding (boolean): Whether to apply encoding rules.
             dry_run (boolean): List matching files without hashing or staging.
+            progress (bool | callable): Display remote discovery progress or
+                receive updates.
+            backend (str, optional): Registered backend for a URL template.
+            backend_options (dict, optional): Backend configuration for a URL
+                template.
         Returns:
             paraframe Parsed and filtered file index (without checksums).
         Raises:
             ValueError: If the template is invalid, matches no files when new,
                 or matches files tracked by another template.
-            RuntimeError: If the repository has no worktree.
+            RuntimeError: If a local template is added to a repository without
+                a worktree.
+            DownloadError: If remote discovery fails.
         '''
+        if is_remote_url(fmt):
+            if encoding:
+                raise ValueError("--regex encoding rules apply to local files only")
+            from .repo_remote import add_remote_template
+
+            return add_remote_template(
+                self, fmt, dry_run=dry_run, progress=progress, backend=backend,
+                backend_options=backend_options)
+        if backend is not None or backend_options is not None:
+            raise ValueError("backend options apply to URL templates only")
         if self.worktree is None:
             raise RuntimeError(
                 "cannot add files in a bare repository without a worktree")

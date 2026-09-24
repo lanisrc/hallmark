@@ -32,6 +32,7 @@ class HttpBackend(DataBackend):
 
     def iter_entries(self, on_directory=None):
         """Yield metadata from recursive listings without reading payloads."""
+        descend = getattr(self.context, "descend", None)
         queue, visited = deque([""]), set()
         while queue:
             directory = queue.popleft()
@@ -46,7 +47,7 @@ class HttpBackend(DataBackend):
             visited.add(canonical)
             for path, is_directory, size, mtime in self._parse_index(text, canonical):
                 if is_directory:
-                    if path not in visited:
+                    if path not in visited and (descend is None or descend(path)):
                         queue.append(path)
                 else:
                     yield RemoteEntry(path=path, size=size, mtime=mtime)

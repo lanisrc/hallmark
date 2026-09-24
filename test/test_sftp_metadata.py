@@ -229,3 +229,31 @@ output.write(struct.pack('>I', len(payload)) + payload); output.flush()
             with context.transport._metadata() as session:
                 session.lstat("/data")
         assert not context.transport._processes
+
+
+def test_sftp_listing_skips_directories_rejected_by_descend(monkeypatch):
+    listed = []
+
+    class Session:
+        def realpath(self, path):
+            return path
+
+        def lstat(self, path):
+            return {"size": 4, "mode": stat.S_IFDIR, "mtime": 1}
+
+        def iterdir(self, path):
+            listed.append(path)
+            if path == "/data":
+                yield "keep", {"size": None, "mode": stat.S_IFDIR, "mtime": None}
+                yield "skip", {"size": None, "mode": stat.S_IFDIR, "mtime": None}
+            else:
+                yield "file", {"size": 4, "mode": stat.S_IFREG, "mtime": 1}
+
+    with OperationContext(RemoteSpec.parse("sftp://unused/data")) as context:
+        monkeypatch.setattr(
+            context.transport, "_metadata", lambda: nullcontext(Session()),
+        )
+        context.descend = lambda directory: directory == "keep/"
+        entries = list(context.transport.iter_entries())
+    assert [entry.path for entry in entries] == ["keep/file"]
+    assert listed == ["/data", "/data/keep"]

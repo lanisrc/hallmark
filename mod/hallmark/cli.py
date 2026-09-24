@@ -31,6 +31,7 @@ from .repo_builder import build_repo
 from .downloader import DownloadError, _select_download_items, _select_remote_config
 from .sources import get_source, list_sources
 from .error import CheckoutError, CloneError
+from .discovery import is_remote_url
 from .repo_config import catalog_entries, normalize_tsv_name
 
 
@@ -496,24 +497,54 @@ def add(repo, encoding, dry_run, inputs):
     template such as `a{a}_i{i}.h5`. Each new template is tracked alongside
     the existing ones; `hallmark rm --cached FORMAT` stops tracking one.
     A new template must match at least one file.
-    `hallmark add "."` rescans every tracked template within the current
+    `hallmark add "."` rescans every local template within the current
     directory. Explicit path inputs such as shell-expanded `*` are not
     supported yet with the parameter-based manifest format.
+
+    `hallmark add 'URL/{field}...'` catalogs remote files matching a URL
+    template, such as `https://host/ER2/{src}_{day}.h5`, without downloading
+    them. The URL up to the first segment with a field is recorded as the
+    template's source. Adding it again syncs the catalog with the remote
+    directory. Use `hallmark ls-remote URL` to find templates.
     """
+    remote = len(inputs) == 1 and is_remote_url(inputs[0])
     # attempt to add the specified files to the hallmark index, handling any errors
-    with _translate_cli_errors(RuntimeError, ValueError, FileNotFoundError):
+    with _translate_cli_errors(RuntimeError, ValueError, FileNotFoundError,
+                               DownloadError):
         # if there is only one input, use the add method for a single input
         if len(inputs) == 1:
-            pf = repo.add(inputs[0], encoding, dry_run=dry_run)
+            pf = repo.add(inputs[0], encoding, dry_run=dry_run,
+                          **({"progress": True} if remote else {}))
         # oterhwise, use the add_paths method for multiple inputs
         else:
             pf = repo.add_paths(list(inputs))
 
+    if remote:
+        _report_remote_add(pf, dry_run=dry_run)
+        return
     if pf.empty:
         click.echo("No files matched the format string.")
     else:
         click.echo("Would add" if dry_run else "Changes to be committed")
         click.echo(pf.path.to_string(index=False, header=False))
+
+
+def _report_remote_add(pf, *, dry_run):
+    """Summarize a remote catalog update without listing every file."""
+    paths = pf["path"].tolist()
+    click.echo("Would add" if dry_run else "Changes to be committed")
+    for path in paths[:20]:
+        click.echo(path)
+    if len(paths) > 20:
+        click.echo(f"... {len(paths) - 20} more file(s)")
+    mismatched = pf.attrs.get("mismatched", 0)
+    if mismatched:
+        click.echo(f"Skipped {mismatched} listed file(s) whose names the template "
+                   "cannot re-create exactly.")
+    if not dry_run:
+        click.echo(f"Cataloged {len(paths)} remote file(s); nothing was downloaded. "
+                   "Run hallmark commit -m MESSAGE, then hallmark download to "
+                   "fetch files.")
 
 
 @hallmark.command(short_help="Stop tracking a template.")

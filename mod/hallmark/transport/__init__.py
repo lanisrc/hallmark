@@ -35,6 +35,9 @@ class OperationContext:
         self.output_root = Path(output_root) if output_root is not None else None
         self.cancelled = Event()
         self.on_bytes = None
+        # Optional predicate receiving a relative directory path ending in "/".
+        # Listings skip directories for which it returns False.
+        self.descend = None
         self.text_limit = 16 * 1024 * 1024
         self.listing_timeout = 60
         self._local = local()

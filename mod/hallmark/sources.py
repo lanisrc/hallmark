@@ -149,6 +149,25 @@ def list_sources():
     return [get_source(name) for name in sorted(names)]
 
 
+def backend_for_url(url: str):
+    """
+    Return the backend a registered source release declares for a URL.
+
+    Args:
+        url (str): Remote directory URL.
+
+    Returns:
+        tuple[str, Mapping] | None: The backend name and options of the release
+        whose URL contains ``url``, or None if no such release declares one.
+    """
+    for source in list_sources():
+        for release in source.releases.values():
+            root = release.url.rstrip("/") + "/"
+            if release.backend and (url.rstrip("/") + "/").startswith(root):
+                return release.backend, release.backend_options
+    return None
+
+
 def resolve_source(source, release=None, collections=None):
     """Return a transport, crawl roots, and provenance for a name or raw URL."""
     if not isinstance(source, str) or not source.strip():

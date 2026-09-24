@@ -296,6 +296,11 @@ class DataBackend:
     and release owned resources in ``close``. Authentication secrets belong in
     local configuration, not persisted backend options.
 
+    Recursive listings should skip a subdirectory when ``context.descend`` is
+    set and returns False for its relative path (ending in ``/``). Discovery
+    sets it to avoid listing directories a filename template cannot match;
+    backends that ignore it remain correct, only slower.
+
     Args:
         context (OperationContext): Resources and settings for this operation.
     """

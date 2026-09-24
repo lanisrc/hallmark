@@ -18,7 +18,7 @@
 from .sources import DataSource, SourceRelease, register_source
 from .repo import Repo
 from .paraframe import ParaFrame
-from .download_plan import DownloadItem, DownloadPlan
+from .download_plan import DownloadItem, DownloadPlan, DownloadSource
 from .backends import (
     DataBackend, HttpBackend, SshBackend, CyVerseBackend, RemoteEntry,
     register_backend,
@@ -26,6 +26,6 @@ from .backends import (
 
 __all__ = [
     "DataSource", "SourceRelease", "register_source", "Repo", "ParaFrame",
-    "DownloadItem", "DownloadPlan", "DataBackend",
+    "DownloadItem", "DownloadPlan", "DownloadSource", "DataBackend",
     "HttpBackend", "SshBackend", "CyVerseBackend", "RemoteEntry", "register_backend",
 ]
