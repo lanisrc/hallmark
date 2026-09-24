@@ -27,7 +27,8 @@ import yaml
 from .error import CloneError, DothmError
 from .helper_functions import (
     atomic_output_path, load_yaml_file, validate_path_component)
-from .state import State
+from .repo_config import catalog_table_names
+from .state import DEFAULT_DB, State
 
 
 class _HallmarkYamlDumper(yaml.Dumper):
@@ -85,7 +86,8 @@ class Dothm(Repo):
     """Local ``.hm`` storage backend.
 
     The backend version controls the hallmark ``State`` database files
-    (``config.yml``, ``meta.yml``, ``data.tsv``) on-disk.
+    (``config.yml``, ``meta.yml``, ``data.tsv`` and the catalog TSVs of
+    additional data entries) on-disk.
     It is itself a git worktree.
     """
     def _storage_path(self, stem: Union[Path, str], suffix: str) -> Path:
@@ -154,7 +156,6 @@ remote:
   # name: origin
   # url: https://example.com/path/to/data/
   # SSH URL example: ssh://campus/srv/export/ (requires a trusted host key)
-  # auth: campus  # Optional local profile name. Credentials stay local.
 """
 
     @classmethod
@@ -196,16 +197,52 @@ remote:
         return Dothm(path)
 
     def load(self) -> State:
-        return State(
-            config = self.load_yml("config"),
+        config = self.load_yml("config")
+        state = State(
+            config = config,
             meta = self.load_yml("meta"),
             data = self.load_tsv("data"))
+        # additional data entries keep their catalogs in their own TSVs
+        for name in catalog_table_names(config):
+            if name != DEFAULT_DB:
+                state.tables[name] = self._load_optional_tsv(name)
+        return state
 
     def dump(self, state: State) -> None:
+        # write catalogs before the config that references them
+        names = [DEFAULT_DB]
+        self.dump_tsv(state.data, "data")
+        for name, frame in state.tables.items():
+            if (name in state.changed_tables
+                    or not self._storage_path(name, ".tsv").exists()):
+                self.dump_tsv(frame, name)
+                names.append(name)
+        for name in sorted(state.removed_tables - set(state.tables) - {DEFAULT_DB}):
+            self.index.remove([name], ignore_unmatch=True)
+            self._storage_path(name, ".tsv").unlink(missing_ok=True)
         self.dump_yml(state.config, "config")
         self.dump_yml(state.meta,   "meta")
-        self.dump_tsv(state.data,   "data")
-        self.index.add(["config.yml", "meta.yml", "data.tsv"])
+        self.index.add(["config.yml", "meta.yml", *names])
+        state.changed_tables.clear()
+        state.removed_tables.clear()
+
+    def _load_optional_tsv(self, stem: Union[Path, str]) -> pd.DataFrame:
+        """
+        Used by load.
+        Load a catalog TSV, returning an empty table when it has not been written.
+
+        Args:
+            stem (Union[Path, str]): The TSV file name.
+
+        Returns:
+            pd.DataFrame: The table, or an empty table with a ``sha1`` column.
+        """
+        if not self._storage_path(stem, ".tsv").is_file():
+            return State().data.copy()
+        try:
+            return self.load_tsv(stem)
+        except pd.errors.EmptyDataError:
+            return State().data.copy()
 
     def load_yml(self, stem: Union[Path, str]) -> dict:
         """

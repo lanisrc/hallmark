@@ -10,7 +10,8 @@ import pandas as pd
 
 from .helper_functions import load_yaml
 from .objects import Objects
-from .state import State
+from .repo_config import catalog_table_names
+from .state import DEFAULT_DB, State
 
 def _load_revision_yaml(
     repo,
@@ -75,10 +76,13 @@ def _copy_current_state(repo, *, include_data: bool) -> State:
     """
     # if include_data is True, copy current data; otherwise, create an empty DataFrame
     data = (repo.state.data.copy() if include_data else State().data.copy())
+    tables = ({name: frame.copy() for name, frame in repo.state.tables.items()}
+              if include_data else {})
 
     # new State object with deep copies of current config and meta, and the copied data
     return State(
-        config=deepcopy(repo.state.config), meta=deepcopy(repo.state.meta), data=data)
+        config=deepcopy(repo.state.config), meta=deepcopy(repo.state.meta), data=data,
+        tables=tables)
 
 
 def _load_revision_state(repo, revision: str) -> State:
@@ -97,10 +101,21 @@ def _load_revision_state(repo, revision: str) -> State:
     data_text = repo.dothm.git.show(f"{revision}:data.tsv")
     # Load the config.yml and meta.yml content from the specified revision,
     # falling back to current state if not found
-    return State(
+    state = State(
         config=_load_revision_yaml(repo, revision, "config.yml", repo.state.config),
         meta=_load_revision_yaml(repo, revision, "meta.yml", repo.state.meta),
         data=_parse_data_tsv(data_text))
+    # load the catalogs of additional data entries named by that revision's config
+    for name in catalog_table_names(state.config):
+        if name == DEFAULT_DB:
+            continue
+        try:
+            state.tables[name] = _parse_data_tsv(
+                repo.dothm.git.show(f"{revision}:{name}"))
+        # a catalog staged but never committed is empty at this revision
+        except GitCommandError:
+            state.tables[name] = State().data.copy()
+    return state
 
 
 def load_branch_data(repo, branch: str) -> State:

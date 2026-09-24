@@ -18,7 +18,8 @@ from .dothm import Dothm
 from .error import CloneError, DestinationExistsError
 from .fmt_detection import detect_fmt
 from .helper_functions import as_list_of_dicts
-from .repo_config import fmt_fields, normalize_remotes, normalize_tsv_name, row_to_path
+from .repo_config import fmt_fields, normalize_remotes, normalize_tsv_name
+from .repo_manifest import row_relative_path
 from .transport import OperationContext, RemoteSpec
 from .transport.base import (RemoteObjectMissing, literal_path,
                              thaw_backend_options)
@@ -49,18 +50,10 @@ def _catalog_formats(config, name):
 
 def _row_path(row, formats):
     """Resolve a catalog row to one literal relative path."""
-    value = row.get("path")
-    if value is not None and not pd.isna(value) and str(value):
-        return literal_path(str(value)).as_posix()
-    paths = []
-    for template in formats:
-        try:
-            paths.append(row_to_path(row, template).as_posix())
-        except (ValueError, KeyError):
-            continue
-    if len(set(paths)) != 1:
-        raise CloneError("Cannot resolve a catalog row to a unique file path")
-    return paths[0]
+    try:
+        return row_relative_path(row, formats).as_posix()
+    except ValueError as exc:
+        raise CloneError(str(exc)) from exc
 
 
 def _validate_snapshot(files, config):
