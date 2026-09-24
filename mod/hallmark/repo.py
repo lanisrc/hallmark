@@ -28,7 +28,9 @@ from .state import State
 from .worktree import Worktree
 from .objects import Objects
 from .paraframe import ParaFrame
-from .repo_manifest import manifest_frame_from_pf, manifest_map, iter_manifest_entries
+from .repo_manifest import (
+    catalog_map, iter_catalog_rows, manifest_frame_from_pf, row_fingerprint,
+    table_groups)
 from .repo_state import (
     load_branch_data, load_head_state, find_remote_branch,
     fetch_missing_objects_from_remote)
@@ -48,9 +50,43 @@ from .repo_config import (
     branch_encodings,
     branch_fmt,
     normalize_remotes,
-    row_to_path,
-    set_config,
-    single_data_fmt)
+    set_config)
+
+def _catalog_changes(head_state: State, state: State) -> list[dict]:
+    """
+    Used by status.
+    Summarize staged changes to catalog-only files for each catalog table.
+
+    Args:
+        head_state (State): The committed state.
+        state (State): The staged state.
+
+    Returns:
+        list[dict]: For each changed table, its ``templates``, ``url`` and
+        counts of ``added``, ``modified`` and ``deleted`` rows.
+    """
+    def rows_by_table(source):
+        tables: dict[str, dict[str, str]] = {}
+        for row in iter_catalog_rows(source, local=False):
+            tables.setdefault(row.db, {})[row.path] = row_fingerprint(row.record)
+        return tables
+
+    head_tables, staged_tables = rows_by_table(head_state), rows_by_table(state)
+    groups = {**table_groups(head_state.config), **table_groups(state.config)}
+    changes = []
+    for name, entries in groups.items():
+        head, staged = head_tables.get(name, {}), staged_tables.get(name, {})
+        counts = {
+            "added": sum(path not in head for path in staged),
+            "modified": sum(path in head and head[path] != fingerprint
+                            for path, fingerprint in staged.items()),
+            "deleted": sum(path not in staged for path in head)}
+        if any(counts.values()):
+            changes.append({
+                "templates": [entry.fmt or name for entry in entries],
+                "url": entries[0].url, **counts})
+    return changes
+
 
 @dataclass(init=False)
 class Repo:
@@ -409,19 +445,29 @@ class Repo:
         Return repository status information. Includes staged changes,
         worktree modifications, deletions, and untracked files.
 
+        Local files are listed individually. Changes to catalog-only files,
+        such as those of a remote template, are summarized per template.
+        Their absent or downloaded copies are never reported as deleted,
+        modified, or untracked.
+
         Args:
             self: Repository instance.
 
         Returns:
             dict[str, object]: Status summary including:
             - branch (str)
-            - staged changes (dict)
+            - staged changes (dict), including per-template ``catalog``
+              summaries
             - worktree changes (dict)
             - untracked files (list[str])
         """
         head_state = load_head_state(self)
-        head_map = manifest_map(head_state)
-        staged_map = manifest_map(self.state)
+        head_rows = catalog_map(head_state)
+        staged_rows = catalog_map(self.state)
+        head_map = {path: row_fingerprint(row.record)
+                    for path, row in head_rows.items() if row.local}
+        staged_map = {path: row_fingerprint(row.record)
+                      for path, row in staged_rows.items() if row.local}
         state_changes = sorted({
             diff.a_path or diff.b_path
             for diff in self.dothm.index.diff("HEAD")
@@ -437,18 +483,20 @@ class Repo:
 
         worktree_modified: list[str] = []
         worktree_deleted: list[str] = []
-        staged_paths = set(staged_map)
 
         # If the repository has a worktree, check for modified and missing tracked files
         if self.worktree is not None:
-            worktree_modified, worktree_deleted = worktree_changes(self, staged_map)
+            local_checksums = {path: str(row.record["sha1"])
+                               for path, row in staged_rows.items() if row.local}
+            worktree_modified, worktree_deleted = worktree_changes(
+                self, local_checksums)
             worktree_root = Path(self.worktree)
             # generator that yields relative paths of all files in the worktree
             worktree_files = (full_path.relative_to(worktree_root).as_posix()
                               for full_path in iter_repository_files(worktree_root))
-            # filter out staged paths from the worktree files
+            # cataloged files, including downloaded copies, are not untracked
             untracked = sorted(path for path in worktree_files
-                               if path not in staged_paths)
+                               if path not in staged_rows)
         else:
             untracked = []
 
@@ -459,6 +507,7 @@ class Repo:
                 "added": staged_added,
                 "modified": staged_modified,
                 "deleted": staged_deleted,
+                "catalog": _catalog_changes(head_state, self.state),
             },
             "worktree": {
                 "modified": sorted(worktree_modified),
@@ -539,27 +588,19 @@ class Repo:
         if (not allow_empty and not self.dothm.index.diff("HEAD")):
             # return early since there are no changes to commit
             return False
-        # get the current format string and the HEAD state of the repository
-        current_fmt = branch_fmt(self)
         head_state = load_head_state(self)
-        # get the format string of the HEAD state for comparison
-        head_fmt = single_data_fmt(head_state.config)
-        # head entries are the set of (path, sha1) tuples from the HEAD state
-        head_entries: set[tuple[Path, str]] = set()
-
-        if head_fmt == current_fmt:
-            # populate head_entries with the paths and checksums from the HEAD state
-            head_entries = {(relative_path, checksum.lower())
-                            for relative_path, checksum
-                            in iter_manifest_entries(head_state, fmt=head_fmt)}
+        # head entries are the set of (path, sha1) tuples of HEAD's local files
+        head_entries = {(row.path, str(row.record["sha1"]).lower())
+                        for row in iter_catalog_rows(head_state, local=True)}
 
         # list of tuples containing (full path, expected sha1) for stored files
         files_to_store: list[tuple[Path, str]] = []
-        # for each entry in the current manifest
-        for relative_path, checksum in iter_manifest_entries(
-                                        self.state, fmt=current_fmt):
+        # for each local file in the current catalog; catalog-only files, such
+        # as remote files, are committed as metadata without objects
+        for row in iter_catalog_rows(self.state, local=True):
+            relative_path = row.path
             # get the expected SHA1 checksum for the file
-            expected_sha1 = checksum.lower()
+            expected_sha1 = str(row.record["sha1"]).lower()
             # current_entry is a tuple of (relative path, expected sha1) for this file
             current_entry = (relative_path, expected_sha1)
             # if the manifest entry is not in the HEAD entries
@@ -639,18 +680,24 @@ class Repo:
         create_new_branch = not has_local and not has_remote
         current_tracked = tracked_paths(self)
         target_state = load_branch_data(self, target_branch)
-        # Get the data format string for the target branch configuration
-        target_fmt = single_data_fmt(target_state.config)
-        if target_fmt is None:
-            # Raise an error if the target branch does not meet the expected criteria
-            raise CheckoutError(
-                "checkout currently supports only repositories with "
-                "one data format and data.tsv")
 
-        # list of (relative path, sha1) tuples for all entries in the target branch
-        target_entries_raw = list(iter_manifest_entries(target_state, fmt=target_fmt))
+        # checkout restores and removes local files only; catalog-only files,
+        # such as downloaded copies of remote files, are left in place
+        try:
+            target_rows = list(iter_catalog_rows(target_state))
+            current_rows = list(iter_catalog_rows(self.state))
+        except ValueError as exc:
+            raise CheckoutError(str(exc)) from exc
+        # list of (relative path, sha1) tuples for the target branch's local files
+        target_entries_raw = [(Path(row.path), str(row.record["sha1"]))
+                              for row in target_rows if row.local]
         # get the set of relative paths for all tracked files in the target branch
         target_tracked = {path for path, _ in target_entries_raw}
+        # the target's catalog-only files and the current branch's downloaded copies
+        target_catalog_sha = {Path(row.path): str(row.record.get("sha1", "")).lower()
+                              for row in target_rows if not row.local}
+        current_catalog_only = {Path(row.path) for row in current_rows
+                                if not row.local}
 
         # try to identify any missing objects in the target branch that are not present
         # in the object store
@@ -707,18 +754,26 @@ class Repo:
             for (rel_path, full_path, expected_sha1) in conflict_candidates:
                 # if the computed checksum does not match the expected checksum
                 if (conflict_checksums[full_path] != expected_sha1):
+                    if rel_path in current_catalog_only:
+                        raise CheckoutError(
+                            f'target tracked path "{rel_path}" conflicts with '
+                            "a downloaded copy cataloged by the current branch")
                     raise CheckoutError(
                         f'target tracked path "{rel_path}" '
                         "already exists as an untracked file")
 
         # Store the name of the currently active branch before switching
         original_branch = self.dothm.active_branch.name
-        # Get the current format string from the branch configuration
-        current_fmt = branch_fmt(self)
-        # Create a mapping of current tracked paths to their SHA1 checksums
+        # Create a mapping of current local tracked paths to their SHA1 checksums
         current_sha_by_path = {
-            row_to_path(row, current_fmt): str(row["sha1"]).lower()
-            for _, row in self.state.data.iterrows()}
+            Path(row.path): str(row.record["sha1"]).lower()
+            for row in current_rows if row.local}
+        # a local file that the target catalogs remotely with the same content
+        # stays in place instead of being removed and downloaded again
+        kept_paths = {
+            path for path in current_tracked - target_tracked
+            if target_catalog_sha.get(path)
+            and target_catalog_sha[path] == current_sha_by_path.get(path)}
         # tuples of (relative path, sha1) for all files in the target branch
         target_entries = [(path, sha1.lower()) for path, sha1 in target_entries_raw]
         # changed_target_entries are the files in the target branch that have different
@@ -789,7 +844,7 @@ class Repo:
                 # paths that are either currently tracked but not in the target branch
                 # or paths that are tracked but have changed from the current branch
                 affected_paths = sorted((current_tracked - target_tracked
-                                         ) | changed_target_paths,
+                                         - kept_paths) | changed_target_paths,
                     key=lambda path: (len(path.parts), path.as_posix()), reverse=True)
                 for relative_path in affected_paths:
                     # absolute path in the worktree for the affected relative path
@@ -920,13 +975,10 @@ class Repo:
         else:
             target_state = load_head_state(self)
 
-        # get the target fmt from the target branch configuration
-        target_fmt = single_data_fmt(target_state.config)
-        # if target branch does not have exactly one data format, raise a RuntimeError
-        if target_fmt is None:
-            raise RuntimeError(
-                "add_worktree requires exactly one data entry "
-                "with a non-empty fmt")
+        # the new worktree receives the target's local files; catalog-only
+        # files, such as remote files, are downloaded separately
+        target_local = [(row.path, str(row.record["sha1"]))
+                        for row in iter_catalog_rows(target_state, local=True)]
 
         # if the target worktree does not exist
         if not target_dothm.exists():
@@ -934,7 +986,7 @@ class Repo:
             # the object store
             try:
                 missing_objects = self.objects.missing(
-                    row["sha1"] for _, row in target_state.data.iterrows())
+                    sha1 for _, sha1 in target_local)
             # if a ValueError occurs during object existence check, raise cleanly
             except ValueError as exc:
                 raise FileNotFoundError(str(exc)) from exc
@@ -963,8 +1015,7 @@ class Repo:
 
             # iterate over the target state data and restore files from the object store
             try:
-                for _, row in target_state.data.iterrows():
-                    rel_path = row_to_path(row, target_fmt)
+                for rel_path, sha1 in target_local:
                     # resolve relative path to an absolute path in the target worktree
                     destination = resolve_contained_path(
                         target,
@@ -973,7 +1024,7 @@ class Repo:
                     # ensure the parent directory exists before restoring the file
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     # restore the file from the object store using its SHA-1 checksum
-                    self.objects.restore(row["sha1"], destination)
+                    self.objects.restore(sha1, destination)
 
             # if any exception occurs during file restoration, attempt a clean up
             except Exception as exc:

@@ -755,6 +755,7 @@ def test_repo_status_reports_staged_worktree_and_untracked_changes(tmp_path):
         "added": [],
         "modified": [],
         "deleted": [],
+        "catalog": [],
     }
     assert snapshot["worktree"]["modified"] == ["a0_i0.h5"]
     assert snapshot["worktree"]["deleted"] == ["a0_i30.h5"]
@@ -2234,16 +2235,15 @@ def test_add_worktree_rejects_invalid_data_config_before_creation(tmp_path):
     Args:
         tmp_path: pytest fixture that provides a temporary directory for the test.
     Raises:
-        RuntimeError: If the repository's data configuration is invalid
-        (not exactly one entry).
+        ValueError: If the repository's data configuration is malformed.
     """
     repo = Repo.init(tmp_path / "repo")
-    repo.state.config["data"] = []
+    repo.state.config["data"] = "not a list of entries"
     repo.dothm.dump(repo.state)
     repo.dothm.index.commit("invalid data configuration")
     destination = tmp_path / "experiment"
 
-    with pytest.raises(RuntimeError, match="requires exactly one data entry"):
+    with pytest.raises(ValueError, match="must be a mapping or list of mappings"):
         repo.add_worktree("experiment")
     assert not destination.exists(), \
         f"Expected destination {destination} to not exist, but it does."

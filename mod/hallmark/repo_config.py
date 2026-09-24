@@ -359,12 +359,16 @@ def catalog_entries(config) -> list[CatalogEntry]:
         list[CatalogEntry]: The catalog entries.
 
     Raises:
-        ValueError: If an entry names an invalid TSV.
+        ValueError: If the data section is malformed or an entry names an
+            invalid TSV.
     """
+    data = config.get("data") if isinstance(config, dict) else None
+    if data is not None and as_list_of_dicts(data) is None:
+        raise ValueError('config "data" must be a mapping or list of mappings')
     entries = []
     for index, entry in enumerate(_data_entry_list(config)):
         if not isinstance(entry, dict):
-            continue
+            raise ValueError(f"config data entry {index} must be a mapping")
         fmt = _entry_fmt(entry)
         if fmt is None and not entry.get("db"):
             continue

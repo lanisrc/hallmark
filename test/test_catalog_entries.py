@@ -178,3 +178,152 @@ def test_single_template_repository_layout_is_unchanged(tmp_path):
         "data.tsv"]
     assert Path(repo.dothm.path / "config.yml").read_text(encoding="utf-8") == (
         "data:\n- fmt: a{a}.h5\n  encoding: null\nremote: null\n")
+
+
+REMOTE = "https://example.test/er2/"
+
+
+def _write(repo, name, text):
+    path = repo.worktree / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return repo.checksum(path)
+
+
+def _commit_local(repo, files, message="local data"):
+    """Track files as the branch's only template and commit their contents."""
+    repo.state.config["data"] = [{"fmt": "{name}.h5", "encoding": None}]
+    repo.state.replace(pd.DataFrame({
+        "sha1": [_write(repo, f"{name}.h5", text) for name, text in files.items()],
+        "name": list(files)}))
+    repo.dothm.dump(repo.state)
+    repo.commit(message)
+
+
+def _catalog_remote(repo, rows, *, keep_local=False):
+    """Catalog remote files by name, with their published SHA-1 or ''."""
+    entries = [{"fmt": "{name}.h5", "db": "data-2.tsv", "url": REMOTE}]
+    if keep_local:
+        entries.insert(0, {"fmt": "{run}.dat", "encoding": None})
+    else:
+        repo.state.drop_table("data.tsv")
+    repo.state.config["data"] = entries
+    repo.state.replace(pd.DataFrame({
+        "sha1": list(rows.values()), "checksum_algorithm": ["md5"] * len(rows),
+        "checksum": [str(index) * 32 for index, _ in enumerate(rows)],
+        "size_bytes": ["4"] * len(rows), "mtime": [""] * len(rows),
+        "name": list(rows)}), db="data-2.tsv")
+    repo.dothm.dump(repo.state)
+
+
+def test_commit_stores_objects_only_for_local_entries(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    run_sha = _write(repo, "1.dat", "run\n")
+    _catalog_remote(repo, {"M87": ""}, keep_local=True)
+    repo.state.replace(pd.DataFrame({"sha1": [run_sha], "run": ["1"]}))
+    repo.dothm.dump(repo.state)
+    assert repo.commit("mixed templates")
+    assert repo.objects.contains(run_sha)
+    assert len([path for path in repo.objects.root.rglob("*") if path.is_file()]) == 1
+    assert repo.status()["staged"]["catalog"] == []
+
+
+def test_status_summarizes_remote_changes_and_ignores_downloads(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _catalog_remote(repo, {"M87": "", "SGRA": "", "OJ287": ""})
+    repo.commit("remote catalog")
+    _write(repo, "M87.h5", "downloaded\n")
+    snapshot = repo.status()
+    assert snapshot["untracked"] == []
+    assert snapshot["worktree"] == {"modified": [], "deleted": []}
+
+    table = repo.state.table("data-2.tsv")
+    table = table[table["name"] != "OJ287"].copy()
+    table.loc[table["name"] == "SGRA", "checksum"] = "e" * 32
+    table.loc[len(table)] = ["", "md5", "f" * 32, "4", "", "3C279"]
+    repo.state.set_table("data-2.tsv", table)
+    repo.dothm.dump(repo.state)
+    assert repo.status()["staged"]["catalog"] == [{
+        "templates": ["{name}.h5"], "url": REMOTE,
+        "added": 1, "modified": 1, "deleted": 1}]
+
+
+def test_cli_status_prints_remote_catalog_summaries(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from hallmark.cli import hallmark
+
+    repo = Repo.init(tmp_path / "repo")
+    _catalog_remote(repo, {"M87": "", "SGRA": ""})
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["status"])
+    assert result.exit_code == 0, result.output
+    assert f"catalog:   {{name}}.h5 from {REMOTE}: 2 new, 0 modified, 0 removed" \
+        in result.output
+
+
+def test_checkout_removes_local_files_a_remote_branch_catalogs_differently(
+        tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _commit_local(repo, {"M87": "local\n"})
+    repo.checkout("remote")
+    _catalog_remote(repo, {"M87": ""})
+    repo.commit("catalog the archive copy")
+    repo.checkout("main")
+    repo.checkout("remote")
+    assert not (repo.worktree / "M87.h5").exists()
+    repo.checkout("main")
+    assert (repo.worktree / "M87.h5").read_text(encoding="utf-8") == "local\n"
+
+
+def test_checkout_keeps_local_files_a_remote_branch_catalogs_identically(
+        tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _commit_local(repo, {"M87": "same\n"})
+    sha1 = repo.checksum(repo.worktree / "M87.h5")
+    repo.checkout("remote")
+    _catalog_remote(repo, {"M87": sha1})
+    repo.commit("catalog the archive copy")
+    repo.checkout("main")
+    repo.checkout("remote")
+    assert (repo.worktree / "M87.h5").read_text(encoding="utf-8") == "same\n"
+
+
+def test_checkout_rejects_a_different_downloaded_copy_of_a_local_file(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _commit_local(repo, {"M87": "local\n"})
+    repo.checkout("remote")
+    _catalog_remote(repo, {"M87": ""})
+    repo.commit("catalog the archive copy")
+    _write(repo, "M87.h5", "downloaded\n")
+    with pytest.raises(Exception, match="downloaded copy"):
+        repo.checkout("main")
+    assert repo.dothm.active_branch.name == "remote"
+    _write(repo, "M87.h5", "local\n")
+    assert repo.checkout("main")
+
+
+def test_checkout_between_remote_branches_leaves_downloads_alone(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _catalog_remote(repo, {"M87": ""})
+    repo.commit("first archive")
+    _write(repo, "M87.h5", "downloaded\n")
+    repo.checkout("other")
+    _catalog_remote(repo, {"SGRA": ""})
+    repo.commit("second archive")
+    repo.checkout("main")
+    assert (repo.worktree / "M87.h5").read_text(encoding="utf-8") == "downloaded\n"
+    assert repo.status()["untracked"] == []
+
+
+def test_add_worktree_restores_only_local_files(tmp_path):
+    repo = Repo.init(tmp_path / "main")
+    run_sha = _write(repo, "1.dat", "run\n")
+    _catalog_remote(repo, {"M87": ""}, keep_local=True)
+    repo.state.replace(pd.DataFrame({"sha1": [run_sha], "run": ["1"]}))
+    repo.dothm.dump(repo.state)
+    repo.commit("mixed templates")
+    assert repo.add_worktree("experiment")
+    experiment = tmp_path / "experiment"
+    assert (experiment / "1.dat").read_text(encoding="utf-8") == "run\n"
+    assert not (experiment / "M87.h5").exists()
+    assert Repo(experiment).state.table("data-2.tsv")["name"].tolist() == ["M87"]

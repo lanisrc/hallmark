@@ -437,6 +437,13 @@ def status(repo):
             for path in paths:
                 click.echo("  " + click.style(f"{label}:   {path}", fg=fg))
 
+    catalog_lines = []
+    for change in staged.get("catalog", []):
+        source = f' from {change["url"]}' if change["url"] else ""
+        catalog_lines.append(
+            f'{", ".join(change["templates"])}{source}: '
+            f'{change["added"]} new, {change["modified"]} modified, '
+            f'{change["deleted"]} removed')
     emit_section(
         "Changes to be committed:",
         [
@@ -444,6 +451,7 @@ def status(repo):
             ("new file", staged["added"]),
             ("modified", staged["modified"]),
             ("deleted", staged["deleted"]),
+            ("catalog", catalog_lines),
         ],
         "green",
     )
