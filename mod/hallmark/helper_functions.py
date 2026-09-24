@@ -270,8 +270,8 @@ def normalize_nonempty_string(
     ) -> str:
     """
     Used in downloader by _select_download_files and download_remote_data, repo by
-    _validate_branch_name, add, and commit, repo_config by normalize_remotes,
-    branch_fmt, and set_config.
+    _validate_branch_name, add, and commit, repo_config by normalize_remotes
+    and set_config.
     Normalize a string by stripping whitespace and ensuring it is non-empty.
 
     Args:

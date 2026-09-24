@@ -5,7 +5,6 @@ from pathlib import Path
 from .error import CheckoutError
 from .helper_functions import (
     SymlinkPathError, resolve_contained_path, validate_relative_path)
-from .repo_config import branch_fmt
 from .repo_manifest import manifest_map, iter_manifest_entries
 
 
@@ -17,7 +16,7 @@ def effective_cwd(repo) -> Path:
     Args:
         repo (repo): repository object
     Returns:
-        path: The current working directory if it is inside the repository
+        Path: The current working directory if it is inside the repository
         worktree; otherwise, the worktree root.
     '''
     if repo.worktree is None:
@@ -85,13 +84,12 @@ def tracked_paths(repo) -> set[Path]:
         repo (Repo): Repository object.
 
     Returns:
-        set[Path]: Paths of all files tracked in the current
-        repository state.
+        set[Path]: Paths of all local files tracked in the current
+        repository state. Catalog-only files, such as remote files, are
+        not managed in the worktree and are excluded.
     '''
-    # call branch_fmt to get the filename format from the repository configuration
-    fmt = branch_fmt(repo)
-    # use iter_manifest_entries to iterate over the manifest entries and collect paths
-    return {path for path, _ in iter_manifest_entries(repo.state, fmt=fmt)}
+    # use iter_manifest_entries to iterate over the local entries and collect paths
+    return {path for path, _ in iter_manifest_entries(repo.state)}
 
 
 def worktree_changes(repo, expected_checksums: dict[str, str]
@@ -168,10 +166,8 @@ def ensure_clean_tracked_files(repo) -> None:
     if repo.worktree is None:
         raise CheckoutError("cannot checkout without a worktree")
 
-    # determine the filename format from the repository configuration
-    fmt = branch_fmt(repo)
-    # get the expected checksums for all tracked files in the repository
-    expected_checksums = manifest_map(repo.state, fmt=fmt)
+    # get the expected checksums for all local tracked files in the repository
+    expected_checksums = manifest_map(repo.state)
     # try to get the modified and missing tracked files using worktree_changes
     try:
         modified, missing = worktree_changes(repo, expected_checksums)

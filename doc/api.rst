@@ -23,18 +23,6 @@ Core Repository
    :members:
    :show-inheritance:
 
-.. automodule:: hallmark.state
-   :members:
-   :show-inheritance:
-
-.. automodule:: hallmark.downloader
-   :members:
-   :show-inheritance:
-
-.. automodule:: hallmark.paraframe
-   :members:
-   :show-inheritance:
-
 Repository Worktrees
 --------------------
 
@@ -61,10 +49,6 @@ Data Handling
    :show-inheritance:
 
 .. automodule:: hallmark.objects
-   :members:
-   :show-inheritance:
-
-.. automodule:: hallmark.eht_datatree
    :members:
    :show-inheritance:
 
@@ -104,46 +88,126 @@ and interacting with Hallmark repositories.
    :members:
    :show-inheritance:
 
-Building a repository
----------------------
+Preparing a repository
+----------------------
 
-Build a repository and choose filename formats interactively::
+Create a local repository::
 
-   hallmark build ./repositories EHTC_2018L1_Dec2024
+   hallmark init ./local-project
 
-Load formats and remotes from an existing configuration::
+Catalog remote files with a URL template, without downloading dataset files::
 
-   hallmark build ./repositories EHTC_2018L1_Dec2024 \
-       --config-file ./existing/config.yml
+   hallmark add 'https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/{pixel}/redrock-main-dark-{pixel}.fits'
+   hallmark add 'ssh://lab-data/srv/data/run{run:d}.h5'
+   hallmark commit -m 'Catalog remote data'
 
-Provide filename formats directly::
+The URL up to the first path segment containing a ``{field}`` is recorded as
+the template's source; the rest is matched against the listed files, one path
+segment at a time, and its fields become catalog columns. Each template is
+tracked beside the others; adding one again syncs it with the server, and
+``hallmark rm --cached TEMPLATE`` stops tracking it. ``hallmark add -n`` previews
+the matches, and ``hallmark ls-remote URL`` lists a directory and suggests
+templates. Python uses ``repo.add(url_template)``.
 
-   hallmark build ./repositories EHTC_EXAMPLE \
-       --fmt "images/{source}_{date}.fits=data" \
-       --fmt "README.{format}=readme"
-
-Provide a custom remote or remotes::
-
-   hallmark build ./repositories EHTC_EXAMPLE \
-       --remote "origin=https://data.example.org/EHTC_EXAMPLE/" \
-       --remote "backup=https://backup.example.org/EHTC_EXAMPLE/"
-
-The generated repository is named ``DATASET_NAME.hm``. The ``--fmt`` option
-may be repeated, but it cannot be combined with ``--config-file``.
+Use ``hallmark clone SOURCE PATH`` for an existing Hallmark Git repository
+or published HTTP/SFTP snapshot. Git clones retain the full catalog and its
+history; snapshots start new local history. Use ``--source-type git`` or
+``--source-type catalog`` to override automatic detection. The older ``build``
+command remains available but is deprecated in favor of ``add`` with a URL
+template.
 
 Downloading remote data
 -----------------------
 
-Download specific remote-relative paths::
-
-   hallmark download README.md data/example.fits
-
-Download everything represented by a configured TSV::
-
-   hallmark download --tsv data.tsv
-
-Preview a complete repository download::
+Preview the selected files using the local catalog, then confirm a download::
 
    hallmark download --all --dry-run
+   hallmark download --include 'runs/**'
 
-Large selections require confirmation unless ``--yes`` is supplied.
+Explicit cataloged paths and ``--tsv data.tsv`` also select files. Every nonempty
+transfer requires interactive confirmation. ``init`` and ``add`` only create the
+repository or catalog files; they never offer downloads. Each remote template's
+files download from its source, so one plan can span several servers;
+``--remote NAME`` selects a configured data remote for every file instead. CLI
+cloning copies the complete catalog, then reviews a download plan by default.
+Use ``clone --include`` to narrow that plan, ``clone --interactive`` for a
+chooser, or ``clone --no-download`` to skip review. ``clone --output`` specifies
+the download directory; bare catalogs prompt for one if omitted. These download
+options cannot be combined with ``--no-download``; ``--interactive`` also
+conflicts with ``--include``. ``download --include`` narrows the saved catalog
+without changing it.
+The old download ``--yes`` option does not bypass approval.
+
+Use ``hallmark download --interactive`` to choose patterns or all cataloged files,
+review recorded sizes, then download, revise, or skip. Add ``--dry-run`` to stop at
+the preview. Without a terminal, clone keeps the catalog and prints commands for
+later; standalone ``download --interactive`` reports an error. Python ``add``
+and cloning remain metadata-only and never open this CLI chooser.
+
+Python uses the same plan. First inspect the selected files::
+
+   from hallmark import Repo
+
+   repo = Repo.init('lab')
+   repo.add('ssh://lab-data/srv/data/{group}/run{run:d}.h5', progress=True)
+   plan = repo.plan_download(include='runs/**')
+   print(plan.summary())
+
+After reviewing the plan, approve the download and check for failures::
+
+   result = repo.download(plan, approved=True, progress=True)
+   if result['failed']:
+       raise RuntimeError('\n'.join(result['errors']))
+
+Plans preserve their selected sources, backend settings, destination and
+checksums even when repository configuration later changes. Size estimates
+require recorded file sizes; duration estimates also require a supplied
+transfer rate.
+
+.. automodule:: hallmark.download_plan
+   :members:
+
+Data backends
+-------------
+
+See :doc:`backends` for registration, installed plugins and the transfer
+contract. Backend classes are also exported from ``hallmark``. Existing
+``hallmark.transport`` imports remain compatibility aliases.
+
+.. automodule:: hallmark.backends
+   :members:
+   :show-inheritance:
+
+Dataset builders and data remotes
+---------------------------------
+
+.. autofunction:: hallmark.repo_builder.build_repo
+
+.. autofunction:: hallmark.repo_builder.list_remote_files
+
+SSH/SFTP uses standard ``~/.ssh/config`` and the SSH agent. Use URLs containing
+the configured host alias; no Hallmark authentication profile is used.
+
+The legacy ``download_remote_data`` function also requires ``approved=True``.
+Both download APIs return a dictionary containing ``succeeded``,
+``failed``, ``total_bytes``, and ``errors``. Check ``failed`` and ``errors``
+for individual transfer failures. Configuration errors and failed SSH
+connection checks raise ``DownloadError`` before downloads begin.
+HTTP, SSH, and SFTP downloads use the same rules for destination paths
+and checksum verification.
+
+See :doc:`private_data` for CLI and Python examples, and
+:ref:`private-transport-reference` for authentication settings and
+supported server configurations.
+
+Named data sources
+------------------
+
+List sources with ``hallmark sources`` and release/collection URLs with
+``hallmark sources desi``, then catalog files beneath them with ``ls-remote`` and
+``add``. See :doc:`private_data` for templates and migration.
+
+.. autofunction:: hallmark.repo_remote.suggest_templates
+
+.. automodule:: hallmark.sources
+   :members: DataSource, SourceRelease, register_source, get_source, list_sources

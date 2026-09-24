@@ -195,16 +195,19 @@ class Objects:
     def store(self, src: Path, sha1: str, *, actual_sha1: Optional[str] = None) -> Path:
         """
         Store a file in the object store using its SHA-1 checksum.
+
         Args:
             src (Path): Path to the source file to store.
             sha1 (str): SHA-1 checksum of the source file.
             actual_sha1 (Optional[str]): Optional actual SHA-1 of the source file.
                 If provided, it will be used to verify the integrity of the source file.
+
         Returns:
             Path: Path to the stored file.
+
         Raises:
             ValueError: If the actual SHA-1 checksum of the source file does not match
-            the expected SHA-1.
+                the expected SHA-1.
         """
         src = Path(src)
         # split the SHA-1 checksum into its storage path

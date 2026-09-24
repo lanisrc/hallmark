@@ -77,8 +77,9 @@ Currently, |hallmark|_ has two built-in APIs:
 1.  Python API:
     the native API that all |hallmark|_ features are implemented in.
     ``State`` is the active object during the process lifetime.
-    ``Dothm`` and ``Worktree`` are optional depending on workflow (for
-    example, in-memory workflows may omit both).
+    ``Repo`` opens an on-disk repository. For an in-memory file index,
+    ``ParaFrame`` can discover and select files without ``Dothm`` or
+    ``Worktree``.
 
 2.  CLI:
     python features wrapped by ``click``.
@@ -108,7 +109,7 @@ Repository ``Repo``
 
 2.  bare repository:::
 
-        "repo.hm/" <--- Dothm, a standard or bare git repo
+        "repo.hm/" <--- Dothm, a standard git repo without a data worktree
 
 3.  shared repository (multiple worktrees):::
 

@@ -353,7 +353,7 @@ def test_repo_add_pattern_keeps_deleted_manifest_rows(tmp_path):
     ]
 
 
-def test_repo_add_pattern_replaces_manifest_when_fmt_changes(tmp_path):
+def test_repo_add_new_pattern_appends_a_template(tmp_path):
     repo = Repo.init(tmp_path / "repo")
     _write_files(repo.worktree, ["a0.4_i30_w3.h5", "b0.4_i30_w3.h5"])
 
@@ -362,8 +362,18 @@ def test_repo_add_pattern_replaces_manifest_when_fmt_changes(tmp_path):
     repo.checkout("experiment")
     repo.add("b{a}_i{i}_w{w}.h5")
 
-    assert repo.state.config["data"] == [{"fmt": "b{a}_i{i}_w{w}.h5", "encoding": None}]
+    assert repo.state.config["data"] == [
+        {"fmt": "a{a}_i{i}_w{w}.h5", "encoding": None},
+        {"fmt": "b{a}_i{i}_w{w}.h5", "db": "data-2.tsv"}]
     assert repo.state.data.to_dict(orient="records") == [
+        {
+            "sha1": Repo.checksum(repo.worktree / "a0.4_i30_w3.h5"),
+            "a": "0.4",
+            "i": "30",
+            "w": "3",
+        }
+    ]
+    assert repo.state.table("data-2.tsv").to_dict(orient="records") == [
         {
             "sha1": Repo.checksum(repo.worktree / "b0.4_i30_w3.h5"),
             "a": "0.4",
@@ -755,6 +765,7 @@ def test_repo_status_reports_staged_worktree_and_untracked_changes(tmp_path):
         "added": [],
         "modified": [],
         "deleted": [],
+        "catalog": [],
     }
     assert snapshot["worktree"]["modified"] == ["a0_i0.h5"]
     assert snapshot["worktree"]["deleted"] == ["a0_i30.h5"]
@@ -939,6 +950,7 @@ def test_checkout_rebuilds_worktree_for_branch_specific_nested_fmt(tmp_path):
     repo.commit("main data")
 
     repo.checkout("experiment")
+    repo.rm_cached("main/a{a}_i{i}.h5")
     (repo.worktree / "exp" / "run1").mkdir(parents=True)
     _write_files(repo.worktree, ["exp/run1/b0_i0.h5"])
     repo.add("exp/run{run}/b{a}_i{i}.h5")
@@ -1028,6 +1040,7 @@ def test_checkout_rejects_symlink_destination_escape(tmp_path):
     repo.add("main/a{a}_i{i}.h5")
     repo.commit("main data")
     repo.checkout("experiment")
+    repo.rm_cached("main/a{a}_i{i}.h5")
     (repo.worktree / "main/a0_i0.h5").unlink()
     (repo.worktree / "exp").mkdir()
     _write_files(repo.worktree, ["exp/a1_i45.h5"])
@@ -1163,6 +1176,7 @@ def test_checkout_rejects_directory_at_target_file_path(tmp_path):
     repo.add("data_{number}.txt")
     repo.commit("main data")
     repo.checkout("experiment")
+    repo.rm_cached("data_{number}.txt")
     data_path.unlink()
     experiment_path = (repo.worktree / "experiment_1.txt")
     experiment_path.write_text("experiment\n", encoding="utf-8")
@@ -1277,7 +1291,7 @@ def test_checkout_restores_only_changed_target_files(monkeypatch, tmp_path):
 
 ### Repo.clone() tests ###
 
-def test_repo_clone_downloads_remote_data_by_default(monkeypatch, tmp_path):
+def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
     source = Repo.init(tmp_path / "source")
     _write_files(source.worktree, ["a0_i0.h5"])
     source.add("a{a}_i{i}.h5")
@@ -1287,16 +1301,19 @@ def test_repo_clone_downloads_remote_data_by_default(monkeypatch, tmp_path):
 
     captured = {}
 
-    def fake_download_file(url, destination, sha1, chunk_size=8192):
-        captured["url"] = url
+    def fake_download_file(context, relative_path, destination, sha1, chunk_size):
+        captured["url"] = context.remote.file_url(str(relative_path))
         captured["sha1"] = sha1
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text("downloaded\n", encoding="utf-8")
         return destination.stat().st_size
 
-    monkeypatch.setattr("hallmark.downloader._download_file", fake_download_file)
+    monkeypatch.setattr("hallmark.downloader._fetch_file", fake_download_file)
 
     clone = Repo.clone(str(source.dothm.path), tmp_path / "clone")
+    plan = clone.plan_download()
+    assert plan.file_count == 1
+    clone.download(plan, approved=True)
 
     assert captured == {
         "url": "https://example.com/data/a0_i0.h5",
@@ -1318,9 +1335,9 @@ def test_repo_clone_can_skip_remote_data_download(monkeypatch, tmp_path):
     def fail_download(*args, **kwargs):
         raise AssertionError("download should not be attempted")
 
-    monkeypatch.setattr("hallmark.downloader._download_file", fail_download)
+    monkeypatch.setattr("hallmark.downloader._fetch_file", fail_download)
 
-    clone = Repo.clone(str(source.dothm.path), tmp_path / "clone", fetch_data=False)
+    clone = Repo.clone(str(source.dothm.path), tmp_path / "clone")
 
     assert not (clone.worktree / "a0_i0.h5").exists()
     assert clone.download_result is None
@@ -1346,7 +1363,7 @@ def test_repo_clone_removes_incomplete_destination(tmp_path):
     destination = tmp_path / "clone"
 
     with pytest.raises(CloneError, match="missing required file"):
-        Repo.clone(str(source.dothm.path), destination, fetch_data=False)
+        Repo.clone(str(source.dothm.path), destination)
     assert not destination.exists(), f"Expected incomplete clone destination \
         {destination} to be removed after failed clone attempt"
 
@@ -2231,16 +2248,15 @@ def test_add_worktree_rejects_invalid_data_config_before_creation(tmp_path):
     Args:
         tmp_path: pytest fixture that provides a temporary directory for the test.
     Raises:
-        RuntimeError: If the repository's data configuration is invalid
-        (not exactly one entry).
+        ValueError: If the repository's data configuration is malformed.
     """
     repo = Repo.init(tmp_path / "repo")
-    repo.state.config["data"] = []
+    repo.state.config["data"] = "not a list of entries"
     repo.dothm.dump(repo.state)
     repo.dothm.index.commit("invalid data configuration")
     destination = tmp_path / "experiment"
 
-    with pytest.raises(RuntimeError, match="requires exactly one data entry"):
+    with pytest.raises(ValueError, match="must be a mapping or list of mappings"):
         repo.add_worktree("experiment")
     assert not destination.exists(), \
         f"Expected destination {destination} to not exist, but it does."
@@ -2769,7 +2785,6 @@ def test_checkout_remote_branch(tmp_path):
     clone = Repo.clone(
         str(source.dothm.path),
         tmp_path / "clone",
-        fetch_data=False,
     )
 
     # The cloned repository should have the tracked file in its worktree.

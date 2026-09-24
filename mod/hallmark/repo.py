@@ -23,33 +23,121 @@ from tempfile import TemporaryDirectory
 from typing import Dict, List, Optional, Tuple, Union
 from git.exc import GitCommandError
 
+import pandas as pd
+
 from .dothm import Dothm
 from .state import State
 from .worktree import Worktree
 from .objects import Objects
+from .discovery import is_remote_url
 from .paraframe import ParaFrame
-from .repo_manifest import manifest_frame_from_pf, manifest_map, iter_manifest_entries
+from .repo_manifest import (
+    catalog_map, is_local_table, iter_catalog_rows, manifest_frame_from_pf,
+    row_fingerprint, table_groups)
 from .repo_state import (
     load_branch_data, load_head_state, find_remote_branch,
     fetch_missing_objects_from_remote)
 from .error import CheckoutError, DestinationExistsError, DothmError
 from .helper_functions import (
     FILE_IO_CHUNK_SIZE,
+    as_list_of_dicts,
     chdir,
     iter_repository_files,
     normalize_nonempty_string,
     resolve_contained_path)
 from .repo_worktree import (
+    effective_cwd,
     ensure_clean_tracked_files,
-    filtered_paraframe,
     tracked_paths,
     worktree_changes)
 from .repo_config import (
-    branch_encodings,
-    branch_fmt,
+    CatalogEntry,
+    DEFAULT_DB,
+    add_entry,
+    catalog_entries,
+    check_template_fields,
+    entry_encodings,
+    find_entry,
+    is_placeholder,
+    next_db_name,
+    normalize_remotes,
+    remove_entry,
     row_to_path,
-    set_config,
-    single_data_fmt)
+    set_config)
+
+def _encoding_spec(config: dict) -> Optional[dict]:
+    """
+    Used by add.
+    Return the entry holding encoding rules for a template not tracked yet:
+    the placeholder, or the only catalog entry.
+    """
+    entries = as_list_of_dicts(config.get("data")) or []
+    placeholder = next((entry for entry in entries if is_placeholder(entry)), None)
+    if placeholder is not None:
+        return placeholder
+    catalog = catalog_entries(config)
+    return entries[catalog[0].index] if len(catalog) == 1 else None
+
+
+def _row_within(record: dict, fmt: str, within_root) -> bool:
+    """
+    Used by add.
+    Return True if a row's file lies within the rescanned subtree, or if the
+    row no longer renders with its template and should be replaced.
+    """
+    try:
+        return within_root(row_to_path(record, fmt).as_posix())
+    except (KeyError, ValueError):
+        return True
+
+
+def _entry_names(entry: CatalogEntry) -> set[str]:
+    """
+    Used by rm_cached.
+    Return the spellings that identify an entry: its template, and for a remote
+    entry its full URL template.
+    """
+    names = {entry.fmt} if entry.fmt else {entry.db}
+    if entry.url and entry.fmt:
+        names.add(entry.url.rstrip("/") + "/" + entry.fmt)
+    return names
+
+
+def _catalog_changes(head_state: State, state: State) -> list[dict]:
+    """
+    Used by status.
+    Summarize staged changes to catalog-only files for each catalog table.
+
+    Args:
+        head_state (State): The committed state.
+        state (State): The staged state.
+
+    Returns:
+        list[dict]: For each changed table, its ``templates``, ``url`` and
+        counts of ``added``, ``modified`` and ``deleted`` rows.
+    """
+    def rows_by_table(source):
+        tables: dict[str, dict[str, str]] = {}
+        for row in iter_catalog_rows(source, local=False):
+            tables.setdefault(row.db, {})[row.path] = row_fingerprint(row.record)
+        return tables
+
+    head_tables, staged_tables = rows_by_table(head_state), rows_by_table(state)
+    groups = {**table_groups(head_state.config), **table_groups(state.config)}
+    changes = []
+    for name, entries in groups.items():
+        head, staged = head_tables.get(name, {}), staged_tables.get(name, {})
+        counts = {
+            "added": sum(path not in head for path in staged),
+            "modified": sum(path in head and head[path] != fingerprint
+                            for path, fingerprint in staged.items()),
+            "deleted": sum(path not in staged for path in head)}
+        if any(counts.values()):
+            changes.append({
+                "templates": [entry.fmt or name for entry in entries],
+                "url": entries[0].url, **counts})
+    return changes
+
 
 @dataclass(init=False)
 class Repo:
@@ -97,6 +185,7 @@ class Repo:
         self.dothm = Dothm(dothm_path)
         self.worktree = worktree_path and Worktree(worktree_path)
         self.state = self.dothm.load()
+        normalize_remotes(self.state.config.get("remote"))
         self.paraframe_cls = ParaFrame
         self.download_result = None
 
@@ -177,15 +266,18 @@ class Repo:
 
     @classmethod
     def init(cls, path: Union[Path, str]) -> "Repo":
-        '''
-        Initialize a new hallmark repository.
+        """Initialize an empty local repository.
+
+        Catalog local or remote files afterwards with ``add``; a URL template
+        such as ``https://host/ER2/{src}_{day}.h5`` catalogs remote files
+        without downloading them.
 
         Args:
-            paht(paht|string): path to initialize a worktree or ``.hm`` repository.
+            path (Path | str): Worktree or bare ``.hm`` repository destination.
 
         Returns:
-            Repo: newly created repository instance
-        '''
+            Repo: The initialized repository.
+        """
         dothm_path, worktree_path = cls.lwpaths(path)
         dothm = Dothm.init(dothm_path)
         (dothm.path / "config.yml").write_text(Dothm.config_template(),
@@ -198,77 +290,102 @@ class Repo:
         return cls(path)
 
     @classmethod
-    def clone(
-        cls,
-        url: str,
-        path: Union[Path, str],
-        *,
-        fetch_data: bool = True,
-        max_workers: int = 4,
-        show_progress: bool = False,
-    ) -> "Repo":
-        '''
-        Clone a remote hallmark repository. Raises DestinationExistsError
-        if the destination path already exists. Raises DownloadError if
-        data download is enabled and files fail to download.
+    def clone(cls, url: str, path: Union[Path, str], *,
+              source_type: str = "auto", progress: bool = False) -> "Repo":
+        """Clone a complete Hallmark Git catalog or published snapshot.
+
+        Git sources retain their history. Published snapshots start new history.
+        Dataset files are never downloaded; plan and execute transfers separately.
 
         Args:
-            url(string): remote repository URL.
-            path(path|string): destination path for clone.
-            fetch_data (boolean): if true, downloads associated data files.
-            max_workers (integer): Number of parallel workers for downloading data.
-            show_progress (boolean): wether to display download progress.
+            url (str): Existing Git catalog or published snapshot location.
+            path (Path | str): New worktree or bare ``.hm`` repository path.
+            source_type (str): ``auto``, ``git``, or ``catalog``.
+            progress (bool): Reserved for metadata progress reporting.
+
         Returns:
-            Repo: Cloned Repository instance
-        '''
-        clone_path = Path(path)
-        if clone_path.exists():
-            raise DestinationExistsError(
-                f"fatal: destination path '{clone_path}' already exists "
-                "and is not an empty directory."
-            )
+            Repo: Complete cloned catalog without downloaded data files.
 
-        dothm_path, worktree_path = cls.lwpaths(path)
-        # try to clone the repository, and if it fails, clean up the destination path
-        try:
-            Dothm.clone(url, dothm_path, display_path=path)
-        except Exception:
-            # remove the partially created directory to avoid leaving a broken state
-            rmtree(clone_path, ignore_errors=True)
-            # re-raise the exception to propagate the error to the caller
-            raise
+        Raises:
+            DestinationExistsError: If the destination already exists.
+            CloneError: If a requested catalog is missing or invalid.
+            ValueError: If source options are invalid.
+            DownloadError: If metadata access fails.
+        """
+        from .catalog import clone_catalog
 
-        # Initialize worktree if non-bare
-        if worktree_path:
-            Worktree.init(worktree_path)
+        return clone_catalog(cls, url, path, source_type=source_type)
 
-        repo = cls(path)
-        # If fetch_data is True and a worktree exists, download remote data files
-        if fetch_data and worktree_path:
-            from .downloader import (DownloadError, download_remote_data,
-                                     select_download_files)
-            # Select files to download from the remote repository
-            selected_files = select_download_files(repo, all_files=True)
-            result = download_remote_data(
-                repo,
-                worktree_path,
-                max_workers=max_workers,
-                show_progress=show_progress,
-                selected_files=selected_files,)
+    def plan_download(self, output_path=None, *, file_paths=None, tsv_names=None,
+                      all_files=False, include=None, remote_name=None,
+                      estimated_bytes_per_second=None):
+        """
+        Plan a download using the local catalog without contacting a server.
 
-            repo.download_result = result
-            if result["failed"]:
-                errors = result.get("errors", [])
-                details = "\n".join(f"  - {error}" for error in errors[:5])
-                remaining = result["failed"] - len(errors[:5])
-                if remaining > 0:
-                    details += f"\n  - ... {remaining} more error(s)"
-                raise DownloadError(
-                    f"Failed to download {result['failed']} file(s):\n"
-                    f"{details}"
-                )
+        With no explicit paths or TSVs, select the complete catalog before
+        applying inclusion globs. Planning does not approve
+        the transfer.
 
-        return repo
+        Args:
+            output_path (Path | str, optional): Destination directory. Defaults
+                to the worktree; required for a bare repository.
+            file_paths (sequence[str], optional): Remote-relative file paths.
+            tsv_names (sequence[str], optional): Catalog TSVs to select.
+            all_files (bool): Select all configured files. Cannot be combined
+                with explicit paths or TSVs. Defaults to False.
+            include (str | list[str], optional): Relative path glob or globs.
+            remote_name (str, optional): Configured data remote to use.
+            estimated_bytes_per_second (float, optional): Positive transfer
+                rate for duration estimates. No rate is measured while planning.
+
+        Returns:
+            DownloadPlan: Immutable selection with its source, destination,
+            checksums, and available file metadata.
+
+        Raises:
+            DownloadError: If the catalog, remote, selection, or destination
+                is invalid.
+            ValueError: If an inclusion pattern or supplied rate is invalid.
+        """
+        from .downloader import plan_download
+
+        return plan_download(
+            self, output_path, file_paths=file_paths, tsv_names=tsv_names,
+            all_files=all_files, include=include, remote_name=remote_name,
+            estimated_bytes_per_second=estimated_bytes_per_second)
+
+    def download(self, plan, *, approved=False, max_workers=4, progress=False):
+        """
+        Download the files in an approved plan.
+
+        The plan fixes the source and destination even if repository settings
+        change. Successful files remain available when another transfer fails.
+
+        Args:
+            plan (DownloadPlan): Plan returned by ``plan_download``.
+            approved (bool): Must be True for a nonempty transfer. Defaults
+                to False; an empty plan requires no approval.
+            max_workers (int): Maximum concurrent download workers. Defaults
+                to 4; the local SSH session limit may reduce concurrency.
+            progress (bool): Show byte progress. Defaults to False.
+
+        Returns:
+            dict: Results with ``succeeded``, ``failed``, ``total_bytes``, and
+            ``errors`` keys. Also stored in ``download_result``. Individual
+            transfer failures are recorded in ``failed`` and ``errors``.
+
+        Raises:
+            TypeError: If ``plan`` is not a DownloadPlan.
+            DownloadError: If approval is missing, setup fails, or the
+                destination is invalid.
+        """
+        from .downloader import execute_download_plan
+
+        result = execute_download_plan(
+            self, plan, approved=approved, max_workers=max_workers,
+            show_progress=progress)
+        self.download_result = result
+        return result
 
     @staticmethod
     def checksum(path: Path, chunk_size: int = FILE_IO_CHUNK_SIZE) -> str:
@@ -320,6 +437,8 @@ class Repo:
         remote_name: Optional[str] = None,
         remote_url: Optional[str] = None,
         encoding_updates: Optional[Dict[str, str]] = None,
+        remote_backend: Optional[str] = None,
+        remote_backend_options: Optional[dict] = None,
     ) -> dict:
         """
         Update repository configuration values.
@@ -328,6 +447,8 @@ class Repo:
             fmt (str, optional): Data format specification.
             remote_name (str, optional): Name of the remote repository.
             remote_url (str, optional): URL of the remote repository.
+            remote_backend (str, optional): Registered data backend name.
+            remote_backend_options (dict, optional): Backend-specific configuration.
             encoding_updates (dict[str, str], optional): Updates to encoding rules.
 
         Returns:
@@ -338,7 +459,11 @@ class Repo:
             fmt=fmt,
             remote_name=remote_name,
             remote_url=remote_url,
-            encoding_updates=encoding_updates)
+            encoding_updates=encoding_updates,
+            **({"remote_backend": remote_backend}
+               if remote_backend is not None else {}),
+            **({"remote_backend_options": remote_backend_options}
+               if remote_backend_options is not None else {}))
         self.dothm.dump(self.state)
         return self.state.config
 
@@ -347,19 +472,28 @@ class Repo:
         Return repository status information. Includes staged changes,
         worktree modifications, deletions, and untracked files.
 
+        Local files are listed individually. Changes to catalog-only files,
+        such as those of a remote template, are summarized per template.
+        Their absent or downloaded copies are never reported as deleted,
+        modified, or untracked.
+
         Args:
             self: Repository instance.
 
         Returns:
             dict[str, object]: Status summary including:
             - branch (str)
-            - staged changes (dict)
+            - staged changes (dict), with per-template ``catalog`` summaries
             - worktree changes (dict)
             - untracked files (list[str])
         """
         head_state = load_head_state(self)
-        head_map = manifest_map(head_state)
-        staged_map = manifest_map(self.state)
+        head_rows = catalog_map(head_state)
+        staged_rows = catalog_map(self.state)
+        head_map = {path: row_fingerprint(row.record)
+                    for path, row in head_rows.items() if row.local}
+        staged_map = {path: row_fingerprint(row.record)
+                      for path, row in staged_rows.items() if row.local}
         state_changes = sorted({
             diff.a_path or diff.b_path
             for diff in self.dothm.index.diff("HEAD")
@@ -375,18 +509,20 @@ class Repo:
 
         worktree_modified: list[str] = []
         worktree_deleted: list[str] = []
-        staged_paths = set(staged_map)
 
         # If the repository has a worktree, check for modified and missing tracked files
         if self.worktree is not None:
-            worktree_modified, worktree_deleted = worktree_changes(self, staged_map)
+            local_checksums = {path: str(row.record["sha1"])
+                               for path, row in staged_rows.items() if row.local}
+            worktree_modified, worktree_deleted = worktree_changes(
+                self, local_checksums)
             worktree_root = Path(self.worktree)
             # generator that yields relative paths of all files in the worktree
             worktree_files = (full_path.relative_to(worktree_root).as_posix()
                               for full_path in iter_repository_files(worktree_root))
-            # filter out staged paths from the worktree files
+            # cataloged files, including downloaded copies, are not untracked
             untracked = sorted(path for path in worktree_files
-                               if path not in staged_paths)
+                               if path not in staged_rows)
         else:
             untracked = []
 
@@ -397,6 +533,7 @@ class Repo:
                 "added": staged_added,
                 "modified": staged_modified,
                 "deleted": staged_deleted,
+                "catalog": _catalog_changes(head_state, self.state),
             },
             "worktree": {
                 "modified": sorted(worktree_modified),
@@ -405,60 +542,246 @@ class Repo:
             "untracked": untracked,
         }
 
-    def add(self, fmt: str, encoding: bool = False) -> ParaFrame:
+    def add(self, fmt: str, encoding: bool = False, *,
+            dry_run: bool = False, progress=False, backend: Optional[str] = None,
+            backend_options: Optional[dict] = None) -> ParaFrame:
         '''
-        Stage files or updated repository indecing from the worktree.
+        Stage the files matching a template, or rescan the tracked templates.
+
+        A new template becomes another data entry with its own catalog table;
+        existing templates are kept. Adding a tracked template again merges
+        its current files. ``"."`` rescans every local template within the
+        current directory, dropping rows of files that no longer exist there.
+
+        A URL template such as ``https://host/ER2/{src}_{day}.h5`` catalogs
+        the matching remote files without downloading them. The URL up to the
+        first segment with a field is recorded on the data entry. Adding the
+        URL template again syncs it with the remote directory.
 
         Args:
-            fmt (string): Format string or "." for full directory scan.
+            fmt (string): Format string, URL template, or "." for full
+                directory scan.
             encoding (boolean): Whether to apply encoding rules.
+            dry_run (boolean): List matching files without hashing or staging.
+            progress (bool | callable): Display remote discovery progress or
+                receive updates.
+            backend (str, optional): Registered backend for a URL template.
+            backend_options (dict, optional): Backend configuration for a URL
+                template.
         Returns:
             paraframe Parsed and filtered file index (without checksums).
+        Raises:
+            ValueError: If the template is invalid, matches no files when new,
+                or matches files tracked by another template.
+            RuntimeError: If a local template is added to a repository without
+                a worktree.
+            DownloadError: If remote discovery fails.
         '''
+        if is_remote_url(fmt):
+            if encoding:
+                raise ValueError("--regex encoding rules apply to local files only")
+            from .repo_remote import add_remote_template
+
+            return add_remote_template(
+                self, fmt, dry_run=dry_run, progress=progress, backend=backend,
+                backend_options=backend_options)
+        if backend is not None or backend_options is not None:
+            raise ValueError("backend options apply to URL templates only")
         if self.worktree is None:
             raise RuntimeError(
                 "cannot add files in a bare repository without a worktree")
 
         # Normalize the format string to ensure it is a non-empty string
         fmt = normalize_nonempty_string(fmt, label="format")
-        # "." means rescan the whole worktree using the already-configured format
-        rescanning = fmt == "."
-        # use the current branch format; otherwise, use the provided format
-        if rescanning:
-            resolved_fmt = branch_fmt(self)
-            previous_fmt = resolved_fmt
-        else:
-            resolved_fmt = fmt
-            try:
-                previous_fmt = branch_fmt(self)
-            except RuntimeError:
-                previous_fmt = None
+        # "." means rescan the worktree using the already-configured templates
+        if fmt == ".":
+            return self._rescan_local(encoding=encoding, dry_run=dry_run)
+
+        check_template_fields(fmt)
+        config = self.state.config
+        entry = find_entry(config, fmt)
+        if entry is not None and entry.is_remote:
+            raise ValueError(
+                f"template {fmt!r} is tracked from a remote URL; run "
+                f"hallmark rm --cached {fmt!r} before adding local files")
+        encodings = None
+        if encoding:
+            spec = (config["data"][entry.index] if entry is not None
+                    else _encoding_spec(config))
+            encodings = entry_encodings(spec, fmt)
         # with the working directory set to the worktree, parse files into a ParaFrame
         with chdir(self.worktree):
             pf = ParaFrame.parse(
-                resolved_fmt,
+                fmt,
                 base_path=self.worktree,
-                encodings=branch_encodings(self) if encoding else None,
+                encodings=encodings,
                 encoding=encoding)
-        # if rescanning, filter to include only files that match the configured format
-        if rescanning:
-            pf = filtered_paraframe(self, pf)
+        if dry_run:
+            return pf
+        if entry is None:
+            # like git add, a new pathspec must match something
+            if pf.empty:
+                raise ValueError(f"template {fmt!r} did not match any files")
+            self._check_ownership(fmt, pf["path"])
         # Compute checksums for all files in the ParaFrame in parallel
         self._populate_checksums(pf)
-
-        manifest = manifest_frame_from_pf(pf, resolved_fmt)
-        # if not rescanning, update the repository configuration with the new format
-        if not rescanning:
-            set_config(self, fmt=resolved_fmt)
-        # an explicit fmt replaces only if the format actually changed
-        if rescanning or previous_fmt != resolved_fmt:
-            self.state.replace(manifest)
-        # if the format is unchanged, update the existing state with new entries
+        manifest = manifest_frame_from_pf(pf, fmt)
+        if entry is None:
+            db = next_db_name(config, used=self._used_table_names())
+            add_entry(config, {"fmt": fmt, **({"db": db} if db != DEFAULT_DB else {})})
+            self.state.replace(manifest, db=db)
+        # adding a tracked template again merges its current files
         else:
-            self.state.update(manifest)
+            self.state.update(manifest, db=entry.db)
         self.dothm.dump(self.state)
         # return a ParaFrame without the "sha1" column for display purposes
         return pf.drop(columns=["sha1"], errors="ignore")
+
+    def _rescan_local(self, *, encoding: bool, dry_run: bool) -> ParaFrame:
+        """
+        Used by add.
+        Rescan every local template within the current directory's subtree.
+
+        Rows of files outside the subtree are kept. Files cataloged by a remote
+        template, such as downloaded copies, are skipped.
+
+        Args:
+            encoding (bool): Apply the encoding rules of templates defining them.
+            dry_run (bool): List matching files without hashing or staging.
+
+        Returns:
+            ParaFrame: The matching files of every local template.
+
+        Raises:
+            RuntimeError: If no local template is tracked.
+            ValueError: If a file matches more than one local template.
+        """
+        config = self.state.config
+        local = [entries[0] for name, entries in table_groups(config).items()
+                 if is_local_table(entries, self.state.table(name))]
+        if not local:
+            raise RuntimeError(
+                "no local templates to rescan; run hallmark add TEMPLATE first")
+        with_encodings = [entry for entry in local
+                          if entry_encodings(config["data"][entry.index], entry.fmt)]
+        if encoding and not with_encodings:
+            raise ValueError("no encoding rules are configured; use hallmark "
+                             "set-config --encoding FIELD=REGEX")
+        worktree = Path(self.worktree).resolve()
+        relative_root = effective_cwd(self).relative_to(worktree)
+        catalog_only = {row.path for row in iter_catalog_rows(self.state, local=False)}
+
+        def within_root(path) -> bool:
+            return relative_root == Path(".") or relative_root in Path(path).parents
+
+        scans, claimed = [], {}
+        for entry in local:
+            use_encoding = encoding and entry in with_encodings
+            with chdir(self.worktree):
+                pf = ParaFrame.parse(
+                    entry.fmt, base_path=self.worktree,
+                    encodings=(entry_encodings(config["data"][entry.index], entry.fmt)
+                               if use_encoding else None),
+                    encoding=use_encoding)
+            if not pf.empty:
+                pf = pf[pf["path"].map(within_root) & ~pf["path"].isin(catalog_only)]
+            for path in pf["path"] if not pf.empty else ():
+                if path in claimed:
+                    raise ValueError(
+                        f'"{path}" matches templates {claimed[path]!r} and '
+                        f"{entry.fmt!r}; use more specific templates")
+                claimed[path] = entry.fmt
+            scans.append((entry, pf))
+        frames = [pf for _, pf in scans if not pf.empty]
+        combined = (ParaFrame(pd.concat(frames, ignore_index=True)) if frames
+                    else ParaFrame(columns=["path"]))
+        if dry_run:
+            return combined
+        for entry, pf in scans:
+            self._populate_checksums(pf)
+            manifest = manifest_frame_from_pf(pf, entry.fmt)
+            if relative_root != Path("."):
+                # keep rows of files outside the rescanned subtree
+                kept = [record for record in
+                        self.state.table(entry.db).to_dict(orient="records")
+                        if not _row_within(record, entry.fmt, within_root)]
+                manifest = pd.concat([pd.DataFrame(kept, columns=manifest.columns),
+                                      manifest], ignore_index=True)
+            self.state.replace(manifest, db=entry.db)
+        self.dothm.dump(self.state)
+        return combined.drop(columns=["sha1"], errors="ignore")
+
+    def _check_ownership(self, fmt: str, paths) -> None:
+        """
+        Used by add.
+        Reject a new template that matches files tracked by another template.
+
+        Args:
+            fmt (str): The new template.
+            paths: Relative POSIX paths the template matches.
+
+        Raises:
+            ValueError: If any path is already cataloged.
+        """
+        owned = catalog_map(self.state)
+        overlap = sorted(path for path in set(paths) if path in owned)
+        if overlap:
+            shown = ", ".join(overlap[:5])
+            more = f" and {len(overlap) - 5} more" if len(overlap) > 5 else ""
+            raise ValueError(
+                f"template {fmt!r} matches files tracked by another template "
+                f"({shown}{more}); use a more specific template or run "
+                "hallmark rm --cached TEMPLATE first")
+
+    def _used_table_names(self) -> set[str]:
+        """
+        Used by add.
+        Return catalog TSV names present now or at any point in history, so a
+        new template never reuses the history of a removed one.
+        """
+        names = {path.name for path in self.dothm.path.glob("*.tsv")}
+        try:
+            history = self.dothm.git.log(
+                "--all", "--format=", "--name-only", "--", "*.tsv")
+        # a repository without commits has no history to consult
+        except GitCommandError:
+            history = ""
+        names.update(line.strip() for line in history.splitlines() if line.strip())
+        return names
+
+    def rm_cached(self, template: str) -> CatalogEntry:
+        '''
+        Stop tracking a template without deleting any files, like
+        ``git rm --cached``.
+
+        Args:
+            template (str): The tracked template, or a remote template's full
+                URL template.
+
+        Returns:
+            CatalogEntry: The removed entry.
+
+        Raises:
+            ValueError: If the template is not tracked or shares its catalog
+                table with another template.
+        '''
+        template = normalize_nonempty_string(template, label="template")
+        entries = catalog_entries(self.state.config)
+        entry = next((candidate for candidate in entries
+                      if template in _entry_names(candidate)), None)
+        if entry is None:
+            tracked = ", ".join(repr(candidate.fmt) for candidate in entries
+                                if candidate.fmt) or "none"
+            raise ValueError(
+                f"template {template!r} is not tracked; tracked templates: {tracked}")
+        if any(other.db == entry.db for other in entries if other is not entry):
+            raise ValueError(
+                f"template {entry.fmt!r} shares its catalog table {entry.db} with "
+                "another template; edit config.yml to remove it")
+        remove_entry(self.state.config, entry.index)
+        self.state.drop_table(entry.db)
+        self.dothm.dump(self.state)
+        return entry
 
     def commit(self, msg: str, allow_empty: bool = False) -> bool:
         '''
@@ -477,27 +800,19 @@ class Repo:
         if (not allow_empty and not self.dothm.index.diff("HEAD")):
             # return early since there are no changes to commit
             return False
-        # get the current format string and the HEAD state of the repository
-        current_fmt = branch_fmt(self)
         head_state = load_head_state(self)
-        # get the format string of the HEAD state for comparison
-        head_fmt = single_data_fmt(head_state.config)
-        # head entries are the set of (path, sha1) tuples from the HEAD state
-        head_entries: set[tuple[Path, str]] = set()
-
-        if head_fmt == current_fmt:
-            # populate head_entries with the paths and checksums from the HEAD state
-            head_entries = {(relative_path, checksum.lower())
-                            for relative_path, checksum
-                            in iter_manifest_entries(head_state, fmt=head_fmt)}
+        # head entries are the set of (path, sha1) tuples of HEAD's local files
+        head_entries = {(row.path, str(row.record["sha1"]).lower())
+                        for row in iter_catalog_rows(head_state, local=True)}
 
         # list of tuples containing (full path, expected sha1) for stored files
         files_to_store: list[tuple[Path, str]] = []
-        # for each entry in the current manifest
-        for relative_path, checksum in iter_manifest_entries(
-                                        self.state, fmt=current_fmt):
+        # for each local file in the current catalog; catalog-only files, such
+        # as remote files, are committed as metadata without objects
+        for row in iter_catalog_rows(self.state, local=True):
+            relative_path = row.path
             # get the expected SHA1 checksum for the file
-            expected_sha1 = checksum.lower()
+            expected_sha1 = str(row.record["sha1"]).lower()
             # current_entry is a tuple of (relative path, expected sha1) for this file
             current_entry = (relative_path, expected_sha1)
             # if the manifest entry is not in the HEAD entries
@@ -577,18 +892,24 @@ class Repo:
         create_new_branch = not has_local and not has_remote
         current_tracked = tracked_paths(self)
         target_state = load_branch_data(self, target_branch)
-        # Get the data format string for the target branch configuration
-        target_fmt = single_data_fmt(target_state.config)
-        if target_fmt is None:
-            # Raise an error if the target branch does not meet the expected criteria
-            raise CheckoutError(
-                "checkout currently supports only repositories with "
-                "one data format and data.tsv")
 
-        # list of (relative path, sha1) tuples for all entries in the target branch
-        target_entries_raw = list(iter_manifest_entries(target_state, fmt=target_fmt))
+        # checkout restores and removes local files only; catalog-only files,
+        # such as downloaded copies of remote files, are left in place
+        try:
+            target_rows = list(iter_catalog_rows(target_state))
+            current_rows = list(iter_catalog_rows(self.state))
+        except ValueError as exc:
+            raise CheckoutError(str(exc)) from exc
+        # list of (relative path, sha1) tuples for the target branch's local files
+        target_entries_raw = [(Path(row.path), str(row.record["sha1"]))
+                              for row in target_rows if row.local]
         # get the set of relative paths for all tracked files in the target branch
         target_tracked = {path for path, _ in target_entries_raw}
+        # the target's catalog-only files and the current branch's downloaded copies
+        target_catalog_sha = {Path(row.path): str(row.record.get("sha1", "")).lower()
+                              for row in target_rows if not row.local}
+        current_catalog_only = {Path(row.path) for row in current_rows
+                                if not row.local}
 
         # try to identify any missing objects in the target branch that are not present
         # in the object store
@@ -645,18 +966,26 @@ class Repo:
             for (rel_path, full_path, expected_sha1) in conflict_candidates:
                 # if the computed checksum does not match the expected checksum
                 if (conflict_checksums[full_path] != expected_sha1):
+                    if rel_path in current_catalog_only:
+                        raise CheckoutError(
+                            f'target tracked path "{rel_path}" conflicts with '
+                            "a downloaded copy cataloged by the current branch")
                     raise CheckoutError(
                         f'target tracked path "{rel_path}" '
                         "already exists as an untracked file")
 
         # Store the name of the currently active branch before switching
         original_branch = self.dothm.active_branch.name
-        # Get the current format string from the branch configuration
-        current_fmt = branch_fmt(self)
-        # Create a mapping of current tracked paths to their SHA1 checksums
+        # Create a mapping of current local tracked paths to their SHA1 checksums
         current_sha_by_path = {
-            row_to_path(row, current_fmt): str(row["sha1"]).lower()
-            for _, row in self.state.data.iterrows()}
+            Path(row.path): str(row.record["sha1"]).lower()
+            for row in current_rows if row.local}
+        # a local file that the target catalogs remotely with the same content
+        # stays in place instead of being removed and downloaded again
+        kept_paths = {
+            path for path in current_tracked - target_tracked
+            if target_catalog_sha.get(path)
+            and target_catalog_sha[path] == current_sha_by_path.get(path)}
         # tuples of (relative path, sha1) for all files in the target branch
         target_entries = [(path, sha1.lower()) for path, sha1 in target_entries_raw]
         # changed_target_entries are the files in the target branch that have different
@@ -727,7 +1056,7 @@ class Repo:
                 # paths that are either currently tracked but not in the target branch
                 # or paths that are tracked but have changed from the current branch
                 affected_paths = sorted((current_tracked - target_tracked
-                                         ) | changed_target_paths,
+                                         - kept_paths) | changed_target_paths,
                     key=lambda path: (len(path.parts), path.as_posix()), reverse=True)
                 for relative_path in affected_paths:
                     # absolute path in the worktree for the affected relative path
@@ -858,13 +1187,10 @@ class Repo:
         else:
             target_state = load_head_state(self)
 
-        # get the target fmt from the target branch configuration
-        target_fmt = single_data_fmt(target_state.config)
-        # if target branch does not have exactly one data format, raise a RuntimeError
-        if target_fmt is None:
-            raise RuntimeError(
-                "add_worktree requires exactly one data entry "
-                "with a non-empty fmt")
+        # the new worktree receives the target's local files; catalog-only
+        # files, such as remote files, are downloaded separately
+        target_local = [(row.path, str(row.record["sha1"]))
+                        for row in iter_catalog_rows(target_state, local=True)]
 
         # if the target worktree does not exist
         if not target_dothm.exists():
@@ -872,7 +1198,7 @@ class Repo:
             # the object store
             try:
                 missing_objects = self.objects.missing(
-                    row["sha1"] for _, row in target_state.data.iterrows())
+                    sha1 for _, sha1 in target_local)
             # if a ValueError occurs during object existence check, raise cleanly
             except ValueError as exc:
                 raise FileNotFoundError(str(exc)) from exc
@@ -901,8 +1227,7 @@ class Repo:
 
             # iterate over the target state data and restore files from the object store
             try:
-                for _, row in target_state.data.iterrows():
-                    rel_path = row_to_path(row, target_fmt)
+                for rel_path, sha1 in target_local:
                     # resolve relative path to an absolute path in the target worktree
                     destination = resolve_contained_path(
                         target,
@@ -911,7 +1236,7 @@ class Repo:
                     # ensure the parent directory exists before restoring the file
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     # restore the file from the object store using its SHA-1 checksum
-                    self.objects.restore(row["sha1"], destination)
+                    self.objects.restore(sha1, destination)
 
             # if any exception occurs during file restoration, attempt a clean up
             except Exception as exc:

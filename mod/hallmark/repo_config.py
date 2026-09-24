@@ -7,27 +7,41 @@ updating repository configuration values stored in ``config.yml``.
 
 from __future__ import annotations
 
+import re
+from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
 from string import Formatter
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 from .helper_functions import (
     as_list_of_dicts, coerce_fmt_value, normalize_nonempty_string,
     validate_path_component, validate_relative_path)
+from .state import DEFAULT_DB, METADATA_COLUMNS
+
+from .transport.base import (
+    RemoteSpec, backend_name, reject_controls, thaw_backend_options)
+
 
 def _update_remote_config(
     config: dict,
     remote_name: Optional[str],
     remote_url: Optional[str],
+    remote_backend: Optional[str] = None,
+    remote_backend_options=None,
     ) -> None:
     """
     Used by set_config.
-    Update the repository configuration with a new remote name and/or URL.
+    Update the repository data remote and its transport configuration.
 
     Args:
         config (dict): The repository configuration dictionary.
         remote_name (str, optional): New remote repository name.
         remote_url (str, optional): New remote repository URL.
+        remote_backend (str, optional): Registered backend name. An empty string
+            restores automatic selection; None leaves it unchanged.
+        remote_backend_options (mapping, optional): Replace backend options.
+            An empty mapping clears options; None leaves them unchanged.
 
     Raises:
         ValueError: If the remote configuration is invalid or if the specified
@@ -81,6 +95,13 @@ def _update_remote_config(
         selected["name"] = remote_name
     if remote_url is not None:
         selected["url"] = remote_url
+    if remote_backend == "":
+        selected.pop("backend", None)
+    elif remote_backend is not None:
+        selected["backend"] = backend_name(remote_backend)
+    if remote_backend_options is not None:
+        selected["backend_options"] = thaw_backend_options(
+            remote_backend_options)
     # normalize the remotes configuration to ensure it is a list of dictionaries
     normalized = normalize_remotes(remotes)
     # if preserve_list is True, store the normalized list;
@@ -156,6 +177,26 @@ def normalize_remotes(remotes) -> list[dict]:
         else:
             raise ValueError(f"remote {index} must be a string or dictionary")
 
+        if "auth" in entry:
+            raise ValueError(
+                "Hallmark auth profiles have been removed. Configure the host in "
+                "~/.ssh/config, use its alias in the remote URL, and remove the "
+                "obsolete auth field from config.yml.")
+        if set(entry) - {"name", "url", "backend", "backend_options"}:
+            raise ValueError(
+                "Remote entries support only name, url, backend and "
+                "backend_options fields")
+        if "backend" in entry:
+            entry["backend"] = backend_name(entry["backend"])
+        if "backend_options" in entry:
+            entry["backend_options"] = thaw_backend_options(
+                entry["backend_options"])
+        if isinstance(entry.get("url"), str):
+            reject_controls(entry["url"], "Remote URL")
+            # allow names without URLs while configuring a data remote
+            RemoteSpec.parse(
+                entry["url"], backend=entry.get("backend"),
+                backend_options=entry.get("backend_options"))
         # for each required key ("name" and "url"), validate that it exists
         for key in ("name", "url"):
             # if the key is not present in the entry, skip to the next key
@@ -254,12 +295,285 @@ def single_data_fmt(config: dict) -> Optional[str]:
     return fmt.strip()
 
 
+# Template fields that would collide with catalog columns. The checksum
+# algorithm names are read as digests when a download plan is built.
+RESERVED_FIELDS = frozenset(
+    {"path", "sha1", "md5", "sha256", "sha512", *METADATA_COLUMNS})
+
+
+def check_template_fields(fmt: str) -> list[str]:
+    """
+    Validate the field names of a filename template.
+
+    Args:
+        fmt (str): Filename template.
+
+    Returns:
+        list[str]: Unique field names in the order they appear.
+
+    Raises:
+        ValueError: If a field name is reserved catalog metadata.
+    """
+    fields = fmt_fields(fmt)
+    reserved = [name for name in fields if name in RESERVED_FIELDS]
+    if reserved:
+        raise ValueError(
+            f"Template field {reserved[0]!r} is reserved catalog metadata")
+    return fields
+
+
+@dataclass(frozen=True)
+class CatalogEntry:
+    """
+    A data entry that owns a catalog table.
+
+    Attributes:
+        index (int): Position of the entry in the config ``data`` list.
+        fmt (str, optional): Filename template relative to the worktree, or to
+            ``url`` for a remote entry. Builder path catalogs may omit it.
+        db (str): TSV name of the entry's catalog table.
+        url (str, optional): Remote directory the template is relative to.
+            Entries without a URL describe files in the worktree.
+        backend (str, optional): Registered transport backend for ``url``.
+        backend_options (dict, optional): Backend-specific configuration.
+    """
+
+    index: int
+    fmt: Optional[str]
+    db: str
+    url: Optional[str] = None
+    backend: Optional[str] = None
+    backend_options: Optional[dict] = field(default=None, hash=False, compare=False)
+
+    @property
+    def is_remote(self) -> bool:
+        """True when the entry catalogs files at a remote URL."""
+        return bool(self.url)
+
+
+def _data_entry_list(config) -> list:
+    """Return the config ``data`` section as a list, or an empty list."""
+    if not isinstance(config, dict):
+        return []
+    return as_list_of_dicts(config.get("data")) or []
+
+
+def is_placeholder(entry) -> bool:
+    """
+    Return True for a data entry that does not catalog files yet, such as the
+    ``encoding`` placeholder written by ``hallmark init``.
+    """
+    return isinstance(entry, dict) and not {"fmt", "url", "file", "db"} & set(entry)
+
+
+def _entry_fmt(entry: dict) -> Optional[str]:
+    """Return an entry's stripped template, or None if it has none."""
+    fmt = entry.get("fmt")
+    return fmt.strip() if isinstance(fmt, str) and fmt.strip() else None
+
+
+def catalog_entries(config) -> list[CatalogEntry]:
+    """
+    Return the data entries that own catalog tables, in config order.
+
+    Placeholders, static ``file`` entries and entries that are not mappings
+    are skipped. An entry without an explicit ``db`` uses ``data.tsv``.
+
+    Args:
+        config (dict): The repository configuration dictionary.
+
+    Returns:
+        list[CatalogEntry]: The catalog entries.
+
+    Raises:
+        ValueError: If the data section is malformed or an entry names an
+            invalid TSV.
+    """
+    data = config.get("data") if isinstance(config, dict) else None
+    if data is not None and as_list_of_dicts(data) is None:
+        raise ValueError('config "data" must be a mapping or list of mappings')
+    entries = []
+    for index, entry in enumerate(_data_entry_list(config)):
+        if not isinstance(entry, dict):
+            continue
+        fmt = _entry_fmt(entry)
+        if fmt is None and not entry.get("db"):
+            continue
+        url = entry.get("url")
+        entries.append(CatalogEntry(
+            index=index,
+            fmt=fmt,
+            db=normalize_tsv_name(entry["db"]) if entry.get("db") else DEFAULT_DB,
+            url=url if isinstance(url, str) and url else None,
+            backend=entry.get("backend"),
+            backend_options=entry.get("backend_options")))
+    return entries
+
+
+def catalog_table_names(config) -> list[str]:
+    """
+    Return the TSV names referenced by catalog entries, skipping invalid names.
+
+    Used when loading a repository, before any operation validates the
+    configuration.
+
+    Args:
+        config (dict): The repository configuration dictionary.
+
+    Returns:
+        list[str]: Unique TSV names in config order.
+    """
+    names = []
+    for entry in _data_entry_list(config):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("db"):
+            try:
+                name = normalize_tsv_name(entry["db"])
+            except ValueError:
+                continue
+        elif _entry_fmt(entry) is not None:
+            name = DEFAULT_DB
+        else:
+            continue
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def find_entry(config, fmt: str) -> Optional[CatalogEntry]:
+    """
+    Return the catalog entry whose template is ``fmt``.
+
+    Args:
+        config (dict): The repository configuration dictionary.
+        fmt (str): Filename template.
+
+    Returns:
+        CatalogEntry | None: The matching entry, or None.
+    """
+    return next((entry for entry in catalog_entries(config) if entry.fmt == fmt),
+                None)
+
+
+def next_db_name(config, used: Iterable[str] = ()) -> str:
+    """
+    Choose the TSV name for a new data entry.
+
+    The first entry uses ``data.tsv``. Later entries use ``data-N.tsv`` with a
+    number larger than any in the config or in ``used``, so a removed table's
+    history is not reused by a different template.
+
+    Args:
+        config (dict): The repository configuration dictionary.
+        used (Iterable[str]): TSV names used previously, such as in history.
+
+    Returns:
+        str: The TSV name for the new entry.
+    """
+    entries = catalog_entries(config)
+    if all(entry.db != DEFAULT_DB for entry in entries):
+        return DEFAULT_DB
+    numbers = [1]
+    for name in [*(entry.db for entry in entries), *used]:
+        match = re.fullmatch(r"data-(\d+)\.tsv", str(name), flags=re.IGNORECASE)
+        if match:
+            numbers.append(int(match.group(1)))
+    return f"data-{max(numbers) + 1}.tsv"
+
+
+def add_entry(config: dict, entry: dict) -> int:
+    """
+    Add a data entry to the configuration.
+
+    The first entry fills the placeholder written by ``hallmark init`` so that
+    single-template repositories keep their existing layout. Later entries are
+    appended.
+
+    Args:
+        config (dict): The repository configuration dictionary, updated in place.
+        entry (dict): The new data entry.
+
+    Returns:
+        int: The entry's position in the config ``data`` list.
+
+    Raises:
+        ValueError: If the config ``data`` section is malformed.
+    """
+    data = config.get("data")
+    entries = [] if data is None else as_list_of_dicts(data)
+    if entries is None:
+        raise ValueError('config "data" must be a mapping or list of mappings')
+    entries = list(entries)
+    config["data"] = entries
+    if not catalog_entries(config):
+        for index, existing in enumerate(entries):
+            if is_placeholder(existing):
+                merged = dict(entry)
+                for key, value in existing.items():
+                    # a remote entry has no use for an empty encoding placeholder
+                    if key in merged or (entry.get("url") and value is None):
+                        continue
+                    merged[key] = value
+                entries[index] = merged
+                return index
+    entries.append(entry)
+    return len(entries) - 1
+
+
+def remove_entry(config: dict, index: int) -> dict:
+    """
+    Remove a data entry from the configuration.
+
+    Args:
+        config (dict): The repository configuration dictionary, updated in place.
+        index (int): The entry's position in the config ``data`` list.
+
+    Returns:
+        dict: The removed entry.
+    """
+    entries = list(_data_entry_list(config))
+    removed = entries.pop(index)
+    config["data"] = entries
+    return removed
+
+
+def sole_data_spec(config: dict, *, create: bool = False) -> Optional[dict]:
+    """
+    Return the data entry that single-template settings apply to.
+
+    This is the only catalog entry, or the placeholder when there is none.
+
+    Args:
+        config (dict): The repository configuration dictionary.
+        create (bool): Add an empty entry when none exists. Defaults to False.
+
+    Returns:
+        dict | None: The data entry, or None when none exists and ``create``
+        is False.
+
+    Raises:
+        RuntimeError: If the branch has more than one catalog entry.
+    """
+    entries = catalog_entries(config)
+    if len(entries) > 1:
+        raise RuntimeError(
+            "this branch tracks several templates; use hallmark add TEMPLATE or "
+            "hallmark rm --cached TEMPLATE instead of changing config.yml")
+    data = _data_entry_list(config)
+    if entries:
+        return data[entries[0].index]
+    placeholder = next((entry for entry in data if is_placeholder(entry)), None)
+    if placeholder is not None or not create:
+        return placeholder
+    config["data"] = [*data, {}]
+    return config["data"][-1]
+
+
 def get_or_create_branch_data_spec(config: dict) -> dict:
     """
-    Ensure the configuration contains a valid data specification.
-
-    If the ``data`` entry is missing or malformed, it is initialized with
-    a single empty dictionary.
+    Ensure the configuration contains a data specification for single-template
+    settings and return it.
 
     Args:
         config (dict): Repository configuration.
@@ -267,20 +581,13 @@ def get_or_create_branch_data_spec(config: dict) -> dict:
     Returns:
         dict: The branch data specification.
     """
-    # get the "data" section from the configuration
-    data = config.get("data")
-    # if "data" already defines exactly one dictionary entry, use it as-is
-    if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict):
-        return data[0]
-    # otherwise (missing, empty, or malformed), initialize it with a single empty dict
-    config["data"] = [{}]
-    return config["data"][0]
+    return sole_data_spec(config, create=True)
 
 
 def require_branch_data_spec(repo) -> dict:
     """
-    Return the branch data specification. Raises RuntimeError if
-    the configuration does not define exactly one entry under ``data``.
+    Return the branch data specification. Raises RuntimeError if the
+    configuration defines no data entry or several catalog entries.
 
     Args:
         repo: Repository object.
@@ -288,30 +595,11 @@ def require_branch_data_spec(repo) -> dict:
     Returns:
         dict: The branch data specification.
     """
-    # call the helper function to get the single data specification from the config
-    spec = _data_spec_or_none(repo.state.config)
-    # raise a RuntimeError if there is no valid single data specification
+    spec = sole_data_spec(repo.state.config)
     if spec is None:
         raise RuntimeError(
-            'branch config must define exactly one entry under "data" in config.yml')
+            'branch config must define an entry under "data" in config.yml')
     return spec
-
-
-def branch_fmt(repo) -> str:
-    """
-    Return the configured filename format. Raises RuntimeError if
-    no valid format string is defined.
-
-    Args:
-        repo: Repository object.
-
-    Returns:
-        str: The format string stored in ``data[0].fmt``.
-    """
-    return normalize_nonempty_string(
-        require_branch_data_spec(repo).get("fmt"),
-        label="branch data[0].fmt",
-        exception_type=RuntimeError)
 
 
 def set_config(
@@ -321,6 +609,8 @@ def set_config(
     remote_name: Optional[str] = None,
     remote_url: Optional[str] = None,
     encoding_updates: Optional[Dict[str, str]] = None,
+    remote_backend: Optional[str] = None,
+    remote_backend_options=None,
 ) -> dict:
     """
     Update the repository configuration.
@@ -333,13 +623,17 @@ def set_config(
         fmt (str, optional): Filename format.
         remote_name (str, optional): Remote repository name.
         remote_url (str, optional): Remote repository URL.
+        remote_backend (str, optional): Registered backend name. An empty string
+            restores automatic selection; None leaves it unchanged.
+        remote_backend_options (mapping, optional): Replace backend options.
+            An empty mapping clears options; None leaves them unchanged.
         encoding_updates (dict, optional): Encoding values to merge into
             the existing configuration.
 
     Returns:
         dict: The updated configuration.
     """
-    config = repo.state.config
+    config = deepcopy(repo.state.config)
     # raise a ValueError if the provided config is not a dictionary
     if not isinstance(config, dict):
         raise ValueError("repository config must be a mapping")
@@ -374,12 +668,18 @@ def set_config(
         remote_name = normalize_nonempty_string(remote_name, label="remote_name")
     # if a new remote URL is provided, validate that it is a non-empty string
     if remote_url is not None:
+        if isinstance(remote_url, str):
+            reject_controls(remote_url, "Remote URL")
         remote_url = normalize_nonempty_string(remote_url, label="remote_url")
 
     # if a new format string or encoding updates are provided
     if fmt is not None or encoding_updates is not None:
-        # ensure that the "data" section has exactly one entry and retrieve it
-        spec = get_or_create_branch_data_spec(config)
+        # retrieve the only data entry; several templates cannot share settings
+        spec = sole_data_spec(config, create=True)
+        if fmt is not None and spec.get("url"):
+            raise ValueError(
+                "cannot change the template of a remote entry; run "
+                "hallmark add URL/TEMPLATE instead")
         updated_spec = {}
         # if a new format string is provided, update the "fmt" key in the spec
         if fmt is not None:
@@ -407,29 +707,38 @@ def set_config(
             # exclude "fmt" and "encoding" keys since they are already handled
             if key not in {"fmt", "encoding"}:
                 updated_spec[key] = value
-        # update the first entry in the "data" list of the configuration
-        config["data"][0] = updated_spec
+        # replace the entry at its position in the "data" list
+        index = next(position for position, entry in enumerate(config["data"])
+                     if entry is spec)
+        config["data"][index] = updated_spec
 
-    # if a new remote name or URL is provided, update the remote configuration
-    if remote_name is not None or remote_url is not None:
-        _update_remote_config(config, remote_name, remote_url)
+    # update the remote when its name, URL, or transport configuration changes
+    if any(value is not None for value in (
+            remote_name, remote_url,
+            remote_backend, remote_backend_options)):
+        _update_remote_config(config, remote_name, remote_url,
+                              remote_backend, remote_backend_options)
 
+    repo.state.config = config
     return config
 
 
-def branch_encodings(repo) -> list[dict]:
+def entry_encodings(spec: Optional[dict], fmt: str) -> list[dict]:
     """
-    Return the configured filename encodings.
+    Return the filename encodings that apply to a template.
 
     Args:
-        repo: Repository object.
+        spec (dict, optional): The data entry or placeholder holding the
+            encoding rules.
+        fmt (str): The template being added.
 
     Returns:
-        list[dict]: A list containing the encoding specification, or an
-        empty list if no encodings are defined.
+        list[dict]: A list containing the encoding specification for ``fmt``,
+        or an empty list if no encodings are defined.
     """
-    spec = require_branch_data_spec(repo)
-    return [spec] if isinstance(spec.get("encoding"), dict) else []
+    if not isinstance(spec, dict) or not isinstance(spec.get("encoding"), dict):
+        return []
+    return [{**spec, "fmt": fmt}]
 
 
 def fmt_fields(fmt: str) -> list[str]:
