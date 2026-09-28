@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from pathlib import Path
 from threading import Event, Lock, local
 
@@ -49,28 +47,6 @@ class OperationContext:
             for session in self._sessions:
                 session.close()
             raise
-        self.backend = self.transport
-
-    @contextmanager
-    def executor(self, max_workers):
-        """
-        Create a worker pool whose tasks share this operation's resources.
-
-        Args:
-            max_workers (int): Maximum concurrent workers.
-
-        Yields:
-            ThreadPoolExecutor: Worker pool. Interrupted work is cancelled
-            before waiting for workers to finish.
-        """
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        try:
-            yield executor
-        except BaseException:
-            self.cancel()
-            raise
-        finally:
-            executor.shutdown(wait=True, cancel_futures=True)
 
     def session(self):
         """Return the reusable HTTP session for the current thread."""

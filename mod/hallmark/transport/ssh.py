@@ -422,6 +422,3 @@ class SshBackend(DataBackend):
         if self._socket_dir is not None:
             self._socket_dir.cleanup()
             self._socket_dir = None
-
-
-SshTransport = SshBackend

@@ -339,10 +339,6 @@ class DataBackend:
         """
         raise NotImplementedError
 
-    def list_entries(self):
-        """Return the relative paths from a recursive directory listing."""
-        return [entry.path for entry in self.iter_entries()]
-
     def iter_entries(self, on_directory=None):
         """
         Yield file metadata from a recursive directory listing.
@@ -379,7 +375,3 @@ class DataBackend:
     def cancel(self):
         """Stop active backend work after the context's cancellation is set."""
         pass
-
-
-# Existing transport imports remain valid for downstream integrations.
-Transport = DataBackend
