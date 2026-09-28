@@ -1,9 +1,6 @@
-"""Public backend registration and multi-server routing without public services."""
+"""Public backend registration without public services."""
 
-from contextlib import contextmanager
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +10,7 @@ from hallmark.remote import backends
 from hallmark.remote.discovery import discover_remote_files
 from hallmark.transport import OperationContext
 from hallmark.transport.base import (
-    CapabilityError, RemoteConfigurationError, RemoteEntry, RemoteSpec, Transport,
+    CapabilityError, RemoteConfigurationError, RemoteEntry, RemoteSpec,
     readonly_backend_options, copy_backend_options,
 )
 
@@ -37,23 +34,16 @@ def test_builtin_detection(url, expected, monkeypatch, tmp_path):
     monkeypatch.delenv("HALLMARK_AUTH_FILE", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     with OperationContext(RemoteSpec.from_url(url)) as context:
-        assert type(context.backend) is expected
-        assert context.backend is context.transport
+        assert type(context.transport) is expected
 
 
-def test_explicit_selection_and_compatibility_aliases():
-    from hallmark.transport.http import HttpTransport
-    from hallmark.transport.ssh import SshTransport
-
-    assert Transport is DataBackend
-    assert HttpTransport is HttpBackend
-    assert SshTransport is SshBackend
+def test_explicit_selection():
     with OperationContext(RemoteSpec.from_url(
             "https://data.cyverse.org/data/", backend="http")) as context:
-        assert type(context.backend) is HttpBackend
+        assert type(context.transport) is HttpBackend
     with OperationContext(RemoteSpec.from_url(
             "https://lab.test/data/", backend="cyverse")) as context:
-        assert type(context.backend) is CyVerseBackend
+        assert type(context.transport) is CyVerseBackend
 
 
 def test_backend_lifecycle_and_generic_discovery(tmp_path):
@@ -85,10 +75,10 @@ def test_backend_lifecycle_and_generic_discovery(tmp_path):
     remote = RemoteSpec.from_url("https://lab.test/", backend="survey")
     with OperationContext(remote) as context:
         context.text_limit = 20
-        context.backend.prepare()
+        context.transport.prepare()
         assert context.read_text("info") == "metadata"
         assert discover_remote_files(context) == [RemoteEntry("tile.fits", size=8)]
-        context.backend.fetch("tile.fits", tmp_path / "payload")
+        context.transport.fetch("tile.fits", tmp_path / "payload")
         assert (tmp_path / "payload").read_bytes() == b"contents"
     assert events == ["prepare", "prepare", "close"]
     with pytest.raises(RuntimeError):
@@ -135,7 +125,7 @@ def test_plugin_loading_is_lazy_and_cached(monkeypatch):
     assert not loaded
     for _ in range(2):
         with OperationContext(remote) as context:
-            assert isinstance(context.backend, HttpBackend)
+            assert isinstance(context.transport, HttpBackend)
     assert loaded == ["survey"]
     with pytest.raises(RemoteConfigurationError, match="already registered"):
         backends.register_backend("survey", HttpBackend)
@@ -255,32 +245,8 @@ def test_cancel_failure_still_closes_resources():
 
     backends.register_backend("broken", BrokenBackend)
     with pytest.raises(RuntimeError, match="cancel failed"):
-        with OperationContext(RemoteSpec.from_url("https://lab.test/", backend="broken")):
+        with OperationContext(
+            RemoteSpec.from_url("https://lab.test/", backend="broken")
+        ):
             raise ValueError("operation failed")
     assert closed == [True]
-
-
-@contextmanager
-def local_server(root, requests):
-    class Handler(SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=str(root), **kwargs)
-
-        def log_message(self, *args):
-            pass
-
-        def do_GET(self):
-            requests.append(self.path)
-            super().do_GET()
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}/"
-    finally:
-        server.shutdown()
-        thread.join()
-        server.server_close()
-
-

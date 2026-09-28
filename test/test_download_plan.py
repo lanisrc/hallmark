@@ -11,10 +11,8 @@ import pytest
 from hallmark.remote.plan import DownloadItem, DownloadPlan
 from hallmark.remote.download import (
     DownloadError,
-    download_remote_data,
     execute_download_plan,
     plan_download,
-    select_download_files,
 )
 
 
@@ -63,8 +61,6 @@ def test_explicit_paths_retain_catalog_checksums_and_metadata(catalog):
     assert plan.items[0].size_bytes == 6
     assert plan.items[1].checksum is None
     assert plan.items[1].size_bytes is None
-    assert select_download_files(catalog, file_paths=["nested/a.fits"]) == [
-        (Path("nested/a.fits"), plan.items[0].checksum)]
 
 
 def test_sizes_survive_nullable_numeric_tsv_serialization(catalog):
@@ -127,8 +123,6 @@ def test_unapproved_execution_never_opens_transport(catalog, monkeypatch, approv
     monkeypatch.setattr("hallmark.remote.download.OperationContext", reject_open)
     with pytest.raises(DownloadError, match="approval"):
         execute_download_plan(catalog, plan, approved=approval)
-    with pytest.raises(DownloadError, match="approval"):
-        download_remote_data(catalog, catalog.worktree, approved=approval)
 
 
 @pytest.mark.parametrize("known_size", [True, False])

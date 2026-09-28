@@ -1,6 +1,6 @@
 """
 A minimal mock of a CyVerse WebDAV directory tree, for testing
-list_remote_files and build_repo without hitting the real network.
+discovery and remote add without hitting the real network.
 """
 from __future__ import annotations
 from urllib.parse import urljoin

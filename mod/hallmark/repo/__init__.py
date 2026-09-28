@@ -27,6 +27,7 @@ from .dothm import Dothm
 from .state import State
 from .worktree import Worktree
 from .objects import Objects
+from ..error import DestinationExistsError
 from ..paraframe import ParaFrame
 from .manifest import build_file_table, file_versions_by_path, iter_manifest_entries
 from .history import load_head_state
@@ -158,60 +159,29 @@ class Repo:
         pf["sha1"] = [checksums[path] for path in full_paths]
 
     @classmethod
-    def init(cls, path: Union[Path, str], *, from_url=None, backend=None,
-             backend_options=None, auth=None, filter=None, fmt=None,
-             download=False, approve=None, progress=False, max_workers=4) -> "Repo":
+    def init(cls, path: Union[Path, str] = ".") -> "Repo":
         """
-        Initialize a local repository, optionally discovering a remote dataset.
+        Initialize an empty local repository.
 
-        Remote discovery reads listings and published checksums without fetching
-        payloads. Existing destination files are preserved; an existing ``.hm``
-        is rejected before contacting the remote dataset.
+        Existing destination files are preserved; an existing ``.hm``
+        is rejected. Initialization does not discover or download data.
 
         Args:
             path (Path | str): Worktree or bare ``.hm`` repository destination.
-            from_url (str, optional): Raw remote dataset to discover_remote_files.
-            backend (str, optional): Registered data backend name.
-            backend_options (dict, optional): Backend-specific configuration.
-            auth (str, optional): Local authentication profile for data access.
-            filter (str | list[str], optional): Relative path glob or globs.
-            fmt (str, optional): Filename format for selection and parameters.
-            download (bool): Request approved downloads after discovery.
-            approve (callable, optional): Callback returning True to approve a plan.
-            progress (bool | callable): Discovery and download progress display.
-            max_workers (int): Maximum download workers. Defaults to 4.
 
         Returns:
-            Repo: Initialized repository, retained if download approval is declined.
+            Repo: Initialized repository.
 
         Raises:
-            DestinationExistsError: If remote initialization would replace a catalog.
-            ValueError: If remote options are supplied without ``from_url``.
-            DownloadError: If discovery fails or download approval is unavailable.
+            DestinationExistsError: If initialization would replace a catalog
+                or follow a destination symlink.
         """
-        from ..remote.clone import initialize_remote
-        from ..remote.download import DownloadError, _require_positive_integer
-
-        _require_positive_integer(max_workers, label="max_workers")
-        if from_url is not None:
-            if download and not callable(approve):
-                raise DownloadError(
-                    "Downloading during init requires an approve(plan) callback")
-            if download and cls.resolve_repo_paths(path)[1] is None:
-                raise DownloadError(
-                    "Initialize a worktree to download; "
-                    "bare catalogs need an output path")
-            repo = initialize_remote(
-                cls, path, from_url, backend=backend, backend_options=backend_options,
-                auth=auth, filter=filter, fmt=fmt, progress=progress)
-            if download:
-                repo._download_after_creation(
-                    approve=approve, max_workers=max_workers, progress=progress)
-            return repo
-        if any(value is not None for value in
-               (backend, backend_options, auth, filter, fmt, approve)) or download:
-            raise ValueError("Remote initialization options require from_url")
+        if Path(path).is_symlink():
+            raise DestinationExistsError(f"Repository destination is a symlink: {path}")
         dothm_path, worktree_path = cls.resolve_repo_paths(path)
+        if dothm_path.exists() or dothm_path.is_symlink():
+            raise DestinationExistsError(
+                f"Hallmark repository already exists: {dothm_path}")
         dothm = Dothm.init(dothm_path)
         (dothm.path / "config.yml").write_text(Dothm.config_template(),
                                                encoding="utf-8")

@@ -154,48 +154,14 @@ def _load_backend_options(path):
     return options
 
 
-@hallmark.command(short_help="Initialize a hallmark repository.")
-@click.argument("path")
-@click.option("--from", "from_url", help="Discover a raw remote dataset.")
-@click.option("--backend", help="Registered data backend name.")
-@click.option("--backend-options", type=click.Path(exists=True, dir_okay=False),
-              help="YAML mapping of backend-specific options.")
-@click.option("--auth", help="Optional local authentication profile for data access.")
-@click.option("--filter", "filters", multiple=True,
-              help="Include paths matching a glob. May be repeated.")
-@click.option("--fmt", help="Select paths and extract filename parameters.")
-@click.option("--with-download", is_flag=True,
-              help="Review and approve a download after catalog creation.")
-@click.option("--max-workers", type=click.IntRange(min=1), default=4,
-              show_default=True)
-def init(path, from_url, backend, backend_options, auth, filters, fmt,
-         with_download, max_workers):
-    """Initialize a hallmark repository at PATH.
-
-    Use --from URL to discover_remote_files a remote dataset without downloading payloads.
-    If PATH ends with `.hm`, a bare repository is created.
-    Otherwise, a `.hm` directory is created inside PATH.
-    """
+@hallmark.command(short_help="Initialize an empty local repository.")
+@click.argument("path", default=".")
+def init(path):
     with _translate_cli_errors(
-        GitError, DownloadError, ValueError, OSError, yaml.YAMLError,
+        GitError, ValueError, OSError,
         prefix=f'Failed to initialize hallmark repository at "{path}"'):
-        options = _load_backend_options(backend_options)
-        if with_download and not from_url:
-            raise ValueError("--with-download requires --from")
-        if with_download and Repo.resolve_repo_paths(path)[1] is None:
-            raise ValueError("Use a worktree destination for --with-download")
-        kwargs = dict(from_url=from_url, backend=backend, backend_options=options,
-                      auth=auth, filter=filters or None, fmt=fmt,
-                      progress=True, max_workers=max_workers)
-        if from_url is None and all(value is None for value in
-                                    (backend, options, auth, filters or None, fmt)):
-            repo = Repo.init(path)
-        else:
-            repo = Repo.init(path, **kwargs)
-        if from_url is not None:
-            click.echo(f'Successfully initialized "{path}"')
-        if with_download:
-            _run_download(repo, repo.plan_download(), max_workers=max_workers)
+        Repo.init(path)
+    click.echo(f'Successfully initialized "{path}"')
 
 
 @hallmark.command(short_help="Show information of the current directory.")

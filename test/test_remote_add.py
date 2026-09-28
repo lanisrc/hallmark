@@ -1,3 +1,5 @@
+from pathlib import Path
+from hallmark.error import DestinationExistsError
 from click.testing import CliRunner
 from hallmark.cli import hallmark
 
@@ -195,4 +197,41 @@ def test_add_cli_forwards_backend_and_selection(monkeypatch, tmp_path):
         "auth": "lab", "backend": "ssh", "backend_options": {"collection": "latest"},
         "filter": ("**/*.fits", "README*"), "remote_fmt": "{name}.fits",
         "progress": True}
+
+
+
+def test_init_is_local_and_never_resets_existing_state(tmp_path, monkeypatch):
+    def fail(*args, **kwargs):
+        raise AssertionError("init must not discover data")
+
+    monkeypatch.setattr("hallmark.remote.add.discover_remote_files", fail)
+    repo = Repo.init(tmp_path / "data")
+    assert repo.state.data.empty
+    assert not repo.objects.root.exists()
+    before = (repo.dothm.path / "config.yml").read_bytes()
+    with pytest.raises(DestinationExistsError):
+        Repo.init(repo.worktree)
+    assert (repo.dothm.path / "config.yml").read_bytes() == before
+    incomplete = tmp_path / "incomplete" / ".hm"
+    incomplete.mkdir(parents=True)
+    with pytest.raises(DestinationExistsError):
+        Repo.init(incomplete.parent)
+
+
+
+def test_cli_init_add_commit_status(tmp_path, monkeypatch, remote_listing):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(hallmark, ["init"]).exit_code == 0
+    result = runner.invoke(hallmark, ["add", "https://example.test/data/{src}_{day}.fits"])
+    assert result.exit_code == 0, result.output
+    assert "M87_001.fits" in result.output
+    result = runner.invoke(hallmark, ["commit", "-m", "Remote data"])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(hallmark, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "remote catalog unchanged" in result.output
+    assert "Changes not staged" not in result.output
+    assert "Changes to be committed" not in result.output
+    assert not Path("M87_001.fits").exists()
 
