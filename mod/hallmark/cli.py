@@ -125,7 +125,7 @@ def _run_download(repo, plan, *, max_workers):
     _report_download_results(results)
 
 
-@click.group()
+@click.group(name="hm")
 @click.version_option()
 @click.pass_context
 def hallmark(ctx):
@@ -143,7 +143,7 @@ def hallmark(ctx):
         ctx.obj = Repo(".")
 
 
-def _backend_options_file(path):
+def _load_backend_options(path):
     """Read a backend's configuration from a YAML mapping."""
     if path is None:
         return None
@@ -179,7 +179,7 @@ def init(path, from_url, backend, backend_options, auth, filters, fmt,
     with _translate_cli_errors(
         GitError, DownloadError, ValueError, OSError, yaml.YAMLError,
         prefix=f'Failed to initialize hallmark repository at "{path}"'):
-        options = _backend_options_file(backend_options)
+        options = _load_backend_options(backend_options)
         if with_download and not from_url:
             raise ValueError("--with-download requires --from")
         if with_download and Repo.resolve_repo_paths(path)[1] is None:
@@ -225,8 +225,8 @@ def status(repo):
     worktree = snapshot["worktree"]
     untracked = snapshot["untracked"]
 
-    def emit_section(title, entries, fg):
-        if not entries:
+    def print_section(title, entries, fg):
+        if not any(paths for _, paths in entries):
             return
         click.echo("")
         click.secho(title, fg=fg)
@@ -234,7 +234,7 @@ def status(repo):
             for path in paths:
                 click.echo("  " + click.style(f"{label}:   {path}", fg=fg))
 
-    emit_section(
+    print_section(
         "Changes to be committed:",
         [
             ("state", staged["state"]),
@@ -244,7 +244,7 @@ def status(repo):
         ],
         "green",
     )
-    emit_section(
+    print_section(
         "Changes not staged for commit:",
         [
             ("modified", worktree["modified"]),
@@ -261,7 +261,10 @@ def status(repo):
     if not any((staged["state"], staged["added"], staged["modified"], staged["deleted"],
                 worktree["modified"], worktree["deleted"], untracked)):
         click.echo("")
-        click.echo("nothing to commit, working tree clean")
+        if snapshot.get("remote_catalog"):
+            click.echo("nothing to commit, remote catalog unchanged")
+        else:
+            click.echo("nothing to commit, working tree clean")
 
 
 @hallmark.command(short_help="Add files to hallmark index.")
@@ -272,22 +275,43 @@ def status(repo):
     default=False,
     show_default=True,
     help="Enable regex-based encoding rules from config.yml.")
+@click.option("--auth", help="Local SSH authentication profile.")
+@click.option("--backend", help="Registered remote data backend.")
+@click.option("--backend-options", type=click.Path(exists=True, dir_okay=False),
+              help="YAML mapping of backend-specific options.")
+@click.option("--filter", "filters", multiple=True, help="Select remote paths by glob.")
+@click.option("--fmt", "remote_fmt",
+              help="Remote filename format; otherwise use a URL pattern.")
 @click.argument("inputs", nargs=-1, required=True)
 @click.pass_obj
-def add(repo, encoding, inputs):
+def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmt):
     """Add files to the hallmark index.
 
-    `hallmark add [--regex] FORMAT` uses the branch format string workflow.
-    `hallmark add "."` rebuilds the manifest from current files that match
+    A remote URL or URL pattern stages a catalog without downloading files
+    or committing. Use --fmt and --filter to select remote paths.
+
+    `hm add [--regex] FORMAT` uses the branch format string workflow.
+    `hm add "."` rebuilds the manifest from current files that match
     the branch `fmt` in `config.yml`.
     Explicit path inputs such as shell-expanded `*` are not supported yet
     with the parameter-based manifest format.
     """
+    with _translate_cli_errors(ValueError, OSError, yaml.YAMLError):
+        options = _load_backend_options(backend_options)
+    remote_options = dict(auth=auth, backend=backend,
+                          backend_options=options,
+                          filter=filters or None, remote_fmt=remote_fmt)
+    if len(inputs) != 1 and any(value is not None for value in remote_options.values()):
+        raise ClickException("Remote add accepts one URL at a time")
     # attempt to add the specified files to the hallmark index, handling any errors
-    with _translate_cli_errors(RuntimeError, ValueError, FileNotFoundError):
+    with _translate_cli_errors(RuntimeError, ValueError, OSError, yaml.YAMLError):
         # if there is only one input, use the add method for a single input
         if len(inputs) == 1:
-            pf = repo.add(inputs[0], encoding)
+            remote = "://" in inputs[0]
+            if remote or any(value is not None for value in remote_options.values()):
+                pf = repo.add(inputs[0], encoding, progress=True, **remote_options)
+            else:
+                pf = repo.add(inputs[0], encoding)
         # oterhwise, use the add_paths method for multiple inputs
         else:
             pf = repo.add_paths(list(inputs))
@@ -330,16 +354,15 @@ def set_config(repo, fmt, remote_name, remote_url, remote_auth, remote_backend,
 
     # use the _translate_cli_errors context manager to handle specific exceptions
     with _translate_cli_errors(RuntimeError, ValueError, OSError, yaml.YAMLError):
-        options = _backend_options_file(remote_backend_options)
+        options = _load_backend_options(remote_backend_options)
         repo.set_config(
             fmt=fmt,
             remote_name=remote_name,
             remote_url=remote_url,
             encoding_updates=encoding_updates or None,
-            **({"remote_auth": remote_auth} if remote_auth is not None else {}),
-            **({"remote_backend": remote_backend}
-               if remote_backend is not None else {}),
-            **({"remote_backend_options": options} if options is not None else {}))
+            remote_auth=remote_auth,
+            remote_backend=remote_backend,
+            remote_backend_options=options)
 
     click.echo("Updated hallmark config.")
 

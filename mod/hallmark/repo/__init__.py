@@ -470,11 +470,9 @@ class Repo:
             remote_name=remote_name,
             remote_url=remote_url,
             encoding_updates=encoding_updates,
-            **({"remote_auth": remote_auth} if remote_auth is not None else {}),
-            **({"remote_backend": remote_backend}
-               if remote_backend is not None else {}),
-            **({"remote_backend_options": remote_backend_options}
-               if remote_backend_options is not None else {}))
+            remote_auth=remote_auth,
+            remote_backend=remote_backend,
+            remote_backend_options=remote_backend_options)
         self.dothm.save_state(self.state)
         return self.state.config
 

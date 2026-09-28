@@ -1,3 +1,5 @@
+from click.testing import CliRunner
+from hallmark.cli import hallmark
 
 import pytest
 
@@ -146,4 +148,51 @@ def test_remote_catalog_clone_and_branches_keep_payloads_separate(
     assert repo.state.data.path.tolist() == ["M87_001.fits", "M87_002.fits"]
     assert (repo.worktree / "M87_001.fits").read_text() == "Keep local content"
     assert not repo.objects.root.exists()
+
+
+
+@pytest.mark.parametrize("options", ["[]\n", "scalar\n", "options: [\n"])
+def test_add_cli_rejects_invalid_backend_options_before_access(
+        monkeypatch, tmp_path, options):
+    repo = Repo.init(tmp_path / "repo")
+    config = tmp_path / "options.yml"
+    config.write_text(options)
+    monkeypatch.chdir(repo.worktree)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("Invalid settings must fail before discovery")
+
+    monkeypatch.setattr("hallmark.remote.add.discover_remote_files", fail)
+    result = CliRunner().invoke(hallmark, [
+        "add", "https://example.test/data/", "--backend-options", str(config)])
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert Repo(repo.worktree).state.data.empty
+
+
+
+def test_add_cli_forwards_backend_and_selection(monkeypatch, tmp_path):
+    import pandas as pd
+
+    repo = Repo.init(tmp_path / "repo")
+    options = tmp_path / "backend.yml"
+    options.write_text("collection: latest\n")
+    monkeypatch.chdir(repo.worktree)
+    captured = {}
+
+    def add(self, value, encoding, **kwargs):
+        captured.update(value=value, encoding=encoding, **kwargs)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(Repo, "add", add)
+    result = CliRunner().invoke(hallmark, [
+        "add", "ssh://lab-data/export/", "--auth", "lab", "--backend", "ssh",
+        "--backend-options", str(options), "--filter", "**/*.fits",
+        "--filter", "README*", "--fmt", "{name}.fits"])
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "value": "ssh://lab-data/export/", "encoding": False,
+        "auth": "lab", "backend": "ssh", "backend_options": {"collection": "latest"},
+        "filter": ("**/*.fits", "README*"), "remote_fmt": "{name}.fits",
+        "progress": True}
 
