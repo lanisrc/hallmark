@@ -25,7 +25,7 @@ from .base import (
 )
 
 
-def batch_argument(path):
+def quote_sftp_path(path):
     """
     Escape an absolute path for a literal SFTP batch argument.
 
@@ -73,7 +73,7 @@ class SshBackend(DataBackend):
         self._socket = None
         self._slots = BoundedSemaphore(context.settings.max_sessions)
 
-    def _options(self, *, master=False):
+    def _ssh_options(self, *, master=False):
         """Build noninteractive SSH options for the shared connection."""
         settings = self.context.settings
         policy = "yes" if settings.host_key_policy == "strict" else "accept-new"
@@ -102,12 +102,14 @@ class SshBackend(DataBackend):
             options.append(f"User={settings.user}")
         if settings.port is not None:
             options.append(f"Port={settings.port}")
-        args = [part for option in options for part in ("-o", option)]
+        args = []
+        for option in options:
+            args.extend(["-o", option])
         if settings.identity_file is not None:
             args.extend(["-i", settings.identity_file, "-o", "IdentitiesOnly=yes"])
         return args
 
-    def _spawn(self, argv, **kwargs):
+    def _start_process(self, argv, **kwargs):
         """Start a client in a separate process group and track it for cleanup."""
         with self._process_lock:
             self.context.check_cancelled()
@@ -120,7 +122,7 @@ class SshBackend(DataBackend):
             self._processes.add(process)
         return process
 
-    def _stop(self, process):
+    def _stop_process(self, process):
         # Every owned client starts a new process group, including proxy children.
         """Stop a client process group and wait for the child to exit."""
         def signal_group(signum):
@@ -147,7 +149,7 @@ class SshBackend(DataBackend):
         with self._process_lock:
             self._processes.discard(process)
 
-    def _run(
+    def _run_ssh_command(
         self,
         argv,
         *,
@@ -182,7 +184,7 @@ class SshBackend(DataBackend):
         with tempfile.TemporaryFile() as batch:
             batch.write(data)
             batch.seek(0)
-            process = self._spawn(
+            process = self._start_process(
                 argv, stdin=batch, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             deadline = time.monotonic() + timeout
@@ -227,7 +229,7 @@ class SshBackend(DataBackend):
                     )
                 return bytes(diagnostics if capture_stderr else output)
             finally:
-                self._stop(process)
+                self._stop_process(process)
                 process.stdout.close()
                 process.stderr.close()
 
@@ -243,7 +245,9 @@ class SshBackend(DataBackend):
             if not self._injected:
                 if not shutil.which("ssh") or not shutil.which("sftp"):
                     raise CapabilityError("Install OpenSSH ssh and sftp clients (9.6+)")
-                version = self._run(self.ssh + ["-V"], timeout=5, capture_stderr=True)
+                version = self._run_ssh_command(
+                    self.ssh + ["-V"], timeout=5, capture_stderr=True
+                )
                 match = re.search(rb"OpenSSH_(\d+)\.(\d+)", version)
                 if not match or tuple(map(int, match.groups())) < (9, 6):
                     raise CapabilityError("SSH transport requires OpenSSH 9.6 or newer")
@@ -253,9 +257,9 @@ class SshBackend(DataBackend):
             if len(os.fsencode(self._socket)) > 100:
                 raise CapabilityError("SSH control socket path is too long")
             try:
-                self._master = self._spawn(
+                self._master = self._start_process(
                     self.ssh
-                    + self._options(master=True)
+                    + self._ssh_options(master=True)
                     + ["-N", "--", self.context.remote.host],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
@@ -273,9 +277,9 @@ class SshBackend(DataBackend):
                     if time.monotonic() > deadline:
                         raise DownloadError("SSH connection exceeded its time limit")
                     self.context.cancelled.wait(0.05)
-                self._run(
+                self._run_ssh_command(
                     self.ssh
-                    + self._options()
+                    + self._ssh_options()
                     + ["-O", "check", "--", self.context.remote.host],
                     timeout=self.context.settings.connect_timeout,
                 )
@@ -283,10 +287,10 @@ class SshBackend(DataBackend):
                 self.close()
                 raise
 
-    def _fetch(self, relative_path, destination, file_limit=None):
+    def _download_file(self, relative_path, destination, file_limit=None):
         """Fetch one literal path within the session and transfer limits."""
-        remote = batch_argument(self.context.remote.file_path(relative_path))
-        local = batch_argument(destination)
+        remote = quote_sftp_path(self.context.remote.file_path(relative_path))
+        local = quote_sftp_path(destination)
         batch = f"get {remote} {local}\n".encode("utf-8")
         if len(batch) > 8000:
             raise RemoteConfigurationError("SFTP command exceeds the client path limit")
@@ -295,8 +299,8 @@ class SshBackend(DataBackend):
         if ":" in host:
             host = f"[{host}]"
         with self._slots:
-            self._run(
-                self.sftp + self._options() + ["-b", "-", "--", host],
+            self._run_ssh_command(
+                self.sftp + self._ssh_options() + ["-b", "-", "--", host],
                 timeout=self.context.settings.transfer_timeout,
                 data=batch,
                 destination=destination,
@@ -306,7 +310,7 @@ class SshBackend(DataBackend):
 
     def fetch(self, relative_path, destination, *, chunk_size=8192):
         """Download one file over SFTP; OpenSSH controls the read size."""
-        self._fetch(relative_path, destination)
+        self._download_file(relative_path, destination)
 
     def read_text(self, relative_path, limit):
         """Read UTF-8 metadata with size checks before and after transfer."""
@@ -315,7 +319,7 @@ class SshBackend(DataBackend):
             raise DownloadError("Remote text exceeds its size limit")
         with tempfile.TemporaryDirectory(prefix="hm-text-") as directory:
             destination = Path(directory) / "content"
-            self._fetch(relative_path, destination, file_limit=limit)
+            self._download_file(relative_path, destination, file_limit=limit)
             if destination.stat().st_size > limit:
                 raise DownloadError("Remote text exceeds its size limit")
             try:
@@ -323,7 +327,7 @@ class SshBackend(DataBackend):
             except UnicodeError:
                 raise DownloadError("Remote manifest must contain UTF-8 text") from None
 
-    def _metadata(self):
+    def _open_metadata_session(self):
         """Create an SFTP metadata session on the shared connection."""
         from .sftp import SftpMetadata
 
@@ -332,7 +336,7 @@ class SshBackend(DataBackend):
     def stat(self, relative_path):
         """Read regular-file attributes without fetching the file contents."""
         path = validate_remote_path(relative_path).as_posix()
-        with self._metadata() as session:
+        with self._open_metadata_session() as session:
             attrs = session.lstat(self.context.remote.file_path(path))
         mode = attrs["mode"]
         if mode is None or not stat.S_ISREG(mode):
@@ -355,7 +359,7 @@ class SshBackend(DataBackend):
             DownloadError: If discovery fails or a path escapes the dataset root.
             CapabilityError: If the server omits required file types.
         """
-        with self._metadata() as session:
+        with self._open_metadata_session() as session:
             root = session.realpath(self.context.remote.root).rstrip("/") or "/"
             reject_control_characters(root, "SFTP root")
             if not root.startswith("/") or ".." in root.split("/"):
@@ -409,7 +413,7 @@ class SshBackend(DataBackend):
         with self._process_lock:
             processes = list(self._processes)
         for process in processes:
-            self._stop(process)
+            self._stop_process(process)
 
     def close(self):
         """Stop clients and remove the shared connection socket directory."""

@@ -29,7 +29,7 @@ from hallmark.transport.base import (
     TransferCancelled,
     validate_remote_path,
 )
-from hallmark.transport.ssh import SshTransport, batch_argument
+from hallmark.transport.ssh import SshTransport, quote_sftp_path
 
 
 @pytest.fixture(autouse=True)
@@ -103,7 +103,7 @@ def test_controls_rejected_at_all_path_boundaries(path, tmp_path):
     with pytest.raises(RemoteConfigurationError):
         validate_remote_path(path)
     with pytest.raises(RemoteConfigurationError):
-        batch_argument("/" + path)
+        quote_sftp_path("/" + path)
     with pytest.raises(RemoteConfigurationError):
         _download_file("ssh://campus/" + path, tmp_path / "out")
 
@@ -357,7 +357,7 @@ def test_real_sftp_parser_without_network(tmp_path, name):
     output = tmp_path / ("output-" + name)
     # A glob collision must never produce two matches or replace another file.
     (tmp_path / "a b#X%+ü.h5").write_text("decoy")
-    batch = f"get {batch_argument(source)} {batch_argument(output)}\n"
+    batch = f"get {quote_sftp_path(source)} {quote_sftp_path(output)}\n"
     result = subprocess.run(
         ["sftp", "-D", server, "-b", "-"],
         input=batch.encode(),
@@ -400,7 +400,7 @@ def test_bounded_process_errors(fake_process, mode, message):
     with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         transport = context.transport
         with pytest.raises(DownloadError, match=message) as error:
-            transport._run(fake_process + [mode], timeout=5)
+            transport._run_ssh_command(fake_process + [mode], timeout=5)
         assert "secret" not in str(error.value)
         assert not transport._processes
 
@@ -408,7 +408,7 @@ def test_bounded_process_errors(fake_process, mode, message):
 def test_process_start_failure():
     with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         with pytest.raises(DownloadError, match="Unable to start"):
-            context.transport._run(["/nonexistent/hallmark-test"], timeout=1)
+            context.transport._run_ssh_command(["/nonexistent/hallmark-test"], timeout=1)
 
 
 @pytest.mark.parametrize("reaping_in_progress", [False, True])
@@ -417,7 +417,7 @@ def test_cleanup_exited_process_group_permission_error(
 ):
     with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         transport = context.transport
-        process = transport._spawn([sys.executable, "-c", "pass"])
+        process = transport._start_process([sys.executable, "-c", "pass"])
         process.wait(timeout=5)
         signals = []
 
@@ -432,7 +432,7 @@ def test_cleanup_exited_process_group_permission_error(
                 # Popen.poll() cannot acquire its wait lock while another
                 # thread reaps the child and can temporarily report None.
                 patch.setattr(process, "poll", lambda: None)
-            transport._stop(process)
+            transport._stop_process(process)
         # Exited leaders may still have proxy children: attempt both signals.
         assert signals == [signal.SIGTERM, signal.SIGKILL]
         assert process.returncode == 0
@@ -442,7 +442,7 @@ def test_cleanup_exited_process_group_permission_error(
 def test_cleanup_live_process_permission_error_is_not_suppressed(monkeypatch):
     with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         transport = context.transport
-        process = transport._spawn(
+        process = transport._start_process(
             [sys.executable, "-c", "import time; time.sleep(60)"]
         )
 
@@ -452,7 +452,7 @@ def test_cleanup_live_process_permission_error_is_not_suppressed(monkeypatch):
         with monkeypatch.context() as patch:
             patch.setattr("hallmark.transport.ssh.os.killpg", denied)
             with pytest.raises(PermissionError):
-                transport._stop(process)
+                transport._stop_process(process)
             assert process.poll() is None
             assert process in transport._processes
         # Restore real signals before the context closes and reaps this child.
@@ -466,7 +466,7 @@ def test_cancel_active_process_group(fake_process, tmp_path):
         context.settings = replace(context.settings, shutdown_timeout=1)
         with ThreadPoolExecutor(1) as pool:
             future = pool.submit(
-                context.transport._run, fake_process + ["sleep", str(pids)], timeout=30
+                context.transport._run_ssh_command, fake_process + ["sleep", str(pids)], timeout=30
             )
             deadline = time.monotonic() + 5
             while not pids.exists() and time.monotonic() < deadline:
@@ -491,7 +491,7 @@ def test_partial_failure_preserves_destination(monkeypatch, fake_process, tmp_pa
     monkeypatch.setattr(SshTransport, "prepare", lambda self: None)
 
     def fetch(self, path, destination, **kwargs):
-        self._run(fake_process + ["partial", str(destination)], timeout=5)
+        self._run_ssh_command(fake_process + ["partial", str(destination)], timeout=5)
 
     monkeypatch.setattr(SshTransport, "fetch", fetch)
     result = download_remote_data(
@@ -553,7 +553,7 @@ def test_keyboard_interrupt_stops_owned_workers(monkeypatch, tmp_path, fake_proc
     def fetch(self, path, destination, **kwargs):
         transports.append(self)
         destination.write_bytes(b"partial")
-        self._run(fake_process + ["sleep", str(ready)], timeout=30)
+        self._run_ssh_command(fake_process + ["sleep", str(ready)], timeout=30)
 
     def interrupt(*args, **kwargs):
         deadline = time.monotonic() + 5
@@ -646,7 +646,7 @@ def test_minimum_openssh_is_checked_before_connection(monkeypatch):
     with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         monkeypatch.setattr("hallmark.transport.ssh.shutil.which", lambda name: name)
         monkeypatch.setattr(
-            context.transport, "_run", lambda *a, **kw: b"OpenSSH_9.5p1"
+            context.transport, "_run_ssh_command", lambda *a, **kw: b"OpenSSH_9.5p1"
         )
         with pytest.raises(CapabilityError, match="9.6"):
             context.transport.prepare()
@@ -659,7 +659,7 @@ def test_short_socket_ignores_long_tempdir(monkeypatch, tmp_path):
     monkeypatch.setenv("TMPDIR", str(tmp_path / ("long" * 35)))
     with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         monkeypatch.setattr(
-            context.transport, "_run", lambda *a, **kw: b"OpenSSH_9.6p1"
+            context.transport, "_run_ssh_command", lambda *a, **kw: b"OpenSSH_9.6p1"
         )
         monkeypatch.setattr("hallmark.transport.ssh.shutil.which", lambda name: name)
 
@@ -668,7 +668,7 @@ def test_short_socket_ignores_long_tempdir(monkeypatch, tmp_path):
             assert context.transport._socket.startswith("/tmp/hm-")
             raise DownloadError("deliberate startup failure")
 
-        monkeypatch.setattr(context.transport, "_spawn", fail_start)
+        monkeypatch.setattr(context.transport, "_start_process", fail_start)
         with pytest.raises(DownloadError, match="deliberate"):
             context.transport.prepare()
         assert context.transport._socket_dir is None

@@ -90,10 +90,10 @@ Host *
     UserKnownHostsFile {known}
     GlobalKnownHostsFile /dev/null
 """)
-    original = SshTransport._options
+    original = SshTransport._ssh_options
     monkeypatch.setattr(
         SshTransport,
-        "_options",
+        "_ssh_options",
         lambda self, **kw: ["-F", str(client_config)] + original(self, **kw),
     )
     monkeypatch.delenv("HALLMARK_AUTH_FILE", raising=False)
@@ -391,7 +391,7 @@ def test_sftp_only_init_plans_then_requires_payload_approval(
     (root / "nested" / "science.fits").write_bytes(b"science")
     (root / "notes.txt").write_bytes(b"notes")
     fetched = []
-    fetch = SshTransport._fetch
+    fetch = SshTransport._download_file
 
     def record_fetch(self, path, destination, file_limit=None):
         fetched.append(path)
@@ -400,7 +400,7 @@ def test_sftp_only_init_plans_then_requires_payload_approval(
     def reject_git_probe(*args, **kwargs):
         raise AssertionError("SFTP directory detection must not invoke remote Git")
 
-    monkeypatch.setattr(SshTransport, "_fetch", record_fetch)
+    monkeypatch.setattr(SshTransport, "_download_file", record_fetch)
     monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", reject_git_probe)
     plans = []
 
