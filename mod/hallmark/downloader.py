@@ -25,7 +25,7 @@ from .utils import (
     normalize_nonempty_string,
     resolve_contained_path,
     valid_checksum)
-from .repo_config import (
+from .repo.config import (
     normalize_remotes,
     normalize_tsv_name,
     row_to_path)

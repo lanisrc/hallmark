@@ -9,7 +9,7 @@ from git.exc import GitCommandError
 from hallmark import Repo, ParaFrame
 from hallmark.objects import Objects
 from hallmark.state import State
-from hallmark.repo_worktree import worktree_changes
+from hallmark.repo.changes import worktree_changes
 from hallmark.dothm import Dothm
 from hallmark.worktree import Worktree
 from hallmark.utils import (
@@ -21,16 +21,16 @@ from hallmark.error import (
     DestinationExistsError,
     DothmError,
     CloneError)
-from hallmark.repo_config import (
+from hallmark.repo.config import (
     row_to_path,
     fmt_entries_from_config,
     single_data_fmt,
     fmt_fields)
-from hallmark.repo_manifest import (
+from hallmark.repo.manifest import (
     iter_manifest_entries,
     manifest_frame_from_pf,
     manifest_map)
-from hallmark.repo_state import (
+from hallmark.repo.history import (
     _parse_data_tsv,
     load_branch_data,
     load_head_state)

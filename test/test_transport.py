@@ -19,7 +19,7 @@ import yaml
 from hallmark import Repo
 from hallmark.downloader import _download_file, download_remote_data
 from hallmark.repo_builder import _manifest_matches, build_repo
-from hallmark.repo_config import normalize_remotes
+from hallmark.repo.config import normalize_remotes
 from hallmark.transport import OperationContext, RemoteSpec
 from hallmark.transport.auth import resolve_settings
 from hallmark.transport.base import (

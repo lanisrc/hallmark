@@ -32,7 +32,7 @@ from .utils import (
     normalize_nonempty_string,
     validate_path_component,
     validate_relative_path)
-from .repo_config import (
+from .repo.config import (
     fmt_fields,
     normalize_tsv_name,
     normalize_remotes,

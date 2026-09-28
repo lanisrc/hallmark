@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .error import CheckoutError
-from .utils import (
+from ..error import CheckoutError
+from ..utils import (
     SymlinkPathError, resolve_contained_path, validate_relative_path)
-from .repo_config import branch_fmt
-from .repo_manifest import manifest_map, iter_manifest_entries
+from .config import branch_fmt
+from .manifest import manifest_map, iter_manifest_entries
 
 
 def effective_cwd(repo) -> Path:

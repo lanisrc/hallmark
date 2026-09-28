@@ -6,7 +6,7 @@ from hallmark import Repo
 from hallmark import backends
 from hallmark.backends import DataBackend, RemoteEntry, register_backend
 from hallmark.repo_builder import build_repo
-from hallmark.repo_config import normalize_remotes
+from hallmark.repo.config import normalize_remotes
 
 
 def test_backend_config_roundtrip_and_selective_updates(tmp_path):

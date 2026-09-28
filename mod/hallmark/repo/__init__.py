@@ -28,8 +28,8 @@ from ..state import State
 from ..worktree import Worktree
 from ..objects import Objects
 from ..paraframe import ParaFrame
-from ..repo_manifest import manifest_frame_from_pf, manifest_map, iter_manifest_entries
-from ..repo_state import (
+from .manifest import manifest_frame_from_pf, manifest_map, iter_manifest_entries
+from .history import (
     load_branch_data, load_head_state, find_remote_branch,
     fetch_missing_objects_from_remote)
 from ..error import CheckoutError, DestinationExistsError, DothmError
@@ -39,12 +39,12 @@ from ..utils import (
     iter_repository_files,
     normalize_nonempty_string,
     resolve_contained_path)
-from ..repo_worktree import (
+from .changes import (
     ensure_clean_tracked_files,
     filtered_paraframe,
     tracked_paths,
     worktree_changes)
-from ..repo_config import (
+from .config import (
     branch_encodings,
     branch_fmt,
     row_to_path,

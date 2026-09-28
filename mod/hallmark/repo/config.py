@@ -12,11 +12,11 @@ from pathlib import Path
 from string import Formatter
 from typing import Dict, Optional
 
-from .utils import (
+from ..utils import (
     as_list_of_dicts, coerce_fmt_value, normalize_nonempty_string,
     validate_path_component, validate_relative_path)
 
-from .transport.base import (
+from ..transport.base import (
     RemoteSpec, backend_name, profile_name, reject_controls, thaw_backend_options)
 
 

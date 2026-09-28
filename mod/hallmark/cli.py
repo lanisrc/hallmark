@@ -29,7 +29,7 @@ from .repo_builder import build_repo
 from .downloader import DownloadError
 from .discovery import path_matches
 from .error import CheckoutError, CloneError
-from .repo_config import normalize_tsv_name
+from .repo.config import normalize_tsv_name
 
 
 # use a context manager to translate application errors into clean Click errors
