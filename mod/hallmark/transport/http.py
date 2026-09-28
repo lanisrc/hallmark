@@ -58,7 +58,7 @@ class HttpBackend(DataBackend):
     def _open_file_response(self, path):
         """Open a streaming response with the configured request timeout."""
         return self.context.session().get(
-            getattr(self, "direct_url", None) or self.context.remote.file_url(path),
+            self.context.remote.file_url(path),
             stream=True,
             timeout=REMOTE_REQUEST_TIMEOUT,
         )
@@ -142,6 +142,3 @@ class HttpBackend(DataBackend):
             return text
         except requests.RequestException as exc:
             raise self._download_error(exc) from None
-
-
-HttpTransport = HttpBackend

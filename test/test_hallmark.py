@@ -1298,7 +1298,7 @@ def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
         return destination.stat().st_size
 
     monkeypatch.setattr(
-        "hallmark.remote.download._fetch_file", fake_download_file
+        "hallmark.remote.download._download_and_verify_file", fake_download_file
     )
 
     clone = Repo.clone(str(source.dothm.path), tmp_path / "clone",
@@ -1325,7 +1325,7 @@ def test_repo_clone_can_skip_remote_data_download(monkeypatch, tmp_path):
         raise AssertionError("download should not be attempted")
 
     monkeypatch.setattr(
-        "hallmark.remote.download._fetch_file", fail_download
+        "hallmark.remote.download._download_and_verify_file", fail_download
     )
 
     clone = Repo.clone(str(source.dothm.path), tmp_path / "clone", download=False)

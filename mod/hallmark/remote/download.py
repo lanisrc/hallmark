@@ -7,10 +7,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from threading import Lock
 from typing import Mapping, Optional, Sequence, Union
-from urllib.parse import unquote, urlsplit, urlunsplit
 from tqdm import tqdm
 
-import requests
 import pandas as pd
 
 from ..transport import OperationContext, RemoteSpec
@@ -30,8 +28,6 @@ from ..repo.config import (
     validate_tsv_filename,
     row_to_path)
 
-# Maximum number of files to download before showing a warning message.
-BULK_DOWNLOAD_WARNING_FILE_COUNT = 100
 # Maximum number of rows to read from a file at once when computing checksums.
 TSV_READ_CHUNK_SIZE = 10_000
 # union type for checksum specifications, string or a tuple of (algorithm, checksum).
@@ -86,7 +82,7 @@ def _config_section_entries(config: dict, section_name: str) -> list[dict]:
 
 def _require_positive_integer(value, *, label: str) -> int:
     """
-    Used by download_remote_data and _download_file.
+    Used by execute_download_plan.
     Validate that a value is a positive, non-boolean integer.
 
     Args:
@@ -109,7 +105,7 @@ def _require_positive_integer(value, *, label: str) -> int:
 
 def _clean_checksum(value) -> Optional[str]:
     """
-    Used by _checksum_spec and _entry_checksum.
+    Used by _parse_checksum and _checksum_from_config.
     Clean and validate a checksum value.
 
     Args:
@@ -130,9 +126,9 @@ def _clean_checksum(value) -> Optional[str]:
     return text
 
 
-def _checksum_spec(value, algorithm=None) -> Optional[ChecksumSpec]:
+def _parse_checksum(value, algorithm=None) -> Optional[ChecksumSpec]:
     """
-    Used by _row_checksum and _entry_checksum.
+    Used by _checksum_from_row and _checksum_from_config.
     Normalize a checksum and its optional algorithm.
 
     Args:
@@ -167,7 +163,7 @@ def _checksum_spec(value, algorithm=None) -> Optional[ChecksumSpec]:
     return algorithm_text, checksum
 
 
-def _row_checksum(row: Union[pd.Series, Mapping[str, object]]
+def _checksum_from_row(row: Union[pd.Series, Mapping[str, object]]
                   ) -> Optional[ChecksumSpec]:
     """
     Used by add_frame.
@@ -180,16 +176,16 @@ def _row_checksum(row: Union[pd.Series, Mapping[str, object]]
         Optional[ChecksumSpec]: The checksum specification, or None if not available.
     """
     # Check for legacy SHA-1 checksum in the "sha1" column first
-    legacy_sha1 = _checksum_spec(row.get("sha1"))
+    legacy_sha1 = _parse_checksum(row.get("sha1"))
     # If a legacy SHA-1 checksum is found, return it immediately
     if legacy_sha1 is not None:
         return legacy_sha1
     # If not found, check the "checksum" and "checksum_algorithm" columns
-    return (_checksum_spec(row.get("checksum"), row.get("checksum_algorithm"))
-            or _entry_checksum(row))
+    return (_parse_checksum(row.get("checksum"), row.get("checksum_algorithm"))
+            or _checksum_from_config(row))
 
 
-def _entry_checksum(entry: dict) -> Optional[ChecksumSpec]:
+def _checksum_from_config(entry: dict) -> Optional[ChecksumSpec]:
     """
     Used by _select_download_items.
     Extract either legacy or builder checksum metadata from a config entry.
@@ -199,7 +195,7 @@ def _entry_checksum(entry: dict) -> Optional[ChecksumSpec]:
 
     Returns:
         Optional[ChecksumSpec]: A tuple of (algorithm, checksum) or just a checksum
-        string, or if no valid checksum is found return the result of _checksum_spec
+        string, or if no valid checksum is found return the result of _parse_checksum
     """
     for algorithm in CHECKSUM_ALGORITHMS_BY_STRENGTH:
         # get the checksum value for the algorithm from the entry
@@ -212,14 +208,14 @@ def _entry_checksum(entry: dict) -> Optional[ChecksumSpec]:
             return value
         # otherwise, return a tuple of (algorithm, value)
         return algorithm, value
-    # if no valid checksum is found, return the result of _checksum_spec
-    return _checksum_spec(entry.get("checksum"), entry.get("checksum_algorithm"))
+    # if no valid checksum is found, return the result of _parse_checksum
+    return _parse_checksum(entry.get("checksum"), entry.get("checksum_algorithm"))
 
 
-def _checksum_identity(expected_checksum: Optional[ChecksumSpec]
+def _checksum_pair(expected_checksum: Optional[ChecksumSpec]
                        ) -> Optional[tuple[str, str]]:
     """
-    Used by _validate_checksum_spec and _merge_selected_file.
+    Used by _validate_expected_checksum and _merge_selected_file.
     Normalize a checksum specification into a tuple of (algorithm, checksum).
 
     Args:
@@ -248,10 +244,10 @@ def _checksum_identity(expected_checksum: Optional[ChecksumSpec]
     return (str(algorithm).strip().lower(), str(checksum).strip().lower())
 
 
-def _validate_checksum_spec(expected_checksum: Optional[ChecksumSpec]
+def _validate_expected_checksum(expected_checksum: Optional[ChecksumSpec]
                             ) -> Optional[tuple[str, str]]:
     """
-    Used by _download_file and _fetch_file.
+    Used by _download_and_verify_file.
     Validate and normalize a checksum specification.
 
     Args:
@@ -265,7 +261,7 @@ def _validate_checksum_spec(expected_checksum: Optional[ChecksumSpec]
         DownloadError: If the checksum specification is invalid.
     """
     # get the normalized checksum identity from the expected_checksum
-    identity = _checksum_identity(expected_checksum)
+    identity = _checksum_pair(expected_checksum)
     # if identity is None, return None to indicate no valid checksum available
     if identity is None:
         return None
@@ -303,7 +299,7 @@ def _merge_selected_file(
     # Use the POSIX representation of the relative path as the key
     key = relative_path.as_posix()
     # Compute the normalized checksum identity for the expected checksum
-    new_identity = _checksum_identity(expected_checksum)
+    new_identity = _checksum_pair(expected_checksum)
     # Check if the file is already in the selected dictionary
     existing = selected.get(key)
 
@@ -314,7 +310,7 @@ def _merge_selected_file(
         return
 
     existing_checksum = existing[1]
-    existing_identity = _checksum_identity(existing_checksum)
+    existing_identity = _checksum_pair(existing_checksum)
     # If there is no existing checksum, but an expected checksum is provided
     if existing_checksum is None:
         if expected_checksum is not None:
@@ -333,37 +329,7 @@ def _merge_selected_file(
         raise DownloadError(f"Conflicting checksums for {key!r}")
 
 
-def _safe_remote_path(value: Union[str, Path]) -> Path:
-    """
-    Used by _select_download_items and _download_selected.
-    Validate and return a safe relative Path object for a remote file path.
-    Args:
-        value: The input path to validate.
-
-    Returns:
-        A safe relative Path object.
-
-    Raises:
-        DownloadError: If the path is unsafe.
-    """
-    return validate_remote_path(value)
-
-
-def _remote_file_url(remote_url: str, relative_path: Path) -> str:
-    """
-    Construct a file URL from a data remote and a literal catalog path.
-
-    Args:
-        remote_url (str): URL of the dataset root.
-        relative_path (Path): File path relative to the dataset root.
-
-    Returns:
-        str: URL with the relative path encoded for the transport.
-    """
-    return RemoteSpec.from_url(remote_url).file_url(relative_path.as_posix())
-
-
-def _download_tsv_name(value) -> str:
+def _validate_download_table_name(value) -> str:
     """
     Used by _select_download_items.
     Normalize a TSV name and expose validation failures as DownloadError.
@@ -385,7 +351,7 @@ def _download_tsv_name(value) -> str:
 
 def _select_remote_config(repo, remote_name: Optional[str] = None) -> Optional[dict]:
     """
-    Used by download_remote_data and plan_download.
+    Used by plan_download.
     Select a remote configuration from the repository.
 
     Args:
@@ -505,13 +471,13 @@ def _resolve_remote_path(
         f"Available columns: {available}")
 
 
-def _verify_validated_checksum(
+def _verify_file_checksum(
     path: Path,
     expected_checksum: Optional[tuple[str, str]],
     chunk_size: int,
     ) -> None:
     """
-    Used by _download_file and _fetch_file.
+    Used by _download_and_verify_file.
     Verify a checksum that has already been normalized.
 
     Args:
@@ -534,7 +500,9 @@ def _verify_validated_checksum(
         raise DownloadError(f"Checksum mismatch for {path.name} " f"({algorithm})")
 
 
-def _fetch_file(context, relative_path, destination, expected_checksum, chunk_size):
+def _download_and_verify_file(
+    context, relative_path, destination, expected_checksum, chunk_size
+):
     """
     Download and verify a file before replacing its destination.
 
@@ -552,7 +520,7 @@ def _fetch_file(context, relative_path, destination, expected_checksum, chunk_si
     Raises:
         DownloadError: If the transfer, checksum, or destination is invalid.
     """
-    validated_checksum = _validate_checksum_spec(expected_checksum)
+    validated_checksum = _validate_expected_checksum(expected_checksum)
     try:
         context.check_cancelled()
         destination = resolve_path_in_root(
@@ -561,7 +529,7 @@ def _fetch_file(context, relative_path, destination, expected_checksum, chunk_si
         with replace_file_on_success(destination, suffix=".part") as temp_path:
             context.transport.fetch(relative_path.as_posix(), temp_path,
                                     chunk_size=chunk_size)
-            _verify_validated_checksum(temp_path, validated_checksum, chunk_size)
+            _verify_file_checksum(temp_path, validated_checksum, chunk_size)
             size = temp_path.stat().st_size
             # Recheck for symlink changes before replacing the destination.
             # Another process can still change the path after this check.
@@ -571,58 +539,6 @@ def _fetch_file(context, relative_path, destination, expected_checksum, chunk_si
         return size
     except (OSError, ValueError) as exc:
         raise DownloadError(f"Failed to write {destination.name}: {exc}") from None
-
-
-def _download_file(
-    url: str,
-    destination: Path,
-    expected_checksum: Optional[ChecksumSpec] = None,
-    chunk_size: int = DOWNLOAD_CHUNK_SIZE,
-    ) -> int:
-    """
-    Download one URL and verify its checksum before replacing the destination.
-
-    This compatibility helper creates its own transport context.
-
-    Args:
-        url (str): Full URL of the remote file.
-        destination (Path): Local path, which may use a different filename.
-        expected_checksum: Optional digest or (algorithm, digest) pair.
-        chunk_size (int): Bytes per read. Defaults to DOWNLOAD_CHUNK_SIZE.
-
-    Returns:
-        int: Number of downloaded bytes.
-
-    Raises:
-        DownloadError: If the URL, transfer, checksum, or destination is invalid.
-    """
-    chunk_size = _require_positive_integer(chunk_size, label="chunk_size")
-    _validate_checksum_spec(expected_checksum)
-    RemoteSpec.from_url(url)
-    parsed = urlsplit(url)
-    base = urlunsplit(parsed._replace(path=parsed.path.rsplit("/", 1)[0] + "/"))
-    remote = RemoteSpec.from_url(base)
-    relative = validate_remote_path(unquote(parsed.path.rsplit("/", 1)[-1]))
-    destination = Path(destination).absolute()
-    # Direct callers may intentionally choose a different local filename.
-    with OperationContext(remote, destination.parent) as context:
-        if remote.scheme in {"http", "https"}:
-            context._local.session = requests
-            context.transport.direct_url = url
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            resolve_path_in_root(destination.parent, destination.name)
-            with replace_file_on_success(destination, suffix=".part") as temporary:
-                context.transport.fetch(relative.as_posix(), temporary,
-                                        chunk_size=chunk_size)
-                _verify_validated_checksum(
-                    temporary, _validate_checksum_spec(expected_checksum), chunk_size)
-                size = temporary.stat().st_size
-                resolve_path_in_root(destination.parent, destination.name)
-                context.check_cancelled()
-            return size
-        except OSError as exc:
-            raise DownloadError(f"Failed to write {destination}: {exc}") from None
 
 
 def _select_download_items(
@@ -652,7 +568,7 @@ def _select_download_items(
     # dictionary to store selected files with relative paths and optional checksums.
     selected: dict[str, tuple[Path, Optional[ChecksumSpec]]] = {}
     metadata = {}
-    explicit_paths = {_safe_remote_path(path).as_posix() for path in file_paths}
+    explicit_paths = {validate_remote_path(path).as_posix() for path in file_paths}
 
     def add_file(
             value: Union[str, Path],
@@ -661,12 +577,12 @@ def _select_download_items(
             ) -> None:
         """Add a file and its catalog metadata, checking for conflicting records."""
         # Resolve the input value to a safe relative path
-        relative_path = _safe_remote_path(value)
+        relative_path = validate_remote_path(value)
         # Merge the selected file into the dictionary of selected files, ensuring no
         # conflicting checksums exist.
         _merge_selected_file(selected, relative_path, expected_checksum)
         if row is not None:
-            size = _catalog_size(row.get("size_bytes"))
+            size = _parse_file_size(row.get("size_bytes"))
             modified = row.get("mtime")
             modified = (None if modified is None or pd.isna(modified)
                         or str(modified).strip() == "" else str(modified))
@@ -692,9 +608,9 @@ def _select_download_items(
             # create a dictionary mapping column names to their corresponding values
             row = dict(zip(columns, values))
             # add the resolved remote path and its checksum to the selected files
-            relative_path = _safe_remote_path(_resolve_remote_path(row, fmt_entries))
+            relative_path = validate_remote_path(_resolve_remote_path(row, fmt_entries))
             if not explicit_only or relative_path.as_posix() in explicit_paths:
-                add_file(relative_path, _row_checksum(row), row)
+                add_file(relative_path, _checksum_from_row(row), row)
 
     # Add explicitly requested file paths to the selected files.
     for file_path in file_paths:
@@ -706,7 +622,7 @@ def _select_download_items(
         if not entry.get("db"):
             continue
         # download_tsv_name will normalize and validate the TSV name
-        tsv_name = _download_tsv_name(entry["db"])
+        tsv_name = _validate_download_table_name(entry["db"])
         # Add the entry to the list of entries for the corresponding TSV name
         entries_by_tsv.setdefault(tsv_name, []).append(entry)
 
@@ -715,7 +631,7 @@ def _select_download_items(
     seen_tsvs = set()
     for name in tsv_names:
         # download_tsv_name will normalize and validate the TSV name
-        tsv_name = _download_tsv_name(name)
+        tsv_name = _validate_download_table_name(name)
         # if the TSV name has not been seen before, add it to requested list and seen
         if tsv_name not in seen_tsvs:
             requested_tsvs.append(tsv_name)
@@ -773,9 +689,11 @@ def _select_download_items(
                 # get the file path from the entry, if it exists
                 file_path = entry.get("file")
                 # if a file path is specified in the entry, add it to the selected files
-                if file_path and (all_files or _safe_remote_path(file_path).as_posix()
-                                  in explicit_paths):
-                    add_file(file_path, _entry_checksum(entry), entry)
+                if file_path and (
+                    all_files
+                    or validate_remote_path(file_path).as_posix() in explicit_paths
+                ):
+                    add_file(file_path, _checksum_from_config(entry), entry)
 
     # Determine whether to use legacy data formats based on the presence of file paths,
     # TSV names, and all_files flag.
@@ -793,7 +711,7 @@ def _select_download_items(
             for path, checksum in selected.values()]
 
 
-def _catalog_size(value) -> Optional[int]:
+def _parse_file_size(value) -> Optional[int]:
     """Read a recorded size without treating missing or malformed sizes as zero."""
     if value is None or isinstance(value, bool) or pd.isna(value):
         return None
@@ -804,32 +722,6 @@ def _catalog_size(value) -> Optional[int]:
     if not size.is_finite() or size < 0 or size != size.to_integral_value():
         return None
     return int(size)
-
-
-def select_download_files(
-    repo,
-    file_paths: Sequence[str] = (),
-    tsv_names: Sequence[str] = (),
-    all_files: bool = False,
-) -> list[tuple[Path, Optional[ChecksumSpec]]]:
-    """
-    Select remote paths and their available catalog checksums.
-
-    Args:
-        repo: The hallmark repository object.
-        file_paths (sequence[str]): Explicit remote-relative paths.
-        tsv_names (sequence[str]): Catalog TSVs to select.
-        all_files (bool): Include all configured files. Defaults to False.
-
-    Returns:
-        list[tuple]: Pairs of relative paths and optional checksums.
-        Explicit paths use catalog checksums when available.
-
-    Raises:
-        DownloadError: If catalog paths or checksum records are invalid.
-    """
-    return [(item.relative_path, item.checksum) for item in _select_download_items(
-        repo, file_paths=file_paths, tsv_names=tsv_names, all_files=all_files)]
 
 
 def plan_download(
@@ -961,85 +853,7 @@ def execute_download_plan(
         remote, plan.output_path,
         [(item.relative_path, item.checksum) for item in plan.items],
         max_workers=max_workers, show_progress=show_progress,
-        byte_progress=True, total_bytes=plan.total_bytes)
-
-
-def download_remote_data(
-    repo,
-    worktree_path: Path,
-    max_workers: int = 4,
-    show_progress: bool = False,
-    selected_files: Optional[Sequence[tuple[Path, Optional[ChecksumSpec]]]] = None,
-    remote_name: Optional[str] = None,
-    *,
-    approved: bool = False,
-    ) -> dict:
-    """
-    Download remote data files for a hallmark repository.
-
-    Args:
-        repo: The hallmark repository object.
-        worktree_path (Path): Directory where files will be downloaded.
-        max_workers (int): Maximum concurrent download workers. Defaults to 4.
-        show_progress (bool): Show progress by file count. Defaults to False.
-        selected_files (sequence[tuple], optional): Relative paths paired
-            with optional checksums. If omitted, use ``select_download_files``.
-        remote_name (str, optional): Configured data remote to use.
-        approved (bool): Must be True for a nonempty transfer. Defaults to False.
-
-    Returns:
-        dict: Results with ``succeeded``, ``failed``, ``total_bytes``, and
-        ``errors`` keys. Individual transfer failures are recorded here;
-        successful downloads remain available.
-
-    Raises:
-        DownloadError: If approval is missing, configuration is invalid,
-            or connection setup fails before transfers begin.
-    """
-    # Ensure that max_workers is a positive integer for concurrent downloads.
-    max_workers = _require_positive_integer(max_workers, label="max_workers")
-    # Initialize the results dictionary to track download statistics and errors.
-    results = {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": [],}
-
-    # If no specific files are selected for download
-    if selected_files is None:
-        # determine which files to download based on the repository's configuration
-        selected_files = select_download_files(repo)
-
-    # Select the appropriate remote configuration based on the provided remote name.
-    remote_config = _select_remote_config(repo, remote_name=remote_name)
-    # if no remote configuration and there are selected files, raise a DownloadError
-    if remote_config is None:
-        if selected_files:
-            raise DownloadError("No remote is configured in config.yml")
-        # return the results dictionary with zero downloads if no remote is configured
-        return results
-
-    # try to normalize and validate the remote URL from the selected remote config
-    try:
-        remote_url = require_nonempty_string(
-            remote_config.get("url"),
-            label="Remote URL",
-            exception_type=DownloadError)
-    # raise a DownloadError if the remote URL is not configured or invalid
-    except DownloadError as exc:
-        raise DownloadError("Remote URL not configured in config.yml") from exc
-    # if the remote URL is not configured, raise a DownloadError to indicate the issue
-    if not remote_url:
-        raise DownloadError("Remote URL not configured in config.yml")
-    remote_spec = RemoteSpec.from_url(
-        remote_url, remote_config.get("auth"), backend=remote_config.get("backend"),
-        backend_options=remote_config.get("backend_options"))
-    # If there are still no files selected for download
-    if not selected_files:
-        # return the results without attempting any downloads
-        return results
-
-    if approved is not True:
-        raise DownloadError("Dataset downloads require explicit approval")
-    return _download_selected(
-        remote_spec, worktree_path, selected_files,
-        max_workers=max_workers, show_progress=show_progress)
+        total_bytes=plan.total_bytes)
 
 
 def _download_selected(
@@ -1049,7 +863,6 @@ def _download_selected(
     *,
     max_workers,
     show_progress,
-    byte_progress=False,
     total_bytes=None,
 ):
     """Download selected files with shared resources and atomic file replacement."""
@@ -1064,14 +877,9 @@ def _download_selected(
 
     # Normalize selected files into a dictionary to ensure unique paths and checksums.
     normalized_selection: dict[str, tuple[Path, Optional[ChecksumSpec]]] = {}
-    for selection in selected_files:
-        # raise a DownloadError if the selection is not a tuple or list of length 2
-        if (not isinstance(selection, (tuple, list)) or len(selection) != 2):
-            raise DownloadError("selected file entries must be (path, checksum) pairs")
-
-        relative_path, expected_checksum = selection
+    for relative_path, expected_checksum in selected_files:
         # Validate and convert the relative path to a safe Path object
-        relative_path = _safe_remote_path(relative_path)
+        relative_path = validate_remote_path(relative_path)
         # Merge the selected file into the normalized selection,
         # ensuring no conflicting checksums exist.
         _merge_selected_file(normalized_selection, relative_path, expected_checksum)
@@ -1092,12 +900,9 @@ def _download_selected(
 
         files_to_download.append((relative_path, destination, expected_checksum))
 
-    # track byte totals for plans and file counts for the legacy API
+    # track transferred bytes
     progress = tqdm(
-        total=total_bytes if byte_progress else len(files_to_download),
-        unit="B" if byte_progress else "file",
-        unit_scale=byte_progress,
-        disable=not show_progress,)
+        total=total_bytes, unit="B", unit_scale=True, disable=not show_progress)
     progress_lock = Lock()
 
     def advance_bytes(count):
@@ -1108,8 +913,7 @@ def _download_selected(
     # try to download the files using a thread pool executor for concurrent downloads
     try:
         with OperationContext(remote_spec, output_root) as context:
-            if byte_progress:
-                context.on_bytes = advance_bytes
+            context.on_bytes = advance_bytes
             context.transport.prepare()
             executor = ThreadPoolExecutor(
                 max_workers=min(max_workers, context.settings.max_sessions)
@@ -1136,9 +940,16 @@ def _download_selected(
                     except StopIteration:
                         return False
                     # add the download task to the pending set using the executor
-                    pending.add(executor.submit(
-                        _fetch_file, context, relative_path, destination, checksum,
-                        DOWNLOAD_CHUNK_SIZE))
+                    pending.add(
+                        executor.submit(
+                            _download_and_verify_file,
+                            context,
+                            relative_path,
+                            destination,
+                            checksum,
+                            DOWNLOAD_CHUNK_SIZE,
+                        )
+                    )
                     # if the download was successfully submitted, return True
                     return True
 
@@ -1161,14 +972,11 @@ def _download_selected(
                             results["errors"].append(str(exc))
                         # report completed files even when a transfer fails
                         finally:
-                            if byte_progress:
-                                with progress_lock:
-                                    finished = results["succeeded"] + results["failed"]
-                                    progress.set_postfix(
-                                        files=f"{finished}/{len(files_to_download)}",
-                                        failed=results["failed"])
-                            else:
-                                progress.update(1)
+                            with progress_lock:
+                                finished = results["succeeded"] + results["failed"]
+                                progress.set_postfix(
+                                    files=f"{finished}/{len(files_to_download)}",
+                                    failed=results["failed"])
                         # submit the next file for download if available
                         submit_next()
             except BaseException:
