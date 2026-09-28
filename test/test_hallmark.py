@@ -15,7 +15,7 @@ from hallmark.repo.worktree import Worktree
 from hallmark.utils import (
     load_yaml,
     iter_repository_files,
-    regex_sub)
+    apply_regex_replacement)
 from hallmark.error import (
     CheckoutError,
     DestinationExistsError,
@@ -1585,19 +1585,19 @@ def test_iter_repository_files_excludes_symlinks(tmp_path):
         f"{list(iter_repository_files(root))}"
 
 
-#### regex_sub tests ###
+#### apply_regex_replacement tests ###
 
 def test_regex_sub_replaces_all_matches_in_one_pass():
     """
-    Test that regex_sub() replaces all matches in a single pass, rather than
+    Test that apply_regex_replacement() replaces all matches in a single pass, rather than
     performing multiple passes. This test uses a regex pattern to match numbers in a
     string and replaces them with their negated values. It checks that all matches are
     replaced correctly in one pass, without any unintended side effects.
     """
     encoding = {"encoding": {"aspin": r"m([0-9]+(?:\.[0-9]+)?)"}}
 
-    assert regex_sub("source_m0.5_m12", encoding) == "source_-0.5_-12", \
-        "Expected regex_sub to replace all matches in one pass"
+    assert apply_regex_replacement("source_m0.5_m12", encoding) == "source_-0.5_-12", \
+        "Expected apply_regex_replacement to replace all matches in one pass"
 
 
 ### tracked_paths tests ###

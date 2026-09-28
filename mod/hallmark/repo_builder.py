@@ -26,11 +26,11 @@ from .utils import (
     CHECKSUM_ALGORITHMS,
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
     SUPPORTED_CHECKSUM_ALGORITHMS,
-    valid_checksum,
-    atomic_output_path,
+    is_valid_checksum,
+    replace_file_on_success,
     load_yaml_file,
-    normalize_nonempty_string,
-    validate_path_component,
+    require_nonempty_string,
+    validate_path_name,
     validate_relative_path)
 from .repo.config import (
     fmt_fields,
@@ -515,7 +515,7 @@ def _manifest_matches(text: str, algorithm: str) -> list[tuple[str, str]]:
     return [
         (checksum, filename)
         for checksum, filename in _SUMS_LINE_RE.findall(text)
-        if valid_checksum(
+        if is_valid_checksum(
             algorithm, checksum, allow_unknown_algorithm=True)]
 
 def _resolve_manifest_path(filename: str, rel_dir: str) -> str:
@@ -647,7 +647,7 @@ def _normalize_fmt_entries(fmt_entries: list[dict]) -> list[dict]:
             raise ValueError(
                 f"fmt entry {index} must be a dictionary")
         # normalize the "fmt" string to ensure it is non-empty and valid
-        normalized_fmt = normalize_nonempty_string(
+        normalized_fmt = require_nonempty_string(
             entry.get("fmt"), label=f"fmt entry {index} format")
         # if the entry does not have a "db" key, raise an error
         if "db" not in entry:
@@ -777,7 +777,7 @@ def build_repo(
         warnings.warn(
             "index_format and allow_remote_commands are obsolete and ignored",
             DeprecationWarning, stacklevel=2)
-    dataset_name = validate_path_component(dataset_name, label="dataset name")
+    dataset_name = validate_path_name(dataset_name, label="dataset name")
     base_url = (dataset_url if dataset_url is not None else
                 _remote_url(_CYVERSE_CURATED_BASE, f"{dataset_name}/"))
     source = RemoteSpec.parse(
@@ -816,7 +816,7 @@ def _build_repo(
         Repo: Repository containing the prepared catalog.
     """
     # validate the dataset name to ensure it is a valid path component
-    dataset_name = validate_path_component(dataset_name, label="dataset name")
+    dataset_name = validate_path_name(dataset_name, label="dataset name")
     # build_repo resolves the source URL before calling this helper
     base_url = source.remote.url
 
@@ -1081,7 +1081,7 @@ def _build_repo(
     # write the config.yml file with the static files, fmt entries, remotes, and meta
     config_path = repo.dothm.path / "config.yml"
     # use an atomic write context manager to ensure the config.yml is written safely
-    with atomic_output_path(config_path) as temp_config_path:
+    with replace_file_on_success(config_path) as temp_config_path:
         # write the config.yml file with the collected data
         with temp_config_path.open("w", encoding="utf-8") as f:
             f.write("data:")

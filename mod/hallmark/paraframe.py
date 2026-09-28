@@ -29,8 +29,8 @@ from pathlib import Path
 import pandas as pd
 
 from .utils import (
-    find_spec_by_fmt,
-    regex_sub,
+    find_encoding_for_format,
+    apply_regex_replacement,
     try_numeric_conversion)
 
 
@@ -81,11 +81,11 @@ class ParaFrame(pd.DataFrame):
             callable: A constructor that preserves ``encodings`` and
             ``base_path`` metadata.
         """
-        def _c(*args, **kwargs):
+        def create_paraframe(*args, **kwargs):
             kwargs.setdefault("encodings", self.encodings)
             kwargs.setdefault("base_path", self.base_path)
             return ParaFrame(*args, **kwargs)
-        return _c
+        return create_paraframe
 
     def __call__(self, **kwargs):
         """
@@ -134,7 +134,7 @@ class ParaFrame(pd.DataFrame):
         return self[mask]
 
     @staticmethod
-    def _resolve_encoding_spec(fmt, encodings, *, encoding):
+    def _find_encoding_settings(fmt, encodings, *, encoding):
         """
         Used by glob_search.
         Resolve the YAML encoding spec that applies to fmt, when encoding=True.
@@ -185,7 +185,7 @@ class ParaFrame(pd.DataFrame):
                 break
 
         # find the encoding specification corresponding to fmt_enc
-        yaml_encodings = find_spec_by_fmt(fmt_enc, encoding_specs)
+        yaml_encodings = find_encoding_for_format(fmt_enc, encoding_specs)
         # raise a ValueError if no encoding specification is found for fmt_enc
         if yaml_encodings is None:
             raise ValueError(
@@ -270,7 +270,7 @@ class ParaFrame(pd.DataFrame):
         # three characters '{p}'; the maximum number
         # of possible parameters is `len(fmt) // 3`.
 
-        yaml_encodings, fmt_enc = cls._resolve_encoding_spec(
+        yaml_encodings, fmt_enc = cls._find_encoding_settings(
             fmt, encodings, encoding=encoding)
 
         # pattern = base + fmt
@@ -378,7 +378,7 @@ class ParaFrame(pd.DataFrame):
         for f in globbed_files:
             f_short = Path(f).relative_to(base_path).as_posix()
             if encoding:
-                f_new = regex_sub(f_short, yaml_encodings)
+                f_new = apply_regex_replacement(f_short, yaml_encodings)
             else:
                 f_new = f_short
 

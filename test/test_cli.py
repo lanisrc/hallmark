@@ -29,7 +29,7 @@ from hallmark import ParaFrame, Repo
 from hallmark.cli import hallmark
 from hallmark.remote.download import DownloadError
 from hallmark.remote.plan import DownloadItem, DownloadPlan
-from hallmark.utils import chdir
+from hallmark.utils import use_working_directory
 
 cli_module = importlib.import_module("hallmark.cli")
 
@@ -141,7 +141,7 @@ def test_cli_info_shows_dothm_and_worktree_paths():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             result = runner.invoke(hallmark, ["info"])
 
             assert result.exit_code == 0, \
@@ -165,7 +165,7 @@ def test_cli():
         result = runner.invoke(hallmark, ["init", "repo"])
         assert result.exit_code == 0, f"Expected exit code 0, got {result.exit_code}"
 
-        with chdir("repo"):
+        with use_working_directory("repo"):
             assert Path(".hm").is_dir(), "Expected .hm directory to exist after init"
 
             for file in files:
@@ -234,7 +234,7 @@ def test_cli_add_dot_and_explicit_paths():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
             Path("a0_i30.h5").write_text("a0_i30.h5\n", encoding="utf-8")
 
@@ -274,7 +274,7 @@ def test_cli_add_regex_flag(monkeypatch):
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             called = {}
 
             def fake_add(self, fmt, encoding=False):
@@ -301,7 +301,7 @@ def test_cli_status():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
             Path("a0_i30.h5").write_text("a0_i30.h5\n", encoding="utf-8")
             runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
@@ -337,7 +337,7 @@ def test_cli_set_config_and_add_dot():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             result = runner.invoke(
                 hallmark,
                 [
@@ -406,7 +406,7 @@ def test_cli_status_shows_staged_state_after_set_config():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             result = runner.invoke(hallmark, ["set-config", "--fmt", "b{a}_i{i}.h5"])
             assert result.exit_code == 0, \
                 f"Expected exit code 0 for set-config, got {result.exit_code}"
@@ -437,7 +437,7 @@ def test_cli_set_config_rejects_malformed_encoding():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             result = runner.invoke(hallmark, ["set-config", "--encoding", "aspin"])
 
             assert result.exit_code != 0, f"Expected non-zero exit code for malformed \
@@ -455,7 +455,7 @@ def test_cli_log():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             result = runner.invoke(hallmark, ["log"])
             assert result.exit_code == 0, \
                 f"Expected exit code 0 for log, got {result.exit_code}"
@@ -487,7 +487,7 @@ def test_cli_branch_lists_local_branches_and_marks_current():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
             runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
             runner.invoke(hallmark, ["commit", "-m", "add first file"])

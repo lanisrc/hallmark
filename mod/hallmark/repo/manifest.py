@@ -5,7 +5,7 @@ from collections.abc import Iterator
 
 import pandas as pd
 
-from ..utils import safe_str
+from ..utils import string_or_none
 from .config import fmt_fields, row_to_path, single_data_fmt
 
 
@@ -40,8 +40,8 @@ def manifest_frame_from_pf(pf, fmt: str) -> pd.DataFrame:
         row = {"sha1": record["sha1"]}
         # Update the row with the extracted fields
         row.update({field: (
-            # use safe_str to handle None and NaN values
-            safe_str(record[field]) if field in pf_columns else None)
+            # use string_or_none to handle None and NaN values
+            string_or_none(record[field]) if field in pf_columns else None)
             for field in fields})
         rows.append(row)
 

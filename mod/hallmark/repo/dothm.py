@@ -26,7 +26,7 @@ import yaml
 
 from ..error import CloneError, DothmError
 from ..utils import (
-    atomic_output_path, load_yaml_file, validate_path_component)
+    replace_file_on_success, load_yaml_file, validate_path_name)
 from .state import State
 
 
@@ -99,7 +99,7 @@ class Dothm(Repo):
             Path: The full path to the storage file with the correct suffix.
         """
         # validate the name of the storage file to ensure it is a valid path component
-        name = validate_path_component(stem, label="storage name")
+        name = validate_path_name(stem, label="storage name")
         path = self.path / name
         # ensure the path has the correct suffix and is in the correct directory
         if path.suffix.lower() != suffix.lower():
@@ -232,7 +232,7 @@ remote:
         path = self._storage_path(stem, ".yml")
         # Use a temporary file to ensure atomic write operations, preventing
         # data corruption in case of interruptions during the write process.
-        with atomic_output_path(path) as temp_path:
+        with replace_file_on_success(path) as temp_path:
             with temp_path.open("w", encoding="utf-8") as handle:
                 # Use a custom YAML dumper to preserve key order
                 # and handle multi-line strings
@@ -276,7 +276,7 @@ remote:
 
         # Use a temporary file to ensure atomic write operations, preventing
         # data corruption in case of interruptions during the write process.
-        with atomic_output_path(path) as temp_path:
+        with replace_file_on_success(path) as temp_path:
             # Write the DataFrame to a temporary file in TSV format, ensuring that
             # the index is not included and UTF-8 encoding is used for compatibility.
             data.to_csv(

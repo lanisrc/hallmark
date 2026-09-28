@@ -13,8 +13,8 @@ from string import Formatter
 from typing import Dict, Optional
 
 from ..utils import (
-    as_list_of_dicts, coerce_fmt_value, normalize_nonempty_string,
-    validate_path_component, validate_relative_path)
+    as_list_of_dicts, convert_format_value, require_nonempty_string,
+    validate_path_name, validate_relative_path)
 
 from ..transport.base import (
     RemoteSpec, backend_name, profile_name, reject_controls, thaw_backend_options)
@@ -173,7 +173,7 @@ def normalize_remotes(remotes) -> list[dict]:
         # if the remote is a string, treat it as a name and create a dictionary
         if isinstance(remote, str):
             entry = {
-                "name": normalize_nonempty_string(remote, label=f"remote {index} name")}
+                "name": require_nonempty_string(remote, label=f"remote {index} name")}
         # if the remote is a dictionary, make a copy of it for normalization
         elif isinstance(remote, dict):
             entry = dict(remote)
@@ -204,7 +204,7 @@ def normalize_remotes(remotes) -> list[dict]:
             if key not in entry:
                 continue
             # normalize the value of the key to ensure it is a non-empty string
-            entry[key] = normalize_nonempty_string(
+            entry[key] = require_nonempty_string(
                 entry[key],
                 label=f"remote {index} {key}")
 
@@ -350,7 +350,7 @@ def branch_fmt(repo) -> str:
     Returns:
         str: The format string stored in ``data[0].fmt``.
     """
-    return normalize_nonempty_string(
+    return require_nonempty_string(
         require_branch_data_spec(repo).get("fmt"),
         label="branch data[0].fmt",
         exception_type=RuntimeError)
@@ -397,7 +397,7 @@ def set_config(
 
     # if a new format string is provided, validate that it is a non-empty string
     if fmt is not None:
-        fmt = normalize_nonempty_string(fmt, label="fmt")
+        fmt = require_nonempty_string(fmt, label="fmt")
 
     # if encoding updates are provided
     if encoding_updates is not None:
@@ -409,10 +409,10 @@ def set_config(
         # for each field and pattern in the encoding updates
         for field, pattern in encoding_updates.items():
             # validate that the field name is a non-empty string
-            normalized_field = normalize_nonempty_string(
+            normalized_field = require_nonempty_string(
                 field, label="encoding field names")
             # validate that the encoding pattern is a non-empty string
-            normalized_pattern = normalize_nonempty_string(
+            normalized_pattern = require_nonempty_string(
                 pattern, label=f"encoding for {field!r}")
 
             # store the normalized field name and pattern in the dictionary
@@ -422,12 +422,12 @@ def set_config(
 
     # if a new remote name is provided, validate that it is a non-empty string
     if remote_name is not None:
-        remote_name = normalize_nonempty_string(remote_name, label="remote_name")
+        remote_name = require_nonempty_string(remote_name, label="remote_name")
     # if a new remote URL is provided, validate that it is a non-empty string
     if remote_url is not None:
         if isinstance(remote_url, str):
             reject_controls(remote_url, "Remote URL")
-        remote_url = normalize_nonempty_string(remote_url, label="remote_url")
+        remote_url = require_nonempty_string(remote_url, label="remote_url")
     if remote_auth not in (None, ""):
         profile_name(remote_auth)
 
@@ -539,7 +539,7 @@ def normalize_tsv_name(value) -> str:
         raw_name += ".tsv"
 
     # validate the normalized name to ensure it is a safe single path component
-    name = validate_path_component(raw_name, label="TSV database name")
+    name = validate_path_name(raw_name, label="TSV database name")
     # if the name is ".tsv" (case-insensitive), raise an error since it cannot be empty
     if name.lower() == ".tsv":
         raise ValueError("TSV database name cannot be empty")
@@ -561,7 +561,7 @@ def row_to_path(row, fmt: str) -> Path:
     values = {}
     for _, field_name, format_spec, _ in Formatter().parse(fmt):
         if field_name:
-            values[field_name] = coerce_fmt_value(str(row[field_name]), format_spec)
+            values[field_name] = convert_format_value(str(row[field_name]), format_spec)
     # render the path using the format string and coerced values
     rendered_path = fmt.format(**values)
     # validate the rendered path to ensure it is a safe relative path

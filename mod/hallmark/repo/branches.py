@@ -3,7 +3,7 @@ from shutil import rmtree
 from tempfile import TemporaryDirectory
 from git.exc import GitCommandError
 from ..error import CheckoutError, DestinationExistsError, DothmError
-from ..utils import resolve_contained_path
+from ..utils import resolve_path_in_root
 from .config import branch_fmt, row_to_path, single_data_fmt
 from .manifest import iter_manifest_entries
 from .history import load_branch_data, load_head_state, find_remote_branch, fetch_missing_objects_from_remote
@@ -299,7 +299,7 @@ def add_worktree(repo, target_branch: str) -> bool:
 
     # source is the current worktree path, target is the new worktree path
     source = Path(repo.worktree).resolve()
-    target = resolve_contained_path(source.parent, target_branch,
+    target = resolve_path_in_root(source.parent, target_branch,
                                     label="worktree destination")
     # if the target path is the same as the source, raise a ValueError
     if target == source:
@@ -369,7 +369,7 @@ def add_worktree(repo, target_branch: str) -> bool:
             for _, row in target_state.data.iterrows():
                 rel_path = row_to_path(row, target_fmt)
                 # resolve relative path to an absolute path in the target worktree
-                destination = resolve_contained_path(
+                destination = resolve_path_in_root(
                     target,
                     rel_path,
                     label="worktree data path")

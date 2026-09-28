@@ -11,7 +11,7 @@ from pathlib import PurePosixPath
 import parse
 from tqdm import tqdm
 
-from ..utils import CHECKSUM_ALGORITHMS_BY_STRENGTH, valid_checksum
+from ..utils import CHECKSUM_ALGORITHMS_BY_STRENGTH, is_valid_checksum
 from ..transport.base import (
     DownloadError, RemoteEntry, RemoteObjectMissing, literal_path,
 )
@@ -103,7 +103,7 @@ def _manifest_checksums(context, entries):
             if not match:
                 continue
             digest, filename = match.groups()
-            if not valid_checksum(algorithm, digest, allow_unknown_algorithm=True):
+            if not is_valid_checksum(algorithm, digest, allow_unknown_algorithm=True):
                 continue
             while filename.startswith("./"):
                 filename = filename[2:]

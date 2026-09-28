@@ -29,7 +29,7 @@ from .objects import Objects
 from ..paraframe import ParaFrame
 from .manifest import manifest_frame_from_pf, manifest_map, iter_manifest_entries
 from .history import load_head_state
-from ..utils import FILE_IO_CHUNK_SIZE, chdir, iter_repository_files, normalize_nonempty_string, resolve_contained_path
+from ..utils import FILE_IO_CHUNK_SIZE, use_working_directory, iter_repository_files, require_nonempty_string, resolve_path_in_root
 from .changes import filtered_paraframe, worktree_changes
 from .config import branch_encodings, branch_fmt, set_config, single_data_fmt
 
@@ -106,7 +106,7 @@ class Repo:
         if self.worktree is None:
             raise RuntimeError(
                 "cannot resolve paths without a worktree")
-        return resolve_contained_path(self.worktree, value, label=label)
+        return resolve_path_in_root(self.worktree, value, label=label)
 
     def _validate_branch_name(self, value) -> str:
         """
@@ -123,7 +123,7 @@ class Repo:
             ValueError: If the branch name is invalid.
         """
         # Normalize the branch name to ensure it is a non-empty string
-        branch_name = normalize_nonempty_string(value, label="branch name")
+        branch_name = require_nonempty_string(value, label="branch name")
         # if the branch name starts with a hyphen, raise a ValueError
         if branch_name.startswith("-"):
             raise ValueError(f"invalid branch name: {branch_name!r}")
@@ -556,7 +556,7 @@ class Repo:
                 "cannot add files in a bare repository without a worktree")
 
         # Normalize the format string to ensure it is a non-empty string
-        fmt = normalize_nonempty_string(fmt, label="format")
+        fmt = require_nonempty_string(fmt, label="format")
         # "." means rescan the whole worktree using the already-configured format
         rescanning = fmt == "."
         # use the current branch format; otherwise, use the provided format
@@ -570,7 +570,7 @@ class Repo:
             except RuntimeError:
                 previous_fmt = None
         # with the working directory set to the worktree, parse files into a ParaFrame
-        with chdir(self.worktree):
+        with use_working_directory(self.worktree):
             pf = ParaFrame.parse(
                 resolved_fmt,
                 base_path=self.worktree,
@@ -608,7 +608,7 @@ class Repo:
             boolean: True if a commit was created, false otherwise.
         '''
         # Normalize the commit message to ensure it is a non-empty string
-        msg = normalize_nonempty_string(msg, label="commit message")
+        msg = require_nonempty_string(msg, label="commit message")
         # if allow_empty is False and there are no staged changes, return False
         if (not allow_empty and not self.dothm.index.diff("HEAD")):
             # return early since there are no changes to commit

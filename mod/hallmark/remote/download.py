@@ -20,11 +20,11 @@ from ..utils import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
     SUPPORTED_CHECKSUM_ALGORITHMS,
     as_list_of_dicts,
-    atomic_output_path,
-    file_checksum,
-    normalize_nonempty_string,
-    resolve_contained_path,
-    valid_checksum)
+    replace_file_on_success,
+    calculate_file_checksum,
+    require_nonempty_string,
+    resolve_path_in_root,
+    is_valid_checksum)
 from ..repo.config import (
     normalize_remotes,
     normalize_tsv_name,
@@ -275,7 +275,7 @@ def _validate_checksum_spec(expected_checksum: Optional[ChecksumSpec]
     if algorithm not in SUPPORTED_CHECKSUM_ALGORITHMS:
         raise DownloadError(f"Unsupported checksum algorithm: {algorithm!r}")
     # raise a DownloadError if the checksum length is invalid or contains non-hex chars
-    if not valid_checksum(algorithm, checksum):
+    if not is_valid_checksum(algorithm, checksum):
         raise DownloadError(f"Invalid {algorithm} checksum: {checksum!r}")
 
     return algorithm, checksum
@@ -430,7 +430,7 @@ def _select_remote_config(repo, remote_name: Optional[str] = None) -> Optional[d
     # if a specific remote name is provided, attempt to select it from the named remotes
     if remote_name is not None:
         # Normalize the requested remote name to ensure it is a non-empty string
-        requested_name = normalize_nonempty_string(
+        requested_name = require_nonempty_string(
             remote_name, label="Remote name", exception_type=DownloadError)
         # try to retrieve the requested remote from the named remotes dictionary
         try:
@@ -528,7 +528,7 @@ def _verify_validated_checksum(
 
     algorithm, expected = expected_checksum
     # Compute the actual checksum of the file at the given path
-    actual = file_checksum(path, algorithm=algorithm, chunk_size=chunk_size)
+    actual = calculate_file_checksum(path, algorithm=algorithm, chunk_size=chunk_size)
     # raise a DownloadError if the computed checksum does not match the expected value
     if actual.lower() != expected:
         raise DownloadError(f"Checksum mismatch for {path.name} " f"({algorithm})")
@@ -555,17 +555,17 @@ def _fetch_file(context, relative_path, destination, expected_checksum, chunk_si
     validated_checksum = _validate_checksum_spec(expected_checksum)
     try:
         context.check_cancelled()
-        destination = resolve_contained_path(
+        destination = resolve_path_in_root(
             context.output_root, relative_path, label="download destination")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with atomic_output_path(destination, suffix=".part") as temp_path:
+        with replace_file_on_success(destination, suffix=".part") as temp_path:
             context.transport.fetch(relative_path.as_posix(), temp_path,
                                     chunk_size=chunk_size)
             _verify_validated_checksum(temp_path, validated_checksum, chunk_size)
             size = temp_path.stat().st_size
             # Recheck for symlink changes before replacing the destination.
             # Another process can still change the path after this check.
-            resolve_contained_path(context.output_root, relative_path,
+            resolve_path_in_root(context.output_root, relative_path,
                                    label="download destination")
             context.check_cancelled()
         return size
@@ -611,14 +611,14 @@ def _download_file(
             context.transport.direct_url = url
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
-            resolve_contained_path(destination.parent, destination.name)
-            with atomic_output_path(destination, suffix=".part") as temporary:
+            resolve_path_in_root(destination.parent, destination.name)
+            with replace_file_on_success(destination, suffix=".part") as temporary:
                 context.transport.fetch(relative.as_posix(), temporary,
                                         chunk_size=chunk_size)
                 _verify_validated_checksum(
                     temporary, _validate_checksum_spec(expected_checksum), chunk_size)
                 size = temporary.stat().st_size
-                resolve_contained_path(destination.parent, destination.name)
+                resolve_path_in_root(destination.parent, destination.name)
                 context.check_cancelled()
             return size
         except OSError as exc:
@@ -905,7 +905,7 @@ def plan_download(
             backend_options=remote.get("backend_options"))
     for item in items:
         try:
-            resolve_contained_path(output_root, item.relative_path,
+            resolve_path_in_root(output_root, item.relative_path,
                                    label="download destination")
         except ValueError as exc:
             raise DownloadError(str(exc)) from exc
@@ -1017,7 +1017,7 @@ def download_remote_data(
 
     # try to normalize and validate the remote URL from the selected remote config
     try:
-        remote_url = normalize_nonempty_string(
+        remote_url = require_nonempty_string(
             remote_config.get("url"),
             label="Remote URL",
             exception_type=DownloadError)
@@ -1082,11 +1082,11 @@ def _download_selected(
         # try to resolve the destination path for the download,
         # ensuring it is contained within the output root
         try:
-            destination = resolve_contained_path(
+            destination = resolve_path_in_root(
                 output_root,
                 relative_path,
                 label="download destination")
-        # Handle exceptions raised by resolve_contained_path and raise a DownloadError
+        # Handle exceptions raised by resolve_path_in_root and raise a DownloadError
         except ValueError as exc:
             raise DownloadError(str(exc)) from exc
 

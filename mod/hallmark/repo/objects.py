@@ -14,9 +14,9 @@ from typing import Optional, Union
 
 from ..utils import (
     FILE_IO_CHUNK_SIZE,
-    atomic_output_path,
-    file_checksum,
-    valid_checksum)
+    replace_file_on_success,
+    calculate_file_checksum,
+    is_valid_checksum)
 
 
 class Objects:
@@ -71,8 +71,8 @@ class Objects:
         # If an expected SHA-1 checksum is provided, initialize a SHA-1 hash object
         digest = hashlib.sha1()
 
-        # Use atomic_output_path to create a temporary file for the copy operation
-        with atomic_output_path(dest) as temp_path:
+        # Use replace_file_on_success to create a temporary file for the copy operation
+        with replace_file_on_success(dest) as temp_path:
             # read the source file in binary mode and write to the temporary file
             with src.open("rb") as source, temp_path.open("wb") as target:
                 for chunk in iter(lambda: source.read(chunk_size), b""):
@@ -104,8 +104,8 @@ class Objects:
         Returns:
             str: SHA-1 checksum of the file.
         """
-        # Use the helper function file_checksum to compute the SHA-1 checksum
-        return file_checksum(path, algorithm="sha1", chunk_size=chunk_size)
+        # Use the helper function calculate_file_checksum to compute the SHA-1 checksum
+        return calculate_file_checksum(path, algorithm="sha1", chunk_size=chunk_size)
 
 
     @staticmethod
@@ -128,7 +128,7 @@ class Objects:
         if (
             not isinstance(sha1, str)
             or sha1 != sha1.strip()
-            or not valid_checksum("sha1", sha1)
+            or not is_valid_checksum("sha1", sha1)
             ):
             raise ValueError("SHA-1 checksum must be exactly 40 hexadecimal characters")
 

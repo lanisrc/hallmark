@@ -24,7 +24,7 @@ from click import ClickException
 from git.exc import GitError
 
 from . import Repo
-from .utils import validate_path_component
+from .utils import validate_path_name
 from .repo_builder import build_repo
 from .remote.download import DownloadError
 from .remote.discovery import path_matches
@@ -581,7 +581,7 @@ def build(directory, dataset_name, remotes, config_file, fmts, overwrite,
         raise ClickException("Use only one of --config-file or --fmt, not both.")
     # validate the dataset name to ensure it is a valid path component
     with _translate_cli_errors(ValueError):
-        dataset_name = validate_path_component(dataset_name, label="dataset name")
+        dataset_name = validate_path_name(dataset_name, label="dataset name")
 
     repo_path = Path(directory) / f"{dataset_name}.hm"
     parsed_remotes = []

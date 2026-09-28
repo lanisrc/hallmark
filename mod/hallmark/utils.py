@@ -48,8 +48,7 @@ class SymlinkPathError(ValueError):
 
 def as_list_of_dicts(value) -> list | None:
     """
-    Used in downloader by _config_section_entries
-    and repo_config by fmt_entries_from_config.
+    Used in remote.download by _config_section_entries.
     Coerce a config value into list form: a dict becomes a single-item list, and a
     list is returned as-is (unfiltered, elements not checked). Returns None if value
     is neither a dict nor a list.
@@ -67,9 +66,9 @@ def as_list_of_dicts(value) -> list | None:
     return None
 
 
-def safe_str(value) -> str | None:
+def string_or_none(value) -> str | None:
     """
-    Used in repo_manifest by manifest_frame_from_pf.
+    Used in repo.manifest by build_file_table.
     Convert a value to string, handling None and NaN values.
 
     Args:
@@ -90,15 +89,15 @@ def safe_str(value) -> str | None:
     return str(value)
 
 
-def valid_checksum(
+def is_valid_checksum(
     algorithm: str,
     checksum: str,
     *,
     allow_unknown_algorithm: bool = False,
     ) -> bool:
     """
-    Used in downloader by validate_checksum_spec, objects by _normalize_sha1,
-    and repo_builder by _manifest_matches
+    Used in remote.download by validate_checksum_spec, repo.objects by _validate_sha1,
+    and remote.discovery by _attach_published_checksums
     Validate a checksum against its expected length for the given algorithm.
 
     Args:
@@ -129,13 +128,14 @@ def valid_checksum(
     return len(normalized_checksum) == expected_length
 
 
-def file_checksum(
+def calculate_file_checksum(
     path: Path,
     algorithm: str = "sha1",
     chunk_size: int = FILE_IO_CHUNK_SIZE,
     ) -> str:
     """
-    Used in objects by _verify_validated_checksum and objects by _calculate_sha1.
+    Used in repo.objects by _verify_file_checksum and repo.objects by
+    _calculate_sha1.
     Compute a file checksum using streaming reads.
 
     Uses hashlib.file_digest when available and retains compatibility
@@ -162,14 +162,17 @@ def file_checksum(
         digest = hashlib.new(algorithm)
         with path.open("rb") as handle:
             # read the file in chunks to avoid loading the entire file into memory
-            for block in iter(lambda: handle.read(chunk_size), b""):
+            while True:
+                block = handle.read(chunk_size)
+                if not block:
+                    break
                 digest.update(block)
         # return the hexadecimal digest of the file's contents
         return digest.hexdigest()
 
 
 @contextmanager
-def chdir(path):
+def use_working_directory(path):
     '''
     Used in repo by add.
     Temporarily change the working directory within a context.
@@ -187,10 +190,11 @@ def chdir(path):
 
 # use contextmanager to create a temporary file path for atomic writes
 @contextmanager
-def atomic_output_path(path: Path, *, suffix: str = ".tmp"):
+def replace_file_on_success(path: Path, *, suffix: str = ".tmp"):
     """
-    Used in dothm by dump_yml and dump_tsv, downloader by _download_file,
-    objects by _copy_atomically, and repo_builder by build_repo.
+    Used in repo.dothm by write_yaml and write_tsv, remote.download by
+    _download_and_verify_file,
+    and repo.objects by _copy_and_verify_file.
     Context manager that yields a temporary file path for atomic writes.
     The temporary file is created in the same directory as the target path
     and is replaced with the target path upon successful completion.
@@ -224,7 +228,7 @@ def atomic_output_path(path: Path, *, suffix: str = ".tmp"):
 
 def load_yaml(source):
     """
-    Used in repo_state by _load_revision_yaml.
+    Used in repo.history by _load_revision_yaml.
     Load YAML from text or a readable stream.
     Empty YAML documents are represented consistently as an empty
     dictionary.
@@ -249,7 +253,7 @@ def load_yaml(source):
 
 def load_yaml_file(path: Path):
     """
-    Used in dothm by load_yml and repo_builder by build_repo.
+    Used in repo.dothm by read_yaml.
     Load YAML from a file, returning an empty dictionary for empty files.
 
     Args:
@@ -262,16 +266,16 @@ def load_yaml_file(path: Path):
         return load_yaml(handle)
 
 
-def normalize_nonempty_string(
+def require_nonempty_string(
     value,
     *,
     label: str,
     exception_type=ValueError
     ) -> str:
     """
-    Used in downloader by _select_download_files and download_remote_data, repo by
-    _validate_branch_name, add, and commit, repo_config by normalize_remotes,
-    branch_fmt, and set_config.
+    Used in remote.download by _select_download_items, repo by
+    _validate_branch_name, add, and commit, repo.config by normalize_remotes,
+    branch_filename_format, and set_config.
     Normalize a string by stripping whitespace and ensuring it is non-empty.
 
     Args:
@@ -291,7 +295,7 @@ def normalize_nonempty_string(
 
 def iter_repository_files(root: Path):
     """
-    Used in fmt_detection by scan_inventory and repo by status.
+    Used in repo by status.
     Iterate over all files in a repository, excluding internal directories.
 
     Args:
@@ -321,9 +325,9 @@ def iter_repository_files(root: Path):
                 yield file_path
 
 
-def find_spec_by_fmt(fmt, encodings):
+def find_encoding_for_format(fmt, encodings):
     """
-    Used in paraframe by _resolve_encoding_spec.
+    Used in paraframe by _find_encoding_settings.
     Find the encoding spec for a given format string.
 
     Args:
@@ -340,7 +344,7 @@ def find_spec_by_fmt(fmt, encodings):
     return None
 
 
-def regex_sub(value, yaml_encodings):
+def apply_regex_replacement(value, yaml_encodings):
     """
     Used in paraframe by parse.
     Apply regex substitution defined in an encoding spec.
@@ -393,11 +397,12 @@ def try_numeric_conversion(series):
         return series
     # if converting back to str doesn't match original, return original series
     # prevents unintended conversions like "001" -> 1
-    if not all(str(int(numeric_val)) == str(original_val)
-                 or str(numeric_val) == str(original_val)
-               # check each pair of converted and original values
-               for numeric_val, original_val in zip(converted, series)):
-        return series
+    # check each pair of converted and original values
+    for numeric_val, original_val in zip(converted, series):
+        if str(int(numeric_val)) == str(original_val):
+            continue
+        if str(numeric_val) != str(original_val):
+            return series
     return converted
 
 
@@ -423,9 +428,9 @@ def prompt_choice(prompt: str, choices: set[str]) -> str:
     return choice
 
 
-def coerce_fmt_value(value: str, spec: str):
+def convert_format_value(value: str, spec: str):
     """
-    Used in repo_config by row_to_path
+    Used in repo.config by row_to_path
     Convert a value according to a format specification.
 
     Args:
@@ -446,9 +451,8 @@ def coerce_fmt_value(value: str, spec: str):
 
 def validate_relative_path(value, *, label: str = "path") -> Path:
     """
-    Used in downloader by _safe_remote_path, repo_builder by _resolve_manifest_path
-    and _normalize_index_href, repo_config by row_to_path,
-    and repo_worktree by is_within_root.
+    Used in repo.config by row_to_path, transport.base by validate_remote_path,
+    and repo.changes by is_within_root.
     Validate that a given path is a safe relative path.
 
     Args:
@@ -498,10 +502,11 @@ def validate_relative_path(value, *, label: str = "path") -> Path:
     return path
 
 
-def resolve_contained_path(root, value, *, label: str = "path") -> Path:
+def resolve_path_in_root(root, value, *, label: str = "path") -> Path:
     """
-    Used in downloader download_remote_data, repo by _worktree_path and add_worktree,
-    and repo_worktree by worktree_changes.
+    Used in remote.download by _download_and_verify_file, repo by _resolve_worktree_path
+    and
+    add_worktree, and repo.changes by find_changed_and_missing_files.
     Resolve a relative path beneath root without following symlinks outside it.
 
     Args:
@@ -546,10 +551,9 @@ def resolve_contained_path(root, value, *, label: str = "path") -> Path:
     return candidate
 
 
-def validate_path_component(value, *, label: str = "name") -> str:
+def validate_path_name(value, *, label: str = "name") -> str:
     """
-    Used in cli by build, dothm by _storage_path, repo_builder by build_repo, and
-    repo_config by normalize_tsv_name.
+    Used in repo.dothm by _storage_path and repo.config by validate_tsv_filename.
     Validate a value that must be exactly one filesystem path component.
 
     Args:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from ..error import CheckoutError
 from ..utils import (
-    SymlinkPathError, resolve_contained_path, validate_relative_path)
+    SymlinkPathError, resolve_path_in_root, validate_relative_path)
 from .config import branch_fmt
 from .manifest import manifest_map, iter_manifest_entries
 
@@ -118,7 +118,7 @@ def worktree_changes(repo, expected_checksums: dict[str, str]
     for relative_path, expected_sha1 in expected_checksums.items():
         try:
             # resolve the relative path to an absolute path within the worktree
-            full_path = resolve_contained_path(
+            full_path = resolve_path_in_root(
                 repo.worktree,
                 relative_path,
                 label="tracked path")
