@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from git.exc import GitCommandError
 
 from .branches import checkout, add_worktree
+from ..remote.add import is_remote_catalog
 from .dothm import Dothm
 from .state import State
 from .worktree import Worktree
@@ -508,13 +509,17 @@ class Repo:
             if path in head_map and staged_map[path] != head_map[path]
         )
 
+        remote_catalog = is_remote_catalog(self.state)
         worktree_modified: list[str] = []
         worktree_deleted: list[str] = []
         staged_paths = set(staged_map)
 
         # If the repository has a worktree, check for modified and missing tracked files
         if self.worktree is not None:
-            worktree_modified, worktree_deleted = find_changed_and_missing_files(self, staged_map)
+            if not remote_catalog:
+                worktree_modified, worktree_deleted = find_changed_and_missing_files(
+                    self, staged_map
+                )
             worktree_root = Path(self.worktree)
             # generator that yields relative paths of all files in the worktree
             worktree_files = (full_path.relative_to(worktree_root).as_posix()
@@ -538,6 +543,7 @@ class Repo:
                 "deleted": sorted(worktree_deleted),
             },
             "untracked": untracked,
+            "remote_catalog": remote_catalog,
         }
 
     def add(self, fmt: str, encoding: bool = False) -> ParaFrame:
@@ -612,6 +618,9 @@ class Repo:
         if (not allow_empty and not self.dothm.index.diff("HEAD")):
             # return early since there are no changes to commit
             return False
+        if is_remote_catalog(self.state) or self.state.data.empty:
+            self.dothm.index.commit(msg)
+            return True
         # get the current format string and the HEAD state of the repository
         current_fmt = branch_filename_format(self)
         head_state = load_head_state(self)
@@ -640,7 +649,8 @@ class Repo:
             if (current_entry not in head_entries
                  or not self.objects.contains(expected_sha1)):
                 # resolve the full path of the file in the worktree for storage
-                full_path = self._resolve_worktree_path(relative_path, label="tracked path")
+                full_path = self._resolve_worktree_path(
+                    relative_path, label="tracked path")
                 # append the full path and expected SHA1 to the list of files to store
                 files_to_store.append((full_path, expected_sha1))
 

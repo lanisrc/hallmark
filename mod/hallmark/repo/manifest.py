@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 from collections.abc import Iterator
 
@@ -99,6 +101,13 @@ def file_versions_by_path(state, *, fmt: str | None = None) -> dict[str, str]:
         dict[str, str]: Dictionary mapping relative file paths to their
         corresponding SHA-1 checksums.
     """
+    if "path" in state.data.columns and "sha1" not in state.data.columns:
+        from ..transport.base import validate_remote_path
+
+        return {validate_remote_path(record["path"]).as_posix():
+                json.dumps({key: str(value) for key, value in record.items()
+                            if str(value)}, sort_keys=True)
+                for record in state.data.to_dict(orient="records")}
     # call iter_manifest_entries to get an iterator of (path, checksum) tuples
     return {path.as_posix(): checksum
             for path, checksum in iter_manifest_entries(state, fmt=fmt)}
