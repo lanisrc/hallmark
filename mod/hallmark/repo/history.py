@@ -64,7 +64,7 @@ def _parse_data_tsv(data: str) -> pd.DataFrame:
 
 def _copy_current_state(repo, *, include_data: bool) -> State:
     """
-    Used by load_head_state and load_branch_data.
+    Used by load_head_state and load_branch_state.
     Create an independent copy of the repository's current state.
     Args:
         repo: The repository object.
@@ -83,7 +83,7 @@ def _copy_current_state(repo, *, include_data: bool) -> State:
 
 def _load_revision_state(repo, revision: str) -> State:
     """
-    Used by load_head_state and load_branch_data.
+    Used by load_head_state and load_branch_state.
     Load the state from a specific Git revision.
 
     Args:
@@ -103,7 +103,7 @@ def _load_revision_state(repo, revision: str) -> State:
         data=_parse_data_tsv(data_text))
 
 
-def load_branch_data(repo, branch: str) -> State:
+def load_branch_state(repo, branch: str) -> State:
     '''
     Load the state associated with a branch
 

@@ -27,11 +27,11 @@ from .state import State
 from .worktree import Worktree
 from .objects import Objects
 from ..paraframe import ParaFrame
-from .manifest import manifest_frame_from_pf, manifest_map, iter_manifest_entries
+from .manifest import build_file_table, file_versions_by_path, iter_manifest_entries
 from .history import load_head_state
 from ..utils import FILE_IO_CHUNK_SIZE, use_working_directory, iter_repository_files, require_nonempty_string, resolve_path_in_root
-from .changes import filtered_paraframe, worktree_changes
-from .config import branch_encodings, branch_fmt, set_config, single_data_fmt
+from .changes import filter_files_in_directory, find_changed_and_missing_files
+from .config import branch_encodings, branch_filename_format, set_config, single_data_format
 
 @dataclass(init=False)
 class Repo:
@@ -494,8 +494,8 @@ class Repo:
             - untracked files (list[str])
         """
         head_state = load_head_state(self)
-        head_map = manifest_map(head_state)
-        staged_map = manifest_map(self.state)
+        head_map = file_versions_by_path(head_state)
+        staged_map = file_versions_by_path(self.state)
         state_changes = sorted({
             diff.a_path or diff.b_path
             for diff in self.dothm.index.diff("HEAD")
@@ -515,7 +515,7 @@ class Repo:
 
         # If the repository has a worktree, check for modified and missing tracked files
         if self.worktree is not None:
-            worktree_modified, worktree_deleted = worktree_changes(self, staged_map)
+            worktree_modified, worktree_deleted = find_changed_and_missing_files(self, staged_map)
             worktree_root = Path(self.worktree)
             # generator that yields relative paths of all files in the worktree
             worktree_files = (full_path.relative_to(worktree_root).as_posix()
@@ -561,12 +561,12 @@ class Repo:
         rescanning = fmt == "."
         # use the current branch format; otherwise, use the provided format
         if rescanning:
-            resolved_fmt = branch_fmt(self)
+            resolved_fmt = branch_filename_format(self)
             previous_fmt = resolved_fmt
         else:
             resolved_fmt = fmt
             try:
-                previous_fmt = branch_fmt(self)
+                previous_fmt = branch_filename_format(self)
             except RuntimeError:
                 previous_fmt = None
         # with the working directory set to the worktree, parse files into a ParaFrame
@@ -578,11 +578,11 @@ class Repo:
                 encoding=encoding)
         # if rescanning, filter to include only files that match the configured format
         if rescanning:
-            pf = filtered_paraframe(self, pf)
+            pf = filter_files_in_directory(self, pf)
         # Compute checksums for all files in the ParaFrame in parallel
         self._populate_checksums(pf)
 
-        manifest = manifest_frame_from_pf(pf, resolved_fmt)
+        manifest = build_file_table(pf, resolved_fmt)
         # if not rescanning, update the repository configuration with the new format
         if not rescanning:
             set_config(self, fmt=resolved_fmt)
@@ -614,10 +614,10 @@ class Repo:
             # return early since there are no changes to commit
             return False
         # get the current format string and the HEAD state of the repository
-        current_fmt = branch_fmt(self)
+        current_fmt = branch_filename_format(self)
         head_state = load_head_state(self)
         # get the format string of the HEAD state for comparison
-        head_fmt = single_data_fmt(head_state.config)
+        head_fmt = single_data_format(head_state.config)
         # head entries are the set of (path, sha1) tuples from the HEAD state
         head_entries: set[tuple[Path, str]] = set()
 

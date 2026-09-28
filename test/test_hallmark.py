@@ -9,7 +9,7 @@ from git.exc import GitCommandError
 from hallmark import Repo, ParaFrame
 from hallmark.repo.objects import Objects
 from hallmark.repo.state import State
-from hallmark.repo.changes import worktree_changes
+from hallmark.repo.changes import find_changed_and_missing_files
 from hallmark.repo.dothm import Dothm
 from hallmark.repo.worktree import Worktree
 from hallmark.utils import (
@@ -24,15 +24,15 @@ from hallmark.error import (
 from hallmark.repo.config import (
     row_to_path,
     fmt_entries_from_config,
-    single_data_fmt,
-    fmt_fields)
+    single_data_format,
+    filename_fields)
 from hallmark.repo.manifest import (
     iter_manifest_entries,
-    manifest_frame_from_pf,
-    manifest_map)
+    build_file_table,
+    file_versions_by_path)
 from hallmark.repo.history import (
     _parse_data_tsv,
-    load_branch_data,
+    load_branch_state,
     load_head_state)
 
 ### standard pf tests ###
@@ -2096,21 +2096,21 @@ def test_fmt_entries_from_config_rejects_invalid_sections(data, message):
         fmt_entries_from_config({"data": data})
 
 
-### fmt_fields tests ###
+### filename_fields tests ###
 
 def test_fmt_fields_returns_unique_fields_in_original_order():
     """
-    Test that fmt_fields returns a list of unique field names in the order they first
+    Test that filename_fields returns a list of unique field names in the order they first
     appear in the format string. It checks that the function correctly identifies and
     returns the fields without duplicates.
     """
     fmt = "{source}/{source}_{scan:03d}.{format}"
 
-    assert fmt_fields(fmt) == ["source", "scan", "format"], \
-        f"Expected unique fields in original order, got {fmt_fields(fmt)}"
+    assert filename_fields(fmt) == ["source", "scan", "format"], \
+        f"Expected unique fields in original order, got {filename_fields(fmt)}"
 
 
-### single_data_fmt tests ###
+### single_data_format tests ###
 
 @pytest.mark.parametrize(
     ("config", "expected"),[(
@@ -2125,15 +2125,15 @@ def test_fmt_fields_returns_unique_fields_in_original_order():
         ({"data": [{}]}, None),])
 def test_single_data_fmt(config, expected):
     """
-    Test that single_data_fmt returns the expected format string or None based on the
+    Test that single_data_format returns the expected format string or None based on the
     provided configuration. It checks various cases, including valid single entries,
     empty lists, multiple entries, and invalid formats.
     Args:
         config: The configuration dictionary to test.
-        expected: The expected return value from single_data_fmt.
+        expected: The expected return value from single_data_format.
     """
-    assert single_data_fmt(config) == expected, f"Expected single_data_fmt({config}) \
-        to be {expected}, got {single_data_fmt(config)}"
+    assert single_data_format(config) == expected, f"Expected single_data_format({config}) \
+        to be {expected}, got {single_data_format(config)}"
 
 
 ### Repo.add_worktree tests ###
@@ -2495,15 +2495,15 @@ def test_state_update_and_replace_share_data_normalization():
 
 def test_manifest_frame_normalizes_missing_and_integral_float_values():
     """
-    Test that manifest_frame_from_pf normalizes missing values and integral float values
+    Test that build_file_table normalizes missing values and integral float values
     to the expected string representations. This test creates a DataFrame with missing
-    and integral float values, then calls manifest_frame_from_pf to normalize it.
+    and integral float values, then calls build_file_table to normalize it.
     It checks that the resulting DataFrame has the expected normalized values.
     """
     frame = pd.DataFrame({
             "sha1": ["first", "second", "third"],
             "value": [pd.NA, 1.0, float("inf")]})
-    result = manifest_frame_from_pf(frame, "{value}.dat")
+    result = build_file_table(frame, "{value}.dat")
     values = result["value"].tolist()
 
     assert pd.isna(values[0]), f"Expected first value to be NaN, got {values[0]}"
@@ -2512,7 +2512,7 @@ def test_manifest_frame_normalizes_missing_and_integral_float_values():
 
 def test_manifest_entries_share_canonical_path_generation():
     """
-    Test that iter_manifest_entries and manifest_map share the same canonical path
+    Test that iter_manifest_entries and file_versions_by_path share the same canonical path
     generation logic. This test creates a State object with a specific configuration and
     data, then checks that both functions produce consistent results for the manifest
     entries and mapping.
@@ -2524,28 +2524,28 @@ def test_manifest_entries_share_canonical_path_generation():
     assert list(iter_manifest_entries(state)) == [(Path("nested/item.dat"), "ABC123")],\
       f"Expected iter_manifest_entries to yield [(Path('nested/item.dat'), 'ABC123')],\
             got {list(iter_manifest_entries(state))}"
-    assert manifest_map(state) == {"nested/item.dat": "ABC123"}, \
-        f"Expected manifest_map to return {{'nested/item.dat': 'ABC123'}}, \
-            got {manifest_map(state)}"
+    assert file_versions_by_path(state) == {"nested/item.dat": "ABC123"}, \
+        f"Expected file_versions_by_path to return {{'nested/item.dat': 'ABC123'}}, \
+            got {file_versions_by_path(state)}"
 
 
 def test_manifest_entries_empty_when_config_has_no_data_fmt():
     """
     If config has no fmt entries, iter_manifest_entries should produce no rows and
-    manifest_map should be empty, even when state.data has rows.
+    file_versions_by_path should be empty, even when state.data has rows.
     """
     state = State(config={"data": [{"file": "README.md"}]},
                   data=pd.DataFrame({"sha1": ["ABC123"], "name": ["item"]}))
 
     assert list(iter_manifest_entries(state)) == [], f"Expected no manifest entries \
         when no data fmt exists, got {list(iter_manifest_entries(state))}"
-    assert manifest_map(state) == {}, f"Expected empty manifest map when no data fmt \
-        exists, got {manifest_map(state)}"
+    assert file_versions_by_path(state) == {}, f"Expected empty manifest map when no data fmt \
+        exists, got {file_versions_by_path(state)}"
 
 
 def test_manifest_map_uses_explicit_fmt_override():
     """
-    manifest_map should honor an explicit fmt argument even if config does not define
+    file_versions_by_path should honor an explicit fmt argument even if config does not define
     a data fmt.
     """
     state = State(
@@ -2554,7 +2554,7 @@ def test_manifest_map_uses_explicit_fmt_override():
             "sha1": ["ABC123"],
             "folder": ["nested"],
             "name": ["item"]}))
-    actual = manifest_map(state, fmt="{folder}/{name}.dat")
+    actual = file_versions_by_path(state, fmt="{folder}/{name}.dat")
 
     assert actual == {"nested/item.dat": "ABC123"}, \
         f"Expected explicit fmt override mapping, got {actual}"
@@ -2564,9 +2564,9 @@ def test_manifest_map_uses_explicit_fmt_override():
 
 def test_worktree_changes_accepts_uppercase_expected_checksum(tmp_path):
     """
-    Test that worktree_changes accepts an uppercase expected checksum and correctly
+    Test that find_changed_and_missing_files accepts an uppercase expected checksum and correctly
     identifies that there are no modified or missing files. This test creates a repo,
-    adds a file, computes its checksum, and then calls worktree_changes with the
+    adds a file, computes its checksum, and then calls find_changed_and_missing_files with the
     uppercase version of the checksum. It checks that the returned modified and missing
     lists are empty.
     Args:
@@ -2576,7 +2576,7 @@ def test_worktree_changes_accepts_uppercase_expected_checksum(tmp_path):
     data_path = repo.worktree / "data.dat"
     data_path.write_text("contents\n", encoding="utf-8")
     checksum = repo.checksum(data_path)
-    modified, missing = worktree_changes(repo, {"data.dat": checksum.upper()})
+    modified, missing = find_changed_and_missing_files(repo, {"data.dat": checksum.upper()})
 
     assert modified == [], f"Expected no modified files, got {modified}"
     assert missing == [], f"Expected no missing files, got {missing}"
@@ -2644,7 +2644,7 @@ def test_new_branch_state_is_independent_from_current_state(tmp_path):
     repo.state.config = {"data": [{"fmt": "data_{number}.txt"}]}
     repo.state.meta = {"nested": {"value": "original"}}
     repo.state.data = pd.DataFrame({"sha1": ["abc123"], "number": ["1"]})
-    copied = load_branch_data(repo, "new-branch")
+    copied = load_branch_state(repo, "new-branch")
     copied.config["data"][0]["fmt"] = "changed"
     copied.meta["nested"]["value"] = "changed"
     copied.data.loc[0, "number"] = "2"

@@ -27,7 +27,7 @@ from ..utils import (
     is_valid_checksum)
 from ..repo.config import (
     normalize_remotes,
-    normalize_tsv_name,
+    validate_tsv_filename,
     row_to_path)
 
 # Maximum number of files to download before showing a warning message.
@@ -378,7 +378,7 @@ def _download_tsv_name(value) -> str:
         DownloadError: If the TSV name is invalid.
     """
     try:
-        return normalize_tsv_name(value)
+        return validate_tsv_filename(value)
     except ValueError as exc:
         raise DownloadError(str(exc)) from exc
 

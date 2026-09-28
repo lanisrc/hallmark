@@ -16,7 +16,7 @@ from .discovery import discover, path_matches
 from ..repo.dothm import Dothm
 from ..error import CloneError, DestinationExistsError
 from ..utils import as_list_of_dicts
-from ..repo.config import fmt_fields, normalize_remotes, normalize_tsv_name, row_to_path
+from ..repo.config import filename_fields, normalize_remotes, validate_tsv_filename, row_to_path
 from ..transport import OperationContext, RemoteSpec
 from ..transport.base import (RemoteObjectMissing, literal_path,
                              thaw_backend_options)
@@ -31,7 +31,7 @@ def _catalog_names(config):
     names = {"data.tsv"}
     for entry in entries:
         if entry.get("db"):
-            names.add(normalize_tsv_name(entry["db"]))
+            names.add(validate_tsv_filename(entry["db"]))
         if entry.get("file"):
             literal_path(entry["file"])
     normalize_remotes(config.get("remote"))
@@ -42,7 +42,7 @@ def _catalog_formats(config, name):
     """Return the filename formats associated with a catalog TSV."""
     entries = as_list_of_dicts(config.get("data", [])) or []
     return [entry["fmt"] for entry in entries if entry.get("fmt")
-            and normalize_tsv_name(entry.get("db", "data.tsv")) == name]
+            and validate_tsv_filename(entry.get("db", "data.tsv")) == name]
 
 
 def _row_path(row, formats):
@@ -70,7 +70,7 @@ def _validate_snapshot(files, config):
         except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
             raise CloneError(f"Invalid published catalog table: {name}") from exc
         formats = _catalog_formats(config, name)
-        has_fields = any(fmt_fields(fmt) and set(fmt_fields(fmt)) <= set(frame.columns)
+        has_fields = any(filename_fields(fmt) and set(filename_fields(fmt)) <= set(frame.columns)
                          for fmt in formats)
         if not ({"path", "sha1"} & set(frame.columns) or has_fields):
             raise CloneError(f"Unrecognized published catalog columns: {name}")

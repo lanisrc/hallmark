@@ -4,9 +4,9 @@ from tempfile import TemporaryDirectory
 from git.exc import GitCommandError
 from ..error import CheckoutError, DestinationExistsError, DothmError
 from ..utils import resolve_path_in_root
-from .config import branch_fmt, row_to_path, single_data_fmt
+from .config import branch_filename_format, row_to_path, single_data_format
 from .manifest import iter_manifest_entries
-from .history import load_branch_data, load_head_state, find_remote_branch, fetch_missing_objects_from_remote
+from .history import load_branch_state, load_head_state, find_remote_branch, fetch_missing_objects_from_remote
 from .changes import ensure_clean_tracked_files, tracked_paths
 
 
@@ -40,9 +40,9 @@ def checkout(repo, target_branch: str) -> bool:
 
     create_new_branch = not has_local and not has_remote
     current_tracked = tracked_paths(repo)
-    target_state = load_branch_data(repo, target_branch)
+    target_state = load_branch_state(repo, target_branch)
     # Get the data format string for the target branch configuration
-    target_fmt = single_data_fmt(target_state.config)
+    target_fmt = single_data_format(target_state.config)
     if target_fmt is None:
         # Raise an error if the target branch does not meet the expected criteria
         raise CheckoutError(
@@ -116,7 +116,7 @@ def checkout(repo, target_branch: str) -> bool:
     # Store the name of the currently active branch before switching
     original_branch = repo.dothm.active_branch.name
     # Get the current format string from the branch configuration
-    current_fmt = branch_fmt(repo)
+    current_fmt = branch_filename_format(repo)
     # Create a mapping of current tracked paths to their SHA1 checksums
     current_sha_by_path = {
         row_to_path(row, current_fmt): str(row["sha1"]).lower()
@@ -318,13 +318,13 @@ def add_worktree(repo, target_branch: str) -> bool:
     created_branch = target_branch not in existing_branches
     if not created_branch:
         # load the state of the target branch if it already exists
-        target_state = load_branch_data(repo, target_branch)
+        target_state = load_branch_state(repo, target_branch)
     # if the target branch does not exist yet, load the current HEAD state
     else:
         target_state = load_head_state(repo)
 
     # get the target fmt from the target branch configuration
-    target_fmt = single_data_fmt(target_state.config)
+    target_fmt = single_data_format(target_state.config)
     # if target branch does not have exactly one data format, raise a RuntimeError
     if target_fmt is None:
         raise RuntimeError(

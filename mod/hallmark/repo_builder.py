@@ -33,8 +33,8 @@ from .utils import (
     validate_path_name,
     validate_relative_path)
 from .repo.config import (
-    fmt_fields,
-    normalize_tsv_name,
+    filename_fields,
+    validate_tsv_filename,
     normalize_remotes,
     fmt_entries_from_config)
 
@@ -670,7 +670,7 @@ def _normalize_fmt_entries(fmt_entries: list[dict]) -> list[dict]:
         # add the normalized fmt to the entry to ensure consistency
         normalized_entry["fmt"] = normalized_fmt
         # normalize the database name using the provided function to ensure consistency
-        normalized_entry["db"] = normalize_tsv_name(entry["db"])
+        normalized_entry["db"] = validate_tsv_filename(entry["db"])
         # add the normalized entry to the list of normalized entries
         normalized.append(normalized_entry)
 
@@ -1037,7 +1037,7 @@ def _build_repo(
         # group the fields for each target database, ensuring no duplicates
         target_fields = fields_by_target_db.setdefault(db, [])
         # for each field extracted from the format string, add it to the target fields
-        for field in fmt_fields(fmt_entry["fmt"]):
+        for field in filename_fields(fmt_entry["fmt"]):
             # if the field not already in the manifest columns or target fields, add it
             if field not in manifest_columns and field not in target_fields:
                 target_fields.append(field)

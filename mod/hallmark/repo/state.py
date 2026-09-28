@@ -21,7 +21,7 @@ import pandas as pd
 COLUMNS = ["sha1"]
 
 
-def _normalized_state_data(frame: pd.DataFrame) -> pd.DataFrame:
+def _prepare_file_rows(frame: pd.DataFrame) -> pd.DataFrame:
     """
     Used by update and replace.
     Normalize the state data by retaining only the relevant columns and ensuring
@@ -96,7 +96,7 @@ class State:
              incoming = pd.DataFrame(columns=columns)
         # if the provided ParaFrame is not empty, normalize its data
         else:
-            incoming = _normalized_state_data(pf)
+            incoming = _prepare_file_rows(pf)
         # Merge the incoming rows with the existing state.
         merged = pd.concat([self.data, incoming], ignore_index=True, sort=False)
 
@@ -127,4 +127,4 @@ class State:
             None.
         """
         # call the normalization function to ensure consistent data types and structure
-        self.data = _normalized_state_data(pf)
+        self.data = _prepare_file_rows(pf)

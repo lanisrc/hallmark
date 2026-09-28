@@ -113,9 +113,9 @@ def _update_remote_config(
     config["remote"] = (normalized if preserve_list else normalized[0])
 
 
-def _data_spec_or_none(config) -> Optional[dict]:
+def _single_data_config(config) -> Optional[dict]:
     """
-    Used by single_data_fmt and require_branch_data_spec.
+    Used by single_data_format and require_data_config.
     Extract the single data specification from a repository configuration.
 
     Args:
@@ -272,7 +272,7 @@ def fmt_entries_from_config(config: dict) -> list[dict]:
     return [entry for entry in entries if "fmt" in entry]
 
 
-def single_data_fmt(config: dict) -> Optional[str]:
+def single_data_format(config: dict) -> Optional[str]:
     """
     Extract the format string from a repository configuration that defines
     exactly one entry under the "data" section.
@@ -285,7 +285,7 @@ def single_data_fmt(config: dict) -> Optional[str]:
         or None if not defined or if the configuration is invalid.
     """
     # call the helper function to get the single data specification from the config
-    spec = _data_spec_or_none(config)
+    spec = _single_data_config(config)
     # if there is no valid single data specification, return None
     if spec is None:
         return None
@@ -296,7 +296,7 @@ def single_data_fmt(config: dict) -> Optional[str]:
     return fmt.strip()
 
 
-def get_or_create_branch_data_spec(config: dict) -> dict:
+def get_or_create_data_config(config: dict) -> dict:
     """
     Ensure the configuration contains a valid data specification.
 
@@ -319,7 +319,7 @@ def get_or_create_branch_data_spec(config: dict) -> dict:
     return config["data"][0]
 
 
-def require_branch_data_spec(repo) -> dict:
+def require_data_config(repo) -> dict:
     """
     Return the branch data specification. Raises RuntimeError if
     the configuration does not define exactly one entry under ``data``.
@@ -331,7 +331,7 @@ def require_branch_data_spec(repo) -> dict:
         dict: The branch data specification.
     """
     # call the helper function to get the single data specification from the config
-    spec = _data_spec_or_none(repo.state.config)
+    spec = _single_data_config(repo.state.config)
     # raise a RuntimeError if there is no valid single data specification
     if spec is None:
         raise RuntimeError(
@@ -339,7 +339,7 @@ def require_branch_data_spec(repo) -> dict:
     return spec
 
 
-def branch_fmt(repo) -> str:
+def branch_filename_format(repo) -> str:
     """
     Return the configured filename format. Raises RuntimeError if
     no valid format string is defined.
@@ -351,7 +351,7 @@ def branch_fmt(repo) -> str:
         str: The format string stored in ``data[0].fmt``.
     """
     return require_nonempty_string(
-        require_branch_data_spec(repo).get("fmt"),
+        require_data_config(repo).get("fmt"),
         label="branch data[0].fmt",
         exception_type=RuntimeError)
 
@@ -434,7 +434,7 @@ def set_config(
     # if a new format string or encoding updates are provided
     if fmt is not None or encoding_updates is not None:
         # ensure that the "data" section has exactly one entry and retrieve it
-        spec = get_or_create_branch_data_spec(config)
+        spec = get_or_create_data_config(config)
         updated_spec = {}
         # if a new format string is provided, update the "fmt" key in the spec
         if fmt is not None:
@@ -487,11 +487,11 @@ def branch_encodings(repo) -> list[dict]:
         list[dict]: A list containing the encoding specification, or an
         empty list if no encodings are defined.
     """
-    spec = require_branch_data_spec(repo)
+    spec = require_data_config(repo)
     return [spec] if isinstance(spec.get("encoding"), dict) else []
 
 
-def fmt_fields(fmt: str) -> list[str]:
+def filename_fields(fmt: str) -> list[str]:
     """
     Extract field names from a format string.
 
@@ -513,7 +513,7 @@ def fmt_fields(fmt: str) -> list[str]:
     return fields
 
 
-def normalize_tsv_name(value) -> str:
+def validate_tsv_filename(value) -> str:
     """
     Validate a TSV database name and add the .tsv suffix when necessary.
 

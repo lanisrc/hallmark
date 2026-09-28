@@ -6,10 +6,10 @@ from collections.abc import Iterator
 import pandas as pd
 
 from ..utils import string_or_none
-from .config import fmt_fields, row_to_path, single_data_fmt
+from .config import filename_fields, row_to_path, single_data_format
 
 
-def manifest_frame_from_pf(pf, fmt: str) -> pd.DataFrame:
+def build_file_table(pf, fmt: str) -> pd.DataFrame:
     """
     Build a manifest table from a ``ParaFrame``. Raises RuntimeError
     if a file path cannot be parsed using ``fmt``.
@@ -25,7 +25,7 @@ def manifest_frame_from_pf(pf, fmt: str) -> pd.DataFrame:
         pandas.DataFrame: Manifest table containing ``sha1`` values and
         parsed filename fields.
     """
-    fields = fmt_fields(fmt)
+    fields = filename_fields(fmt)
     # The manifest table will have a "sha1" column followed by the extracted fields.
     columns = ["sha1", *fields]
     # If the ParaFrame is empty, return an empty DataFrame with the appropriate columns.
@@ -75,7 +75,7 @@ def iter_manifest_entries(
     # If no format is provided, determine it from the repository configuration.
     if fmt is None:
         # get the single data format from the repository configuration
-        fmt = single_data_fmt(state.config)
+        fmt = single_data_format(state.config)
         # if the format is still None, return immediately
         if fmt is None:
             return
@@ -85,7 +85,7 @@ def iter_manifest_entries(
         yield row_to_path(record, fmt), str(record["sha1"])
 
 
-def manifest_map(state, *, fmt: str | None = None) -> dict[str, str]:
+def file_versions_by_path(state, *, fmt: str | None = None) -> dict[str, str]:
     """
     Create a mapping from file paths to SHA-1 checksums.
 

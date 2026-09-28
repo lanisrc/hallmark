@@ -5,11 +5,11 @@ from pathlib import Path
 from ..error import CheckoutError
 from ..utils import (
     SymlinkPathError, resolve_path_in_root, validate_relative_path)
-from .config import branch_fmt
-from .manifest import manifest_map, iter_manifest_entries
+from .config import branch_filename_format
+from .manifest import file_versions_by_path, iter_manifest_entries
 
 
-def effective_cwd(repo) -> Path:
+def working_directory_for_repo(repo) -> Path:
     '''
     Determine the effective working directory for repository operations.
     Raises RuntimeError if the repository has no worktree
@@ -33,7 +33,7 @@ def effective_cwd(repo) -> Path:
     return cwd
 
 
-def filtered_paraframe(repo, pf):
+def filter_files_in_directory(repo, pf):
     '''
     Filter a ``ParaFrame`` to include only files that are within the effective working
     directory of the repository. Raise ValueError if the repository has no worktree.
@@ -49,7 +49,7 @@ def filtered_paraframe(repo, pf):
         ValueError: If the repository has no worktree.
     '''
     # Determine the effective working directory for repository operations
-    root = effective_cwd(repo)
+    root = working_directory_for_repo(repo)
     # resolve the repository's worktree path to an absolute path
     worktree = Path(repo.worktree).resolve()
     # if the effective working directory is the same as the worktree root
@@ -88,13 +88,14 @@ def tracked_paths(repo) -> set[Path]:
         set[Path]: Paths of all files tracked in the current
         repository state.
     '''
-    # call branch_fmt to get the filename format from the repository configuration
-    fmt = branch_fmt(repo)
+    # call branch_filename_format to get the filename format from the repository
+    # configuration
+    fmt = branch_filename_format(repo)
     # use iter_manifest_entries to iterate over the manifest entries and collect paths
     return {path for path, _ in iter_manifest_entries(repo.state, fmt=fmt)}
 
 
-def worktree_changes(repo, expected_checksums: dict[str, str]
+def find_changed_and_missing_files(repo, expected_checksums: dict[str, str]
                      ) -> tuple[list[str], list[str]]:
     """
     Return modified and missing tracked worktree paths.
@@ -169,13 +170,15 @@ def ensure_clean_tracked_files(repo) -> None:
         raise CheckoutError("cannot checkout without a worktree")
 
     # determine the filename format from the repository configuration
-    fmt = branch_fmt(repo)
+    fmt = branch_filename_format(repo)
     # get the expected checksums for all tracked files in the repository
-    expected_checksums = manifest_map(repo.state, fmt=fmt)
-    # try to get the modified and missing tracked files using worktree_changes
+    expected_checksums = file_versions_by_path(repo.state, fmt=fmt)
+    # try to get the modified and missing tracked files using
+    # find_changed_and_missing_files
     try:
-        modified, missing = worktree_changes(repo, expected_checksums)
-    # if a ValueError occurs during the worktree_changes call, raise a CheckoutError
+        modified, missing = find_changed_and_missing_files(repo, expected_checksums)
+    # if a ValueError occurs during the find_changed_and_missing_files call, raise a
+    # CheckoutError
     except ValueError as exc:
         raise CheckoutError(str(exc)) from exc
 

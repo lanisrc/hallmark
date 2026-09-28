@@ -29,7 +29,7 @@ from .repo_builder import build_repo
 from .remote.download import DownloadError
 from .remote.discovery import path_matches
 from .error import CheckoutError, CloneError
-from .repo.config import normalize_tsv_name
+from .repo.config import validate_tsv_filename
 
 
 # use a context manager to translate application errors into clean Click errors
@@ -610,7 +610,7 @@ def build(directory, dataset_name, remotes, config_file, fmts, overwrite,
             # normalize the db name to ensure it is valid and ends with ".tsv"
             try:
                 with _translate_cli_errors(*_BUILD_DATASET_ERRORS):
-                    db = normalize_tsv_name(db)
+                    db = validate_tsv_filename(db)
             # handle any network-related exceptions raised
             except requests.exceptions.RequestException as exc:
                 raise ClickException(
