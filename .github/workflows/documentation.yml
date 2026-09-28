@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -28,12 +30,12 @@ jobs:
 
       - name: Build docs
         run: |
-          sphinx-build doc doc/_build
+          sphinx-build -W --keep-going doc "${{ runner.temp }}/hallmark-docs"
 
       - name: Upload artifacts
         uses: actions/upload-pages-artifact@v3
         with:
-          path: "doc/_build"
+          path: "${{ runner.temp }}/hallmark-docs"
 
       - name: Deploy to GitHub pages
         id: deployment
