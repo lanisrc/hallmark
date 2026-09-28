@@ -1,9 +1,7 @@
 """CyVerse WebDAV HTML listing support, sharing the HTTP transfer backend."""
 
-from html.parser import HTMLParser
-
 from .http import HttpBackend
-from .index import _IndexParser, _parse_index
+from .index import _IndexParser, _parse_directory_listing
 
 
 class CyVerseIndexParser(_IndexParser):
@@ -20,21 +18,14 @@ class CyVerseIndexParser(_IndexParser):
 
 def is_cyverse_index(text):
     """Recognize CyVerse markup independently of its hosting domain."""
-    class Probe(HTMLParser):
-        found = False
-
-        def handle_starttag(self, tag, attrs):
-            if tag == "tr" and "object" in dict(attrs).get("class", "").split():
-                self.found = True
-
-    parser = Probe()
+    parser = CyVerseIndexParser()
     parser.feed(text)
-    return parser.found
+    return parser.listing
 
 
 class CyVerseBackend(HttpBackend):
     """Discover CyVerse collections and transfer their files over HTTP(S)."""
 
-    def _parse_index(self, text, directory):
-        return _parse_index(text, self.context.remote.url, directory,
+    def _parse_directory_listing(self, text, directory):
+        return _parse_directory_listing(text, self.context.remote.url, directory,
                             parser_class=CyVerseIndexParser)
