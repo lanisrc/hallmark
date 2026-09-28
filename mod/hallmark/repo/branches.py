@@ -1,33 +1,42 @@
 from pathlib import Path
 from shutil import rmtree
 from tempfile import TemporaryDirectory
+
 from git.exc import GitCommandError
+
 from ..error import CheckoutError, DestinationExistsError, DothmError
 from ..utils import resolve_path_in_root
+from ..remote.add import is_remote_catalog
 from .config import branch_filename_format, row_to_path, single_data_format
 from .manifest import iter_manifest_entries
-from .history import load_branch_state, load_head_state, find_remote_branch, fetch_missing_objects_from_remote
+from .history import (
+    load_branch_state, load_head_state, find_remote_branch,
+    fetch_missing_objects_from_remote)
 from .changes import ensure_clean_tracked_files, tracked_paths
 
 
-def checkout(repo, target_branch: str) -> bool:
-    '''
-    Switch to a different branch and update the worktree. Raises ValueError if
-    branch name is invalid. Raises CheckoutError if the workign directoary
-    is not clean or checkout can't be completed safely.
-
-    Args:
-        target_branch (string): Branch to switch to.
-    Returns:
-        boolean: True if checkout succeeds.
-    Raises:
-        CheckoutError: If the checkout cannot be completed safely.
-    '''
+def checkout(repo, target_branch):
     # Validate and normalize the target branch name
     target_branch = repo._validate_branch_name(target_branch)
 
     if repo.worktree is None:
         raise CheckoutError("cannot checkout without a worktree")
+    target_state = load_branch_state(repo, target_branch)
+    if is_remote_catalog(repo.state) or is_remote_catalog(target_state):
+        if any(not state.data.empty and not is_remote_catalog(state)
+               for state in (repo.state, target_state)):
+            raise CheckoutError(
+                "Cannot switch between local files and remote catalogs")
+        if repo.dothm.index.diff("HEAD") or repo.dothm.index.diff(None):
+            raise CheckoutError("Commit hallmark state changes before checkout")
+        names = {head.name for head in repo.dothm.heads}
+        remote_branch = find_remote_branch(repo, target_branch)
+        if target_branch not in names and remote_branch is None:
+            repo.dothm.git.checkout("-b", target_branch)
+        else:
+            repo.dothm.git.checkout(target_branch)
+        repo.state = repo.dothm.load_state()
+        return True
     ensure_clean_tracked_files(repo)
 
     local_branches = {head.name for head in repo.dothm.heads}
@@ -195,7 +204,8 @@ def checkout(repo, target_branch: str) -> bool:
                 key=lambda path: (len(path.parts), path.as_posix()), reverse=True)
             for relative_path in affected_paths:
                 # absolute path in the worktree for the affected relative path
-                path = repo._resolve_worktree_path(relative_path, label="checkout target")
+                path = repo._resolve_worktree_path(
+                    relative_path, label="checkout target")
                 # create a backup before replacing it with the target file
                 if path.exists():
                     backup_path = backup_root / str(len(backups))
@@ -279,17 +289,7 @@ def checkout(repo, target_branch: str) -> bool:
     return True
 
 
-def add_worktree(repo, target_branch: str) -> bool:
-    '''
-    Create or link a new worktree for a branch. Raises ValueError if branch name
-    is invalid.
-    Raises RuntimeError if called in a bare repository or worktree creation fails.
-
-    Args:
-        target_branch (string): Name of the branch to attach.
-    Returns:
-        boolean: True if the worktree was successfully created.
-    '''
+def add_worktree(repo, target_branch):
     # Validate and normalize the target branch name
     target_branch = repo._validate_branch_name(target_branch)
 
@@ -410,3 +410,4 @@ def add_worktree(repo, target_branch: str) -> bool:
                 f'"{target_branch}": {exc}') from exc
 
     return True
+
