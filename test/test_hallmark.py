@@ -2816,3 +2816,52 @@ def test_checkout_remote_branch(tmp_path):
     assert (clone.worktree / "data.txt").read_text(
         encoding="utf-8"
     ) == "experiment contents\n"
+
+
+@pytest.mark.parametrize("method", ["glob", "rglob", "iterdir"])
+def test_worktree_lists_files(tmp_path, method):
+    file_path = tmp_path / "data.h5"
+    file_path.write_text("data")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    nested_file = nested / "other.h5"
+    nested_file.write_text("other")
+    worktree = Worktree(tmp_path)
+
+    if method == "glob":
+        paths = list(worktree.glob("*.h5"))
+        expected = {file_path}
+    elif method == "rglob":
+        paths = list(worktree.rglob("*.h5"))
+        expected = {file_path, nested_file}
+    else:
+        paths = list(worktree.iterdir())
+        expected = {file_path, nested}
+
+    assert set(paths) == expected
+    if hasattr(Path, "with_segments"):
+        for path in paths:
+            assert type(path) is type(tmp_path)
+
+
+
+def test_worktree_derived_paths_are_plain_paths(tmp_path):
+    if not hasattr(Path, "with_segments"):
+        pytest.skip("pathlib.with_segments requires Python 3.12")
+    worktree = Worktree(tmp_path)
+    paths = [
+        worktree.joinpath("missing.h5"),
+        worktree.with_name("missing"),
+        worktree.with_suffix(".h5"),
+        worktree.parent,
+    ]
+    expected = [
+        tmp_path.joinpath("missing.h5"),
+        tmp_path.with_name("missing"),
+        tmp_path.with_suffix(".h5"),
+        tmp_path.parent,
+    ]
+    assert paths == expected
+    for path in paths:
+        assert type(path) is type(tmp_path)
+

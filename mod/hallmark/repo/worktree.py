@@ -57,5 +57,8 @@ class Worktree(type(Path())):
         # create a new instance of the Worktree class with the resolved path
         return cls(resolved)
 
+    def with_segments(self, *pathsegments):
+        return Path(*pathsegments)
+
     def __truediv__(self, key):
         return Path(self) / key
