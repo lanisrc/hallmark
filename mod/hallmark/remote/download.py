@@ -13,10 +13,10 @@ from tqdm import tqdm
 import requests
 import pandas as pd
 
-from .transport import OperationContext, RemoteSpec
-from .transport.base import DownloadError, literal_path
-from .remote.plan import DownloadItem, DownloadPlan
-from .utils import (
+from ..transport import OperationContext, RemoteSpec
+from ..transport.base import DownloadError, literal_path
+from .plan import DownloadItem, DownloadPlan
+from ..utils import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
     SUPPORTED_CHECKSUM_ALGORITHMS,
     as_list_of_dicts,
@@ -25,7 +25,7 @@ from .utils import (
     normalize_nonempty_string,
     resolve_contained_path,
     valid_checksum)
-from .repo.config import (
+from ..repo.config import (
     normalize_remotes,
     normalize_tsv_name,
     row_to_path)
@@ -891,7 +891,7 @@ def plan_download(
         repo, file_paths=file_paths, tsv_names=tsv_names,
         all_files=all_files or (not file_paths and not tsv_names))
     if filter is not None or fmt is not None:
-        from .remote.discovery import path_matches
+        from .discovery import path_matches
         items = [item for item in items if path_matches(
             item.relative_path.as_posix(), filter=filter, fmt=fmt)]
     remote = _select_remote_config(repo, remote_name)

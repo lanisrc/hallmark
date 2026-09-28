@@ -27,7 +27,7 @@ from types import SimpleNamespace
 
 from hallmark import ParaFrame, Repo
 from hallmark.cli import hallmark
-from hallmark.downloader import DownloadError
+from hallmark.remote.download import DownloadError
 from hallmark.remote.plan import DownloadItem, DownloadPlan
 from hallmark.utils import chdir
 

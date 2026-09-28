@@ -26,7 +26,7 @@ from git.exc import GitError
 from . import Repo
 from .utils import validate_path_component
 from .repo_builder import build_repo
-from .downloader import DownloadError
+from .remote.download import DownloadError
 from .remote.discovery import path_matches
 from .error import CheckoutError, CloneError
 from .repo.config import normalize_tsv_name

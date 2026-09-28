@@ -110,7 +110,7 @@ def test_filtered_git_clone_preserves_history_without_objects(tmp_path, monkeypa
     def fail(*args, **kwargs):
         raise AssertionError("Filtered metadata clone must not transfer data")
 
-    monkeypatch.setattr("hallmark.downloader._fetch_file", fail)
+    monkeypatch.setattr("hallmark.remote.download._fetch_file", fail)
     plans = []
     repo = Repo.clone(str(source.dothm.path), tmp_path / "clone", filter="run1.h5",
                       download=True, approve=lambda plan: plans.append(plan) or False)

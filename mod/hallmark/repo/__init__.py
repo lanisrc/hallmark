@@ -208,7 +208,7 @@ class Repo:
             DownloadError: If discovery fails or download approval is unavailable.
         """
         from ..remote.clone import initialize_remote
-        from ..downloader import DownloadError, _require_positive_integer
+        from ..remote.download import DownloadError, _require_positive_integer
 
         _require_positive_integer(max_workers, label="max_workers")
         if from_url is not None:
@@ -243,7 +243,7 @@ class Repo:
     def _download_after_creation(self, *, approve, max_workers, progress,
                                  filter=None, fmt=None):
         """Run an approved transfer after catalog creation has completed."""
-        from ..downloader import DownloadError
+        from ..remote.download import DownloadError
 
         plan = self.plan_download(filter=filter, fmt=fmt)
         if plan.file_count and approve(plan) is True:
@@ -314,7 +314,7 @@ class Repo:
         """
         from ..remote.clone import clone_catalog
         from ..remote.discovery import path_matches
-        from ..downloader import DownloadError, _require_positive_integer
+        from ..remote.download import DownloadError, _require_positive_integer
 
         _require_positive_integer(max_workers, label="max_workers")
         if fetch_data is not None:
@@ -372,7 +372,7 @@ class Repo:
                 is invalid.
             ValueError: If a filter, format, or supplied rate is invalid.
         """
-        from ..downloader import plan_download
+        from ..remote.download import plan_download
 
         return plan_download(
             self, output_path, file_paths=file_paths, tsv_names=tsv_names,
@@ -404,7 +404,7 @@ class Repo:
             DownloadError: If approval is missing, setup fails, or the
                 destination is invalid.
         """
-        from ..downloader import execute_download_plan
+        from ..remote.download import execute_download_plan
 
         result = execute_download_plan(
             self, plan, approved=approved, max_workers=max_workers,

@@ -17,7 +17,7 @@ import requests
 import yaml
 
 from hallmark import Repo
-from hallmark.downloader import _download_file, download_remote_data
+from hallmark.remote.download import _download_file, download_remote_data
 from hallmark.repo_builder import _manifest_matches, build_repo
 from hallmark.repo.config import normalize_remotes
 from hallmark.transport import OperationContext, RemoteSpec
@@ -563,7 +563,7 @@ def test_keyboard_interrupt_stops_owned_workers(monkeypatch, tmp_path, fake_proc
         raise KeyboardInterrupt
 
     monkeypatch.setattr(SshTransport, "fetch", fetch)
-    monkeypatch.setattr("hallmark.downloader.wait", interrupt)
+    monkeypatch.setattr("hallmark.remote.download.wait", interrupt)
     with pytest.raises(KeyboardInterrupt):
         download_remote_data(
             repo, repo.worktree, max_workers=1, selected_files=[(Path("item"), None)]
@@ -584,7 +584,7 @@ def test_cli_dry_run_does_not_resolve_auth_or_start_clients(monkeypatch, tmp_pat
     def fail(*args, **kwargs):
         raise AssertionError("Dry-run must not create an operation context")
 
-    monkeypatch.setattr("hallmark.downloader.OperationContext", fail)
+    monkeypatch.setattr("hallmark.remote.download.OperationContext", fail)
     result = CliRunner().invoke(hallmark, ["download", "item.dat", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert "item.dat" in result.output

@@ -18,7 +18,7 @@ import yaml
 
 from hallmark import Repo
 from hallmark.cli import hallmark
-from hallmark.downloader import download_remote_data, select_download_files
+from hallmark.remote.download import download_remote_data, select_download_files
 from hallmark.repo_builder import build_repo
 from hallmark.transport import OperationContext, RemoteSpec
 from hallmark.transport.base import (

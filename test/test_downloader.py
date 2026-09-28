@@ -6,7 +6,7 @@ import pytest
 import requests
 import hashlib
 
-from hallmark.downloader import (
+from hallmark.remote.download import (
     TSV_READ_CHUNK_SIZE,
     DownloadError,
     _download_file,
@@ -79,7 +79,7 @@ def test_download_file_streams_atomically_and_returns_size(monkeypatch, tmp_path
         """A fake requests.get function that records the URL and kwargs"""
         calls.update(url=url, kwargs=kwargs)
         return _Response([b"abc", b"", b"def"])
-    monkeypatch.setattr("hallmark.downloader.requests.get", fake_get)
+    monkeypatch.setattr("hallmark.remote.download.requests.get", fake_get)
     destination = tmp_path / "nested" / "file.bin"
     size = _download_file("https://example.test/file.bin", destination, chunk_size=3)
 
@@ -105,7 +105,7 @@ def test_download_file_removes_partial_file_after_http_error(monkeypatch, tmp_pa
         DownloadError: If the download fails due to an HTTP error.
     """
     monkeypatch.setattr(
-        "hallmark.downloader.requests.get",
+        "hallmark.remote.download.requests.get",
         lambda *args, **kwargs: _Response(error=requests.HTTPError("404")))
     destination = tmp_path / "file.bin"
 
@@ -127,7 +127,7 @@ def test_download_file_removes_partial_file_after_checksum_error(
         DownloadError: If the download fails due to a checksum mismatch.
     """
     monkeypatch.setattr(
-        "hallmark.downloader.requests.get",
+        "hallmark.remote.download.requests.get",
         lambda *args, **kwargs: _Response([b"content"]))
     destination = tmp_path / "file.bin"
 
@@ -153,7 +153,7 @@ def test_download_file_wraps_write_errors(monkeypatch, tmp_path):
         DownloadError: If the download fails due to an OSError while writing.
     """
     monkeypatch.setattr(
-        "hallmark.downloader.requests.get",
+        "hallmark.remote.download.requests.get",
         lambda *args, **kwargs: _Response([b"content"]))
     original_open = Path.open
     def fail_part_open(path, *args, **kwargs):
@@ -456,7 +456,7 @@ def test_download_remote_data_builds_urls_and_destinations_from_fmt(
         """A fake _download_file function that records its arguments"""
         captured.setdefault("files", []).append((url, destination, sha1))
         return 123
-    monkeypatch.setattr("hallmark.downloader._fetch_file", fake_download_file)
+    monkeypatch.setattr("hallmark.remote.download._fetch_file", fake_download_file)
     repo = SimpleNamespace(
         state=SimpleNamespace(
             config={
@@ -572,8 +572,8 @@ def test_download_remote_data_aggregates_successes_and_failures(monkeypatch, tmp
         def close(self):
             self.closed = True
     progress = Progress()
-    monkeypatch.setattr("hallmark.downloader._fetch_file", fake_download)
-    monkeypatch.setattr("hallmark.downloader.tqdm", lambda **kwargs: progress)
+    monkeypatch.setattr("hallmark.remote.download._fetch_file", fake_download)
+    monkeypatch.setattr("hallmark.remote.download.tqdm", lambda **kwargs: progress)
     result = download_remote_data(
         repo,
         tmp_path,
@@ -717,7 +717,7 @@ def test_download_remote_data_deduplicates_selected_paths(monkeypatch, tmp_path)
         simulates a download."""
         calls.append((url, destination, checksum))
         return 4
-    monkeypatch.setattr("hallmark.downloader._fetch_file", fake_download)
+    monkeypatch.setattr("hallmark.remote.download._fetch_file", fake_download)
     result = download_remote_data(
         repo,
         tmp_path,
@@ -812,7 +812,7 @@ def test_download_remote_data_reuses_session_per_worker(monkeypatch, tmp_path):
             self.urls.append(url)
             return _Response([b"contents"])
 
-    monkeypatch.setattr("hallmark.downloader.requests.Session", FakeSession)
+    monkeypatch.setattr("hallmark.remote.download.requests.Session", FakeSession)
     repo = _repo(
         tmp_path,{
             "remote": {"name": "origin", "url": "https://example.test/data"}})
@@ -912,7 +912,7 @@ def test_download_remote_data_deduplicates_equivalent_checksum_tuples(
         """Record download requests and return a fixed byte count."""
         calls.append((url, destination, checksum))
         return 11
-    monkeypatch.setattr("hallmark.downloader._fetch_file", fake_download)
+    monkeypatch.setattr("hallmark.remote.download._fetch_file", fake_download)
     checksum_upper = ("SHA256", "A" * 64)
     checksum_lower = ("sha256", "a" * 64)
     result = download_remote_data(
@@ -1095,7 +1095,7 @@ def test_select_download_files_wraps_tsv_parser_errors(monkeypatch, tmp_path):
     def bad_read(*args, **kwargs):
         """fake pd.read_csv function that raises a ParserError to simulate bad TSV."""
         raise pd.errors.ParserError("bad table")
-    monkeypatch.setattr("hallmark.downloader.pd.read_csv", bad_read)
+    monkeypatch.setattr("hallmark.remote.download.pd.read_csv", bad_read)
 
     with pytest.raises(DownloadError, match="Unable to read TSV"):
         select_download_files(repo, tsv_names=["science"])
@@ -1165,7 +1165,7 @@ def test_select_download_files_reads_tsv_in_chunks(monkeypatch, tmp_path):
         return iter([
             pd.DataFrame([{"sha1": "a" * 40, "source": "M87"}]),
             pd.DataFrame([{"sha1": "b" * 40, "source": "SGRA"}])])
-    monkeypatch.setattr("hallmark.downloader.pd.read_csv", fake_read_csv)
+    monkeypatch.setattr("hallmark.remote.download.pd.read_csv", fake_read_csv)
     selected = select_download_files(repo, tsv_names=["data.tsv"])
 
     assert captured["path"] == repo.dothm.path / "data.tsv", f"Expected TSV path to be \
@@ -1361,7 +1361,7 @@ def test_download_file_preserves_existing_part_file(monkeypatch, tmp_path):
         tmp_path: A pytest fixture providing a temporary directory.
     """
     monkeypatch.setattr(
-        "hallmark.downloader.requests.get",
+        "hallmark.remote.download.requests.get",
         lambda *args, **kwargs: _Response([b"downloaded"]))
 
     destination = tmp_path / "file.bin"
@@ -1418,7 +1418,7 @@ def test_download_file_rejects_invalid_checksum_before_request(monkeypatch, tmp_
         that _download_file does not attempt to make an HTTP request when the checksum
         is invalid."""
         raise AssertionError("HTTP request should not run")
-    monkeypatch.setattr("hallmark.downloader.requests.get", unexpected_request)
+    monkeypatch.setattr("hallmark.remote.download.requests.get", unexpected_request)
     destination = tmp_path / "file.bin"
 
     with pytest.raises(
