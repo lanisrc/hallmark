@@ -36,6 +36,27 @@ jobs:
       run: |
         pytest
 
+  distribution-and-docs:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Build source and wheel distributions
+      run: |
+        python -m pip install build
+        python -m build
+    - name: Install the wheel and documentation tools
+      run: python -m pip install dist/*.whl sphinx
+    - name: Check the installed CLI
+      run: hm --help
+      working-directory: ${{ runner.temp }}
+    - name: Build documentation with warnings as errors
+      run: python -m sphinx -b html -W --keep-going doc "${{ runner.temp }}/hallmark-docs"
+
   ssh-transport:
     runs-on: ${{ matrix.os }}
     strategy:
