@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from git.exc import GitCommandError
 
 from .branches import checkout, add_worktree
-from ..remote.add import is_remote_catalog
+from ..remote.add import add_remote, is_remote_catalog
 from .dothm import Dothm
 from .state import State
 from .worktree import Worktree
@@ -546,16 +546,35 @@ class Repo:
             "remote_catalog": remote_catalog,
         }
 
-    def add(self, fmt: str, encoding: bool = False) -> ParaFrame:
+    def add(self, fmt: str, encoding: bool = False, *, filter=None,
+            remote_fmt=None, auth=None, backend=None, backend_options=None,
+            progress=False) -> ParaFrame:
         '''
-        Stage files or updated repository indecing from the worktree.
+        Stage local file metadata or discover a remote catalog without downloading.
 
         Args:
-            fmt (string): Format string or "." for full directory scan.
-            encoding (boolean): Whether to apply encoding rules.
+            fmt (string): Local filename format, "." to rescan, or remote URL.
+            encoding (boolean): Apply local filename encoding rules.
+            filter (string | list[string], optional): Remote path selection globs.
+            remote_fmt (string, optional): Remote filename format for parameters.
+            auth (string, optional): Local profile for remote authentication.
+            backend (string, optional): Registered data backend name.
+            backend_options (dict, optional): Backend configuration.
+            progress (boolean): Show remote discovery progress.
         Returns:
-            paraframe Parsed and filtered file index (without checksums).
+            ParaFrame: Local parameters without checksums, or remote catalog rows.
         '''
+        if isinstance(fmt, str) and "://" in fmt:
+            if encoding:
+                raise ValueError("--regex is only supported for local data")
+            return add_remote(self, fmt, fmt=remote_fmt, filter=filter, auth=auth,
+                              backend=backend, backend_options=backend_options,
+                              progress=progress)
+        if any(value is not None for value in
+               (filter, remote_fmt, auth, backend, backend_options)):
+            raise ValueError("Remote options require a remote URL")
+        if is_remote_catalog(self.state):
+            raise ValueError("Use a remote URL to update this catalog")
         if self.worktree is None:
             raise RuntimeError(
                 "cannot add files in a bare repository without a worktree")

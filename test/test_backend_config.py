@@ -3,6 +3,8 @@
 import pytest
 
 from hallmark import Repo
+from hallmark.remote import backends
+from hallmark.remote.backends import DataBackend, RemoteEntry, register_backend
 from hallmark.repo.config import normalize_remotes
 
 
@@ -47,5 +49,47 @@ def test_normalization_copies_nested_backend_options():
     assert normalized[0]["backend_options"]["releases"] == [1, 2]
 
 
+def test_add_passes_backend_settings_to_discovery(monkeypatch, tmp_path):
+    captured = []
+
+    def discover_remote_files(context, **kwargs):
+        captured.append(context.remote)
+        return []
+
+    # No backend installation or network is required to inspect this hand-off.
+    class Context:
+        def __init__(self, remote):
+            self.remote = remote
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr("hallmark.remote.add.OperationContext", Context)
+    monkeypatch.setattr(
+        "hallmark.remote.add.discover_remote_files", discover_remote_files
+    )
+    repo = Repo.init(tmp_path / "data.hm")
+    repo.add("https://api.test/", backend="survey", backend_options={"release": 3})
+    assert captured[0].backend == "survey"
+    assert captured[0].backend_options["release"] == 3
 
 
+def test_add_persists_backend_only_for_its_data_source(
+        monkeypatch, tmp_path):
+    class SurveyBackend(DataBackend):
+        def iter_entries(self, on_directory=None):
+            assert self.context.remote.backend_options["release"] == 3
+            yield RemoteEntry("tile.fits", size=12)
+
+    monkeypatch.setattr(backends, "_registered", dict(backends._registered))
+    monkeypatch.setattr(backends.metadata, "entry_points", lambda: {})
+    register_backend("builder-survey", SurveyBackend)
+    repo = Repo.init(tmp_path / "survey.hm")
+    repo.add("https://api.test/", backend="builder-survey",
+             backend_options={"release": 3})
+    remote = Repo(repo.dothm.path).state.config["remote"][0]
+    assert remote["backend"] == "builder-survey"
+    assert remote["backend_options"] == {"release": 3}
