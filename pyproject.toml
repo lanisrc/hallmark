@@ -6,6 +6,7 @@ name = "hallmark"
 dynamic = ["version"]
 license = "Apache-2.0"
 description = "Reproducibility is the hallmark of the scientific method"
+readme = "README.rst"
 requires-python = ">=3.9"
 
 dependencies =[
@@ -32,6 +33,7 @@ authors = [
 
 [project.scripts]
 hallmark = "hallmark.cli:hallmark"
+hm = "hallmark.cli:hallmark"
 
 [project.urls]
 Homepage = "https://l6a.github.io/hallmark"

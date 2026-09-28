@@ -144,7 +144,7 @@ class Dothm(Repo):
     @staticmethod
     def config_template() -> str:
         return """# Edit this file only if your branch needs regex substitutions.
-# For simple names, you can just run: hallmark add "a{a}_i{i}.h5"
+# For simple names, you can just run: hm add "a{a}_i{i}.h5"
 data:
   -
     # fmt: "{release}_{source}_{year}_{doy:03d}_{band}.uvfits"
