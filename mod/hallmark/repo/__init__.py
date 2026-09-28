@@ -78,7 +78,7 @@ class Repo:
         dothm_path, worktree_path = self.lwpaths(path)
         self.dothm = Dothm(dothm_path)
         self.worktree = worktree_path and Worktree(worktree_path)
-        self.state = self.dothm.load()
+        self.state = self.dothm.load_state()
         self.paraframe_cls = ParaFrame
         self.download_result = None
 
@@ -215,8 +215,8 @@ class Repo:
         dothm = Dothm.init(dothm_path)
         (dothm.path / "config.yml").write_text(Dothm.config_template(),
                                                encoding="utf-8")
-        dothm.dump_yml({}, "meta")
-        dothm.dump_tsv(State().data, "data")
+        dothm.write_yaml({}, "meta")
+        dothm.write_tsv(State().data, "data")
         dothm.index.add(["config.yml", "meta.yml", "data.tsv"])
         if worktree_path is not None:
             Worktree.init(worktree_path)
@@ -475,7 +475,7 @@ class Repo:
                if remote_backend is not None else {}),
             **({"remote_backend_options": remote_backend_options}
                if remote_backend_options is not None else {}))
-        self.dothm.dump(self.state)
+        self.dothm.save_state(self.state)
         return self.state.config
 
     def status(self) -> dict[str, object]:
@@ -592,7 +592,7 @@ class Repo:
         # if the format is unchanged, update the existing state with new entries
         else:
             self.state.update(manifest)
-        self.dothm.dump(self.state)
+        self.dothm.save_state(self.state)
         # return a ParaFrame without the "sha1" column for display purposes
         return pf.drop(columns=["sha1"], errors="ignore")
 

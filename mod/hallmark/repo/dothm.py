@@ -32,7 +32,7 @@ from .state import State
 
 class _HallmarkYamlDumper(yaml.Dumper):
     """
-    Used by dump_yaml.
+    Used by write_yaml.
     Custom YAML dumper for Hallmark that preserves the order of keys in dictionaries
     and uses literal block style for multi-line strings.
     Args:
@@ -41,7 +41,7 @@ class _HallmarkYamlDumper(yaml.Dumper):
     """
 
 
-def _str_presenter(dumper, data):
+def _format_yaml_string(dumper, data):
     """
     Used by _HallmarkYamlDumper.
     Use literal block style ('|') for multi-line strings so they render
@@ -62,9 +62,9 @@ def _str_presenter(dumper, data):
 
 
 # use hallmark's dumper to avoid leaking format choices into unrelated code
-_HallmarkYamlDumper.add_representer(str, _str_presenter)
+_HallmarkYamlDumper.add_representer(str, _format_yaml_string)
 
-def dump_yaml(data, handle) -> None:
+def write_yaml(data, handle) -> None:
     """
     Dump a dictionary to a YAML file, preserving key order and using
     literal block style for multi-line strings.
@@ -90,7 +90,7 @@ class Dothm(Repo):
     """
     def _storage_path(self, stem: Union[Path, str], suffix: str) -> Path:
         """
-        Used by load_yml, dump_yml, load_tsv, and dump_tsv.
+        Used by read_yaml, write_yaml, read_tsv, and write_tsv.
         Get the full path to a storage file in the ``.hm`` directory.
         Args:
             stem (Union[Path, str]): The stem of the file name (without extension).
@@ -185,7 +185,7 @@ remote:
                 clone_path=to_path,
                 display_path=display_path) from exc
 
-    def link(self, path: Union[Path, str], branch: Optional[str] = None):
+    def link_worktree(self, path: Union[Path, str], branch: Optional[str] = None):
         path = Path(path).resolve()  # use absolute path
         # try to add the specified path as a git worktree
         try:
@@ -195,19 +195,19 @@ remote:
             raise DothmError(f'Failed to link "{path}": {exc}')
         return Dothm(path)
 
-    def load(self) -> State:
+    def load_state(self) -> State:
         return State(
-            config = self.load_yml("config"),
-            meta = self.load_yml("meta"),
-            data = self.load_tsv("data"))
+            config = self.read_yaml("config"),
+            meta = self.read_yaml("meta"),
+            data = self.read_tsv("data"))
 
-    def dump(self, state: State) -> None:
-        self.dump_yml(state.config, "config")
-        self.dump_yml(state.meta,   "meta")
-        self.dump_tsv(state.data,   "data")
+    def save_state(self, state: State) -> None:
+        self.write_yaml(state.config, "config")
+        self.write_yaml(state.meta,   "meta")
+        self.write_tsv(state.data,   "data")
         self.index.add(["config.yml", "meta.yml", "data.tsv"])
 
-    def load_yml(self, stem: Union[Path, str]) -> dict:
+    def read_yaml(self, stem: Union[Path, str]) -> dict:
         """
         Load a YAML file and return its contents as a dictionary.
 
@@ -221,7 +221,7 @@ remote:
         # using the helper function to load the YAML file and handle empty files
         return load_yaml_file(self._storage_path(stem, ".yml"))
 
-    def dump_yml(self, data: dict, stem: Union[Path, str]) -> None:
+    def write_yaml(self, data: dict, stem: Union[Path, str]) -> None:
         """
         Dump a dictionary to a YAML file, preserving key order and using
         literal block style for multi-line strings.
@@ -236,9 +236,9 @@ remote:
             with temp_path.open("w", encoding="utf-8") as handle:
                 # Use a custom YAML dumper to preserve key order
                 # and handle multi-line strings
-                dump_yaml(data, handle)
+                write_yaml(data, handle)
 
-    def load_tsv(self, stem: Union[Path, str]) -> pd.DataFrame:
+    def read_tsv(self, stem: Union[Path, str]) -> pd.DataFrame:
         """
         Load a TSV file into a pandas DataFrame.
 
@@ -256,7 +256,7 @@ remote:
             encoding="utf-8",
             keep_default_na=False)
 
-    def dump_tsv(
+    def write_tsv(
             self,
             data: pd.DataFrame,
             stem: Union[Path, str],

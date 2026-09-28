@@ -20,7 +20,7 @@ from .transport.base import (
 from .fmt_detection import (
     KNOWN_PROCESSING_STAGES,
     KNOWN_STATIC_FILE_STEMS)
-from .repo.dothm import dump_yaml
+from .repo.dothm import write_yaml
 from .error import DothmError
 from .utils import (
     CHECKSUM_ALGORITHMS,
@@ -921,8 +921,8 @@ def _build_repo(
     # add the data and remote entries to the repo's config and dump it to disk
     repo.state.config["data"] = list(fmt_entries)
     repo.state.config["remote"] = list(remotes)
-    repo.dothm.dump(repo.state)
-    repo.state = repo.dothm.load()
+    repo.dothm.save_state(repo.state)
+    repo.state = repo.dothm.load_state()
     # reread the fmts from the repo's config to ensure consistency
     fmt_entries = fmt_entries_from_config(repo.state.config)
     remotes = repo.state.config.get("remote") or []
@@ -1021,7 +1021,7 @@ def _build_repo(
 
     # hallmark's bookkeeping: create and commit the meta.yml file
     meta_dict: dict = {"dataset": dataset_name}
-    repo.dothm.dump_yml(meta_dict, "meta")
+    repo.dothm.write_yaml(meta_dict, "meta")
     repo.dothm.index.add(["meta.yml"])
     repo.dothm.index.commit(f"Initialize dataset: {dataset_name}")
 
@@ -1049,7 +1049,7 @@ def _build_repo(
         # create a DataFrame from the rows and columns for the target database
         df = pd.DataFrame(rows, columns=columns)
         # dump the DataFrame to a TSV file in the .dothm directory with "None" for NaN
-        repo.dothm.dump_tsv(df, db, na_rep="None")
+        repo.dothm.write_tsv(df, db, na_rep="None")
         repo.dothm.index.add([db])
 
     # config.yml: static files, then fmt entries, then remote/meta
@@ -1089,12 +1089,12 @@ def _build_repo(
                 f.write("\n")
             # write static file entries first, then fmt entries, with newline in between
             if static_file_entries:
-                dump_yaml(static_file_entries, f)
+                write_yaml(static_file_entries, f)
             if static_file_entries and fmt_manifest:
                 f.write("\n")
             # write the fmt entries to the config.yml file
             if fmt_manifest:
-                dump_yaml(fmt_manifest, f)
+                write_yaml(fmt_manifest, f)
             # if there are no static file or fmt entries, write an empty list
             if not static_file_entries and not fmt_manifest:
                 f.write(" []\n")
@@ -1107,11 +1107,11 @@ def _build_repo(
                 if entries:
                     f.write("\n")
                     # dump the section name and its entries to the config.yml file
-                    dump_yaml({section_name: entries}, f)
+                    write_yaml({section_name: entries}, f)
 
     repo.dothm.index.add(["config.yml"])
     repo.dothm.index.commit(f"Add dataset manifest: {dataset_name}")
 
     # reload the repo state from the .dothm directory to reflect the latest changes
-    repo.state = repo.dothm.load()
+    repo.state = repo.dothm.load_state()
     return repo

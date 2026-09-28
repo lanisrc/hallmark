@@ -38,7 +38,7 @@ class Objects:
         self.root = Path(path) / "objects"
 
     @staticmethod
-    def _copy_atomically(
+    def _copy_and_verify_file(
         src: Path,
         dest: Path,
         *,
@@ -65,7 +65,7 @@ class Objects:
         src = Path(src)
         dest = Path(dest)
         # Normalize the expected SHA-1 checksum to ensure it is valid and in lowercase
-        normalized_expected = Objects._normalize_sha1(expected_sha1)
+        normalized_expected = Objects._validate_sha1(expected_sha1)
         # Ensure the destination directory exists
         dest.parent.mkdir(parents=True, exist_ok=True)
         # If an expected SHA-1 checksum is provided, initialize a SHA-1 hash object
@@ -75,7 +75,10 @@ class Objects:
         with replace_file_on_success(dest) as temp_path:
             # read the source file in binary mode and write to the temporary file
             with src.open("rb") as source, temp_path.open("wb") as target:
-                for chunk in iter(lambda: source.read(chunk_size), b""):
+                while True:
+                    chunk = source.read(chunk_size)
+                    if not chunk:
+                        break
                     target.write(chunk)
                     # update the SHA-1 hash with the chunk read from the source file
                     digest.update(chunk)
@@ -109,9 +112,9 @@ class Objects:
 
 
     @staticmethod
-    def _normalize_sha1(sha1: str) -> str:
+    def _validate_sha1(sha1: str) -> str:
         """
-        Used by _copy_atomically, _split_checksum, and store.
+        Used by _copy_and_verify_file, _path_for_checksum, and store.
         Validate and normalize a SHA-1 checksum.
 
         Args:
@@ -136,7 +139,7 @@ class Objects:
         return sha1.lower()
 
 
-    def _split_checksum(self, sha1: str) -> Path:
+    def _path_for_checksum(self, sha1: str) -> Path:
         """
         Used by contains, store, and restore.
         Convert a validated SHA-1 checksum into its object-store path.
@@ -151,7 +154,7 @@ class Objects:
             ValueError: If the checksum is not exactly 40 hexadecimal characters.
         """
         # normalize the SHA-1 checksum to ensure it is valid and in lowercase
-        normalized = self._normalize_sha1(sha1)
+        normalized = self._validate_sha1(sha1)
         # split the checksum into two parts
         return self.root / normalized[:2] / normalized[2:]
 
@@ -163,7 +166,7 @@ class Objects:
         Returns:
             bool: True when the corresponding object exists.
         """
-        return self._split_checksum(sha1).is_file()
+        return self._path_for_checksum(sha1).is_file()
 
     def object_path(self, sha1: str) -> Path:
         """
@@ -173,9 +176,9 @@ class Objects:
         Returns:
             Path: Path to the object in this store.
         """
-        return self._split_checksum(sha1)
+        return self._path_for_checksum(sha1)
 
-    def missing(self, checksums: Iterable[str]) -> list[str]:
+    def missing_checksums(self, checksums: Iterable[str]) -> list[str]:
         """
         Return a sorted list of checksums that are not present in the object store.
 
@@ -211,14 +214,14 @@ class Objects:
         """
         src = Path(src)
         # split the SHA-1 checksum into its storage path
-        stored = self._split_checksum(sha1)
+        stored = self._path_for_checksum(sha1)
         expected_sha1 = sha1.lower()
         # if the actual SHA-1 checksum is not provided, calculate it from source file
         if actual_sha1 is None:
             actual_sha1 = self._calculate_sha1(src)
         # if the actual SHA-1 checksum is provided, normalize it to lowercase
         else:
-            actual_sha1 = self._normalize_sha1(actual_sha1)
+            actual_sha1 = self._validate_sha1(actual_sha1)
 
         # if the actual checksum does not match the expected checksum, raise an error
         if actual_sha1 != expected_sha1:
@@ -230,7 +233,7 @@ class Objects:
             return stored
 
         # return the path to the stored file after copying it atomically
-        return self._copy_atomically(src, stored, expected_sha1=expected_sha1)
+        return self._copy_and_verify_file(src, stored, expected_sha1=expected_sha1)
 
     def restore(self, sha1: str, dest: Path) -> Path:
         """
@@ -246,10 +249,10 @@ class Objects:
             FileNotFoundError: If the object does not exist in the store.
         """
         # split the SHA-1 checksum into its storage path
-        stored = self._split_checksum(sha1)
+        stored = self._path_for_checksum(sha1)
         # if the file does not exist in the object store, raise an error
         if not stored.is_file():
             raise FileNotFoundError(
                 f"object {sha1} not found in objects store")
         # otherwise, copy the stored file to the destination atomically
-        return self._copy_atomically(stored, dest, expected_sha1=sha1)
+        return self._copy_and_verify_file(stored, dest, expected_sha1=sha1)

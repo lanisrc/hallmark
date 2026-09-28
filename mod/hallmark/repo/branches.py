@@ -57,7 +57,7 @@ def checkout(repo, target_branch: str) -> bool:
     # try to identify any missing objects in the target branch that are not present
     # in the object store
     try:
-        missing_objects = repo.objects.missing(
+        missing_objects = repo.objects.missing_checksums(
             sha1 for _, sha1 in target_entries_raw)
     # if a ValueError occurs during object existence check, raise a CheckoutError
     except ValueError as exc:
@@ -186,7 +186,7 @@ def checkout(repo, target_branch: str) -> bool:
                 repo.dothm.git.checkout("-b", target_branch)
 
             # Reload the repository state after switching branches
-            repo.state = repo.dothm.load()
+            repo.state = repo.dothm.load_state()
 
             # paths that are either currently tracked but not in the target branch
             # or paths that are tracked but have changed from the current branch
@@ -263,7 +263,7 @@ def checkout(repo, target_branch: str) -> bool:
 
             # try to reload the repository state after rollback
             try:
-                repo.state = repo.dothm.load()
+                repo.state = repo.dothm.load_state()
             # if reloading the repository state fails, record error for reporting
             except Exception as rollback_exc:
                 rollback_errors.append(
@@ -336,7 +336,7 @@ def add_worktree(repo, target_branch: str) -> bool:
         # check for missing objects in the target state that are not present in
         # the object store
         try:
-            missing_objects = repo.objects.missing(
+            missing_objects = repo.objects.missing_checksums(
                 row["sha1"] for _, row in target_state.data.iterrows())
         # if a ValueError occurs during object existence check, raise cleanly
         except ValueError as exc:
@@ -352,7 +352,7 @@ def add_worktree(repo, target_branch: str) -> bool:
         try:
             # if the target branch already exists, link the new worktree to it
             if not created_branch:
-                repo.dothm.link(target_dothm, target_branch)
+                repo.dothm.link_worktree(target_dothm, target_branch)
             # if the target branch does not exist, create a new worktree and branch
             else:
                 repo.dothm.git.worktree("add", "-b", target_branch,

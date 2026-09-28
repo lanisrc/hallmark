@@ -121,7 +121,7 @@ def _metadata_commit(repo, files, message):
     repo.dothm.index.add(list(files))
     if repo.dothm.index.diff("HEAD"):
         repo.dothm.index.commit(message)
-    repo.state = repo.dothm.load()
+    repo.state = repo.dothm.load_state()
 
 
 def _write_inventory(repo, source, entries, fmt):
@@ -150,9 +150,9 @@ def _write_inventory(repo, source, entries, fmt):
         remote["backend"] = source.backend
     if source.backend_options:
         remote["backend_options"] = thaw_backend_options(source.backend_options)
-    repo.dothm.dump_yml({"data": [data_spec], "remote": [remote]}, "config")
-    repo.dothm.dump_yml({"source": source.url}, "meta")
-    repo.dothm.dump_tsv(frame, "data", na_rep="")
+    repo.dothm.write_yaml({"data": [data_spec], "remote": [remote]}, "config")
+    repo.dothm.write_yaml({"source": source.url}, "meta")
+    repo.dothm.write_tsv(frame, "data", na_rep="")
     _metadata_commit(repo, ["config.yml", "meta.yml", "data.tsv"],
                      "Discover remote catalog")
 

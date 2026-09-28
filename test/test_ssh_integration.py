@@ -285,7 +285,7 @@ def test_build_manifest_download_clone_workflow(ssh_server, tmp_path):
         for entry in single.state.config["data"]
         if entry.get("file") != "bad_2.dat"
     ]
-    single.dothm.dump(single.state)
+    single.dothm.save_state(single.state)
     single.dothm.index.add(["config.yml"])
     single.dothm.index.commit("Remove deliberately invalid test entry")
     clone = Repo.clone(

@@ -272,7 +272,7 @@ def test_repo_add_persists_only_sha1_and_path(tmp_path):
     result = repo.add("a{a}_i{i}.h5")
 
     assert list(result.columns) == ["path", "a", "i"]
-    persisted = repo.dothm.load_tsv("data")
+    persisted = repo.dothm.read_tsv("data")
     assert repo.state.config["data"] == [{"fmt": "a{a}_i{i}.h5", "encoding": None}]
     assert list(persisted.columns) == ["sha1", "a", "i"]
     assert persisted.to_dict(orient="records") == [
@@ -288,7 +288,7 @@ def test_repo_add_dot_replaces_manifest_with_current_tree(tmp_path):
     result = repo.add(".")
 
     assert sorted(result["path"]) == ["a0_i0.h5", "a0_i30.h5", "a1_i45.h5"]
-    persisted = repo.dothm.load_tsv("data")
+    persisted = repo.dothm.read_tsv("data")
     assert persisted.to_dict(orient="records") == [
         {"sha1": Repo.checksum(repo.worktree / "a0_i0.h5"), "a": "0", "i": "0"},
         {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"), "a": "0", "i": "30"},
@@ -417,7 +417,7 @@ def test_repo_add_parse_failure_preserves_existing_format(monkeypatch, tmp_path)
         repo.add("new_{number}.txt")
     assert repo.state.config["data"][0]["fmt"] == ("old_{number}.txt"), \
         "Expected the original format to be preserved in the config file"
-    assert repo.dothm.load_yml("config")["data"][0]["fmt"] == "old_{number}.txt", \
+    assert repo.dothm.read_yaml("config")["data"][0]["fmt"] == "old_{number}.txt", \
         "Expected the original format to be preserved in the config file"
 
 
@@ -466,7 +466,7 @@ def test_repo_set_config_preserves_encoding_and_updates_remote(tmp_path):
         ],
         "remote": {"name": "origin"},
     }
-    repo.dothm.dump(repo.state)
+    repo.dothm.save_state(repo.state)
 
     repo.set_config(fmt="b{a}_i{i}.h5", remote_url="https://example.com/path")
 
@@ -512,7 +512,7 @@ def test_repo_set_config_updates_selected_remote_in_list(tmp_path):
     repo.state.config["remote"] = [
         {"name": "origin", "url": "https://origin.test/data"},
         {"name": "mirror", "url": "https://old-mirror.test/data"}]
-    repo.dothm.dump(repo.state)
+    repo.dothm.save_state(repo.state)
     repo.set_config(remote_name="mirror", remote_url="https://new-mirror.test/data")
 
     assert repo.state.config["remote"] == [
@@ -533,7 +533,7 @@ def test_repo_set_config_rejects_nonlist_nondict_remote_config(tmp_path):
     """
     repo = Repo.init(tmp_path / "repo")
     repo.state.config["remote"] = "not-a-mapping-or-list"
-    repo.dothm.dump(repo.state)
+    repo.dothm.save_state(repo.state)
 
     with pytest.raises(ValueError, match="Invalid remote configuration"):
         repo.set_config(remote_url="https://example.test/data")
@@ -554,7 +554,7 @@ def test_repo_set_config_rejects_unknown_remote_name_without_url(tmp_path):
     repo.state.config["remote"] = [
         {"name": "origin", "url": "https://origin.test/data"},
         {"name": "mirror", "url": "https://mirror.test/data"}]
-    repo.dothm.dump(repo.state)
+    repo.dothm.save_state(repo.state)
 
     with pytest.raises(ValueError, match="'missing' is not configured"):
         repo.set_config(remote_name="missing")
@@ -575,7 +575,7 @@ def test_repo_set_config_requires_remote_name_when_no_origin(tmp_path):
     repo.state.config["remote"] = [
         {"name": "mirror-a", "url": "https://mirror-a.test/data"},
         {"name": "mirror-b", "url": "https://mirror-b.test/data"}]
-    repo.dothm.dump(repo.state)
+    repo.dothm.save_state(repo.state)
 
     with pytest.raises(ValueError, match="specify --remote-name"):
         repo.set_config(remote_url="https://new.test/data")
@@ -601,7 +601,7 @@ def test_repo_set_config_rejects_invalid_format(tmp_path, fmt):
         repo.set_config(fmt=fmt)
     assert repo.state.config["data"][0]["fmt"] == ("data_{number}.txt"), \
         "Expected the original format to be preserved in the config file"
-    assert repo.dothm.load_yml("config")["data"][0]["fmt"] == ("data_{number}.txt"), \
+    assert repo.dothm.read_yaml("config")["data"][0]["fmt"] == ("data_{number}.txt"), \
         "Expected the original format to be preserved in the config file"
 
 
@@ -627,13 +627,13 @@ def test_repo_set_config_rejects_invalid_encoding_updates(tmp_path, encoding_upd
         ValueError: If the encoding updates are invalid.
     """
     repo = Repo.init(tmp_path / "repo")
-    original_config = repo.dothm.load_yml("config")
+    original_config = repo.dothm.read_yaml("config")
 
     with pytest.raises(ValueError, match=message):
         repo.set_config(encoding_updates=encoding_updates)
     assert repo.state.config == original_config, \
         "Expected the original config to be preserved after invalid encoding updates"
-    assert repo.dothm.load_yml("config") == original_config, \
+    assert repo.dothm.read_yaml("config") == original_config, \
         "Expected the original config to be preserved after invalid encoding updates"
 
 
@@ -691,13 +691,13 @@ def test_repo_set_config_rejects_invalid_remote_values(
         ValueError: If the remote_name or remote_url values are invalid.
     """
     repo = Repo.init(tmp_path / "repo")
-    original_config = repo.dothm.load_yml("config")
+    original_config = repo.dothm.read_yaml("config")
 
     with pytest.raises(ValueError, match=message):
         repo.set_config(**{keyword: value})
     assert repo.state.config == original_config, \
         "Expected the original config to be preserved after invalid remote values"
-    assert repo.dothm.load_yml("config") == original_config, \
+    assert repo.dothm.read_yaml("config") == original_config, \
         "Expected the original config to be preserved after invalid remote values"
 
 
@@ -1365,10 +1365,10 @@ def test_dothm_yaml_round_trip(tmp_path):
         "dataset": "example",
         "description": "first line\nsecond line\n",
         "values": ["a", "b"]}
-    repo.dothm.dump_yml(expected, "meta")
+    repo.dothm.write_yaml(expected, "meta")
 
-    assert repo.dothm.load_yml("meta") == expected, \
-        f"Expected {expected}, got {repo.dothm.load_yml('meta')}"
+    assert repo.dothm.read_yaml("meta") == expected, \
+        f"Expected {expected}, got {repo.dothm.read_yaml('meta')}"
 
 def test_dothm_load_treats_empty_yaml_as_empty_mapping(tmp_path):
     """
@@ -1382,7 +1382,7 @@ def test_dothm_load_treats_empty_yaml_as_empty_mapping(tmp_path):
     repo = Repo.init(tmp_path / "repo")
     meta_path = repo.dothm.path / "meta.yml"
     meta_path.write_text("", encoding="utf-8")
-    loaded_state = repo.dothm.load()
+    loaded_state = repo.dothm.load_state()
 
     assert loaded_state.meta == {}, \
         f"Expected loaded meta to be an empty dict, got {loaded_state.meta}"
@@ -1393,11 +1393,11 @@ def test_dothm_load_treats_empty_yaml_as_empty_mapping(tmp_path):
 def test_dump_yml_preserves_existing_file_when_serialization_fails(monkeypatch,
                                                                    tmp_path):
     """
-    Test that the Dothm.dump_yml() method preserves the original file if serialization
+    Test that the Dothm.write_yaml() method preserves the original file if serialization
     fails. This test creates a repository, writes an initial config.yml file, and then
     monkeypatch the yaml.dump function to simulate a serialization failure. It checks
     that the original config.yml remains unchanged and that no temporary files are left
-    behind after the failed dump_yml call.
+    behind after the failed write_yaml call.
     Args:
         monkeypatch: pytest fixture that allows for dynamic modification of classes
         and functions.
@@ -1416,18 +1416,18 @@ def test_dump_yml_preserves_existing_file_when_serialization_fails(monkeypatch,
     monkeypatch.setattr("hallmark.repo.dothm.yaml.dump", fail_dump)
 
     with pytest.raises(RuntimeError, match="serialization failed"):
-        repo.dothm.dump_yml({"data": []}, "config")
+        repo.dothm.write_yaml({"data": []}, "config")
     assert config_path.read_text(encoding="utf-8") == original_text, \
-        "Expected original config.yml to remain unchanged after failed dump_yml"
+        "Expected original config.yml to remain unchanged after failed write_yaml"
     assert list(repo.dothm.path.glob(".config.yml.*.tmp")) == [], \
-        "Expected no temporary files to remain after failed dump_yml"
+        "Expected no temporary files to remain after failed write_yaml"
 
 
 def test_dump_tsv_supports_missing_value_representation(tmp_path):
     """
-    Test that the Dothm.dump_tsv() method correctly represents missing values in the
+    Test that the Dothm.write_tsv() method correctly represents missing values in the
     output TSV file. This test creates a repository, constructs a DataFrame with missing
-    values, and calls dump_tsv() with a custom na_rep argument. It checks that
+    values, and calls write_tsv() with a custom na_rep argument. It checks that
     the output TSV file is created and that the missing values are represented as
     specified in the na_rep argument.
     Args:
@@ -1436,7 +1436,7 @@ def test_dump_tsv_supports_missing_value_representation(tmp_path):
     repo = Repo.init(tmp_path / "repo")
     frame = pd.DataFrame({
         "path": ["first.dat", "second.dat"], "value": ["present", None]})
-    repo.dothm.dump_tsv(frame, "custom.TSV", na_rep="None")
+    repo.dothm.write_tsv(frame, "custom.TSV", na_rep="None")
     output_path = repo.dothm.path / "custom.TSV"
 
     assert output_path.is_file(), \
@@ -1478,9 +1478,9 @@ def test_load_yaml_accepts_mapping_and_empty_document():
 
 def test_load_tsv_preserves_na_tokens_and_blank_values(tmp_path):
     """
-    Test that Dothm.load_tsv correctly preserves 'NA' tokens and blank values when
+    Test that Dothm.read_tsv correctly preserves 'NA' tokens and blank values when
     loading a TSV file. This test creates a repository, writes a TSV file with 'NA'
-    and blank values, and then loads it using Dothm.load_tsv. It checks that the
+    and blank values, and then loads it using Dothm.read_tsv. It checks that the
     resulting DataFrame has the expected values.
     Args:
         tmp_path: pytest fixture that provides a temporary directory for the test.
@@ -1488,7 +1488,7 @@ def test_load_tsv_preserves_na_tokens_and_blank_values(tmp_path):
     repo = Repo.init(tmp_path / "repo")
     table_path = repo.dothm.path / "literal.tsv"
     table_path.write_text("sha1\tname\n""first\tNA\n""second\t\n", encoding="utf-8")
-    frame = repo.dothm.load_tsv("literal")
+    frame = repo.dothm.read_tsv("literal")
 
     assert frame["name"].tolist() == ["NA", ""], \
         f"Expected ['NA', ''], got {frame['name'].tolist()}"
@@ -1515,7 +1515,7 @@ def test_dothm_init_does_not_overwrite_existing_readme(tmp_path):
 @pytest.mark.parametrize("stem", ["../outside", "/tmp/outside", "nested/file"])
 def test_dothm_storage_rejects_noncomponent_names(tmp_path, stem):
     """
-    Test that Dothm.load_yml raises a ValueError when given a stem that is not a valid
+    Test that Dothm.read_yaml raises a ValueError when given a stem that is not a valid
     component name. This test checks that the method correctly identifies invalid stems
     that attempt to escape the repository structure or use absolute paths.
     Args:
@@ -1528,7 +1528,7 @@ def test_dothm_storage_rejects_noncomponent_names(tmp_path, stem):
     repo = Repo.init(tmp_path / "repo")
 
     with pytest.raises(ValueError, match="storage name"):
-        repo.dothm.load_yml(stem)
+        repo.dothm.read_yaml(stem)
 
 
 def test_dothm_init_rejects_bare_repository(tmp_path):
@@ -1813,7 +1813,7 @@ def test_object_store_reports_sorted_unique_missing_checksums(tmp_path):
     objects.store(source, stored_sha1)
     first_missing = "0" * 40
     second_missing = "f" * 40
-    missing = objects.missing([
+    missing = objects.missing_checksums([
         second_missing, stored_sha1, first_missing, second_missing])
 
     assert missing == [first_missing, second_missing], \
@@ -2237,7 +2237,7 @@ def test_add_worktree_rejects_invalid_data_config_before_creation(tmp_path):
     """
     repo = Repo.init(tmp_path / "repo")
     repo.state.config["data"] = []
-    repo.dothm.dump(repo.state)
+    repo.dothm.save_state(repo.state)
     repo.dothm.index.commit("invalid data configuration")
     destination = tmp_path / "experiment"
 
@@ -2266,7 +2266,7 @@ def test_add_worktree_wraps_existing_branch_link_failure(monkeypatch, tmp_path):
     def fail_link(*args, **kwargs):
         """Simulate a failure in the dothm.link method."""
         raise DothmError("link failed")
-    monkeypatch.setattr(repo.dothm, "link", fail_link)
+    monkeypatch.setattr(repo.dothm, "link_worktree", fail_link)
 
     with pytest.raises(RuntimeError, match="failed to create worktree") as exc_info:
         repo.add_worktree("experiment")

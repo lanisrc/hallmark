@@ -77,7 +77,7 @@ def _local_cli_catalog(path):
     repo.state.data = pd.DataFrame([
         {"path": "tiny.fits", "size_bytes": 4},
         {"path": "other.txt", "size_bytes": 5}])
-    repo.dothm.dump(repo.state)
+    repo.dothm.save_state(repo.state)
     repo.dothm.index.commit("Catalog two remote files")
     return repo
 
