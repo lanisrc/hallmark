@@ -1542,7 +1542,7 @@ def test_build_repo_preserves_config_when_final_yaml_write_fails(monkeypatch, tm
             raise RuntimeError("final config serialization failed")
         return original_dump(data, handle, **kwargs)
 
-    monkeypatch.setattr("hallmark.dothm.yaml.dump", fail_final_remote_dump)
+    monkeypatch.setattr("hallmark.repo.dothm.yaml.dump", fail_final_remote_dump)
     repo_path = tmp_path / "repo.hm"
     with pytest.raises(RuntimeError, match="final config serialization failed"):
         build_repo(repo_path, "EHTC_TEST", fmt_entries=[])

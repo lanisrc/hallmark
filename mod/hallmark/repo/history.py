@@ -9,8 +9,8 @@ from git.exc import GitCommandError
 import pandas as pd
 
 from ..utils import load_yaml
-from ..objects import Objects
-from ..state import State
+from .objects import Objects
+from .state import State
 
 def _load_revision_yaml(
     repo,

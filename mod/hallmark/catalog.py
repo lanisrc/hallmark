@@ -13,14 +13,14 @@ import parse
 import yaml
 
 from .discovery import discover, path_matches
-from .dothm import Dothm
+from .repo.dothm import Dothm
 from .error import CloneError, DestinationExistsError
 from .utils import as_list_of_dicts
 from .repo.config import fmt_fields, normalize_remotes, normalize_tsv_name, row_to_path
 from .transport import OperationContext, RemoteSpec
 from .transport.base import (RemoteObjectMissing, literal_path,
                              thaw_backend_options)
-from .worktree import Worktree
+from .repo.worktree import Worktree
 
 
 def _catalog_names(config):

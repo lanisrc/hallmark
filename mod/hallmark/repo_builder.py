@@ -20,7 +20,7 @@ from .transport.base import (
 from .fmt_detection import (
     KNOWN_PROCESSING_STAGES,
     KNOWN_STATIC_FILE_STEMS)
-from .dothm import dump_yaml
+from .repo.dothm import dump_yaml
 from .error import DothmError
 from .utils import (
     CHECKSUM_ALGORITHMS,

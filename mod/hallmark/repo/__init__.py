@@ -23,10 +23,10 @@ from tempfile import TemporaryDirectory
 from typing import Dict, List, Optional, Tuple, Union
 from git.exc import GitCommandError
 
-from ..dothm import Dothm
-from ..state import State
-from ..worktree import Worktree
-from ..objects import Objects
+from .dothm import Dothm
+from .state import State
+from .worktree import Worktree
+from .objects import Objects
 from ..paraframe import ParaFrame
 from .manifest import manifest_frame_from_pf, manifest_map, iter_manifest_entries
 from .history import (

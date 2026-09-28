@@ -7,11 +7,11 @@ from git import Repo as GitRepo
 from git.exc import GitCommandError
 
 from hallmark import Repo, ParaFrame
-from hallmark.objects import Objects
-from hallmark.state import State
+from hallmark.repo.objects import Objects
+from hallmark.repo.state import State
 from hallmark.repo.changes import worktree_changes
-from hallmark.dothm import Dothm
-from hallmark.worktree import Worktree
+from hallmark.repo.dothm import Dothm
+from hallmark.repo.worktree import Worktree
 from hallmark.utils import (
     load_yaml,
     iter_repository_files,
@@ -1413,7 +1413,7 @@ def test_dump_yml_preserves_existing_file_when_serialization_fails(monkeypatch,
         partial output to the file and then raising a RuntimeError."""
         handle.write("partial output")
         raise RuntimeError("serialization failed")
-    monkeypatch.setattr("hallmark.dothm.yaml.dump", fail_dump)
+    monkeypatch.setattr("hallmark.repo.dothm.yaml.dump", fail_dump)
 
     with pytest.raises(RuntimeError, match="serialization failed"):
         repo.dothm.dump_yml({"data": []}, "config")
