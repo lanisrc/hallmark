@@ -12,7 +12,7 @@ import pytest
 
 from hallmark import Repo, DataBackend, HttpBackend, SshBackend, CyVerseBackend
 from hallmark.remote import backends
-from hallmark.discovery import discover
+from hallmark.remote.discovery import discover
 from hallmark.transport import OperationContext
 from hallmark.transport.base import (
     CapabilityError, RemoteConfigurationError, RemoteEntry, RemoteSpec, Transport,

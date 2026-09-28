@@ -11,8 +11,8 @@ from pathlib import PurePosixPath
 import parse
 from tqdm import tqdm
 
-from .utils import CHECKSUM_ALGORITHMS_BY_STRENGTH, valid_checksum
-from .transport.base import (
+from ..utils import CHECKSUM_ALGORITHMS_BY_STRENGTH, valid_checksum
+from ..transport.base import (
     DownloadError, RemoteEntry, RemoteObjectMissing, literal_path,
 )
 

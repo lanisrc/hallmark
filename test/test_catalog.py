@@ -159,7 +159,7 @@ def test_interrupted_discovery_removes_incomplete_destination(
     def fail(*args, **kwargs):
         raise KeyboardInterrupt()
 
-    monkeypatch.setattr("hallmark.catalog.discover", fail)
+    monkeypatch.setattr("hallmark.remote.clone.discover", fail)
     with pytest.raises(KeyboardInterrupt):
         Repo.init(tmp_path / "clone", from_url="https://example.test/data/")
     assert not (tmp_path / "clone").exists()
@@ -233,7 +233,7 @@ def test_remote_init_preserves_existing_directory_on_discovery_failure(
     def fail(*args, **kwargs):
         raise failure("interrupted")
 
-    monkeypatch.setattr("hallmark.catalog.discover", fail)
+    monkeypatch.setattr("hallmark.remote.clone.discover", fail)
     with pytest.raises(failure):
         Repo.init(destination, from_url="https://example.test/data/")
     assert list(destination.iterdir()) == [destination / "keep.h5"]
@@ -282,7 +282,7 @@ def test_remote_init_cleans_only_created_metadata_on_write_failure(
     def fail(*args, **kwargs):
         raise OSError("cannot write catalog")
 
-    monkeypatch.setattr("hallmark.catalog._write_inventory", fail)
+    monkeypatch.setattr("hallmark.remote.clone._write_inventory", fail)
     with pytest.raises(OSError, match="cannot write"):
         Repo.init(destination, from_url=root)
     assert list(destination.iterdir()) == [destination / "keep"]
@@ -309,7 +309,7 @@ def test_raw_directory_clone_fails_with_init_guidance(
     def fail(*args, **kwargs):
         raise CloneError("not a Git repository")
 
-    monkeypatch.setattr("hallmark.catalog.Dothm.clone", fail)
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", fail)
     with pytest.raises(CloneError, match="hallmark init PATH --from URL"):
         Repo.clone(root, tmp_path / "clone")
     assert root not in reads
@@ -327,7 +327,7 @@ def test_suffixless_http_git_source_falls_back_after_absent_snapshots(
         calls.append(url)
         return original(str(source.dothm.path), destination, **kwargs)
 
-    monkeypatch.setattr("hallmark.catalog.Dothm.clone", clone)
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", clone)
     url = "https://git.example.test/group/dataset"
     repo = Repo.clone(url, tmp_path / "clone")
     assert calls == [url]
@@ -347,7 +347,7 @@ def test_git_sources_do_not_probe_snapshot_metadata(tmp_path, metadata_server,
         calls.append(source)
         raise CloneError("test Git failure")
 
-    monkeypatch.setattr("hallmark.catalog.Dothm.clone", fail)
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", fail)
     with pytest.raises(CloneError, match="test Git failure"):
         Repo.clone(url, tmp_path / "clone")
     assert calls == [url]
@@ -372,7 +372,7 @@ def test_malformed_snapshot_never_falls_back_to_git(
     def fail(*args, **kwargs):
         raise AssertionError("Malformed metadata must not trigger Git fallback")
 
-    monkeypatch.setattr("hallmark.catalog.Dothm.clone", fail)
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", fail)
     with pytest.raises(CloneError):
         Repo.clone(root, tmp_path / "clone")
     assert not (tmp_path / "clone").exists()
@@ -448,7 +448,7 @@ def test_snapshot_access_failure_never_falls_back_to_git(tmp_path, monkeypatch):
         raise AssertionError("Access failure must not trigger Git fallback")
 
     monkeypatch.setattr(OperationContext, "read_text", inaccessible)
-    monkeypatch.setattr("hallmark.catalog.Dothm.clone", fail)
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", fail)
     with pytest.raises(DownloadError, match="requires authentication"):
         Repo.clone("https://catalog.example.test/data/", tmp_path / "clone")
     assert not (tmp_path / "clone").exists()

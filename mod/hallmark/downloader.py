@@ -891,7 +891,7 @@ def plan_download(
         repo, file_paths=file_paths, tsv_names=tsv_names,
         all_files=all_files or (not file_paths and not tsv_names))
     if filter is not None or fmt is not None:
-        from .discovery import path_matches
+        from .remote.discovery import path_matches
         items = [item for item in items if path_matches(
             item.relative_path.as_posix(), filter=filter, fmt=fmt)]
     remote = _select_remote_config(repo, remote_name)

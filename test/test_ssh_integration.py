@@ -401,7 +401,7 @@ def test_sftp_only_init_plans_then_requires_payload_approval(
         raise AssertionError("SFTP directory detection must not invoke remote Git")
 
     monkeypatch.setattr(SshTransport, "_fetch", record_fetch)
-    monkeypatch.setattr("hallmark.catalog.Dothm.clone", reject_git_probe)
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", reject_git_probe)
     plans = []
 
     def decline(plan):

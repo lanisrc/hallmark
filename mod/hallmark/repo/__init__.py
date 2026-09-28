@@ -207,7 +207,7 @@ class Repo:
             ValueError: If remote options are supplied without ``from_url``.
             DownloadError: If discovery fails or download approval is unavailable.
         """
-        from ..catalog import initialize_remote
+        from ..remote.clone import initialize_remote
         from ..downloader import DownloadError, _require_positive_integer
 
         _require_positive_integer(max_workers, label="max_workers")
@@ -312,8 +312,8 @@ class Repo:
             DownloadError: If metadata access or downloading fails, or a download
                 is requested without a callback or worktree destination.
         """
-        from ..catalog import clone_catalog
-        from ..discovery import path_matches
+        from ..remote.clone import clone_catalog
+        from ..remote.discovery import path_matches
         from ..downloader import DownloadError, _require_positive_integer
 
         _require_positive_integer(max_workers, label="max_workers")
