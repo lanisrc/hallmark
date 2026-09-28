@@ -31,9 +31,6 @@ CHECKSUM_ALGORITHMS_BY_STRENGTH = tuple(
     sorted(CHECKSUM_ALGORITHMS, key=CHECKSUM_LENGTHS.__getitem__, reverse=True))
 # create a frozenset of supported checksum algorithms for efficient membership testing.
 SUPPORTED_CHECKSUM_ALGORITHMS = frozenset(CHECKSUM_ALGORITHMS)
-# create a regex pattern that matches any of the supported checksum algorithms.
-CHECKSUM_ALGORITHM_PATTERN = "|".join(
-    re.escape(algorithm) for algorithm in CHECKSUM_ALGORITHMS)
 # remote request timeout settings for network operations (connect timeout, read timeout)
 REMOTE_REQUEST_TIMEOUT = (10, 30)
 # define a frozenset of internal repo names that should be ignored during processing.
@@ -404,28 +401,6 @@ def try_numeric_conversion(series):
         if str(numeric_val) != str(original_val):
             return series
     return converted
-
-
-def prompt_choice(prompt: str, choices: set[str]) -> str:
-    """
-    Used in repo_builder by build_repo.
-    Prompt the user to make a choice from a set of valid options.
-
-    Args:
-        prompt: The prompt message to display to the user.
-        choices: A set of valid choices (case-insensitive).
-
-    Returns:
-        The user's choice as a lowercase string.
-
-    Raises:
-        ValueError: If the user's choice is not in the set of valid choices.
-    """
-    choice = input(prompt).strip().lower()
-    # if the user's choice is not in the set of valid choices, raise a ValueError
-    if choice not in choices:
-        raise ValueError(f"Unrecognized choice: {choice!r}")
-    return choice
 
 
 def convert_format_value(value: str, spec: str):

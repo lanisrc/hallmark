@@ -13,7 +13,7 @@ from string import Formatter
 from typing import Dict, Optional
 
 from ..utils import (
-    as_list_of_dicts, convert_format_value, require_nonempty_string,
+    convert_format_value, require_nonempty_string,
     validate_path_name, validate_relative_path)
 
 from ..transport.base import (
@@ -241,40 +241,6 @@ def normalize_remotes(remotes) -> list[dict]:
                 f"unnamed remote index(es): {indexes}")
 
     return normalized
-
-
-def fmt_entries_from_config(config: dict) -> list[dict]:
-    """
-    Extract and validate the list of format entries from the repository configuration.
-
-    Args:
-        config (dict): The repository configuration dictionary.
-
-    Returns:
-        list[dict]: A list of format entries containing the "fmt" key.
-
-    Raises:
-        ValueError: If the configuration is invalid or if any entry is not a mapping.
-    """
-    # if the provided config is not a dictionary, raise a ValueError
-    if not isinstance(config, dict):
-        raise ValueError("config must be a mapping")
-    data = config.get("data")
-    # if the "data" section is not defined, return an empty list
-    if data is None:
-        return []
-
-    # coerce "data" into a list (a dict becomes a single-item list, as-is if a list)
-    entries = as_list_of_dicts(data)
-    if entries is None:
-        raise ValueError('config "data" must be a mapping or list of mappings')
-
-    # validate that each entry in the "data" list is a dictionary
-    for index, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            raise ValueError(f"config data entry {index} must be a mapping")
-    # return a list of entries that contain the "fmt" key
-    return [entry for entry in entries if "fmt" in entry]
 
 
 def single_data_format(config: dict) -> Optional[str]:
