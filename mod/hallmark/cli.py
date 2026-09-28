@@ -459,49 +459,52 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
                    "May be repeated.")
 @click.option("--fmt",
               help="Select downloads using a filename format; "
-                   "requires --with-download.")
+                   "cannot be combined with --no-download.")
 @click.option("--source-type", default="auto", show_default=True,
               type=click.Choice(["auto", "git", "catalog"]),
               help="Override automatic source detection.")
-@click.option("--with-download", "--download", "fetch_data", is_flag=True,
-              help="Request a download after catalog creation, with confirmation.")
-@click.option("--no-fetch-data", is_flag=True, hidden=True)
+@click.option("--no-download", is_flag=True,
+              help="Clone only the catalog and history, without downloading data.")
 @click.option("--max-workers", type=click.IntRange(min=1), default=4,
               show_default=True)
-@click.option("-y", "--yes", is_flag=True, hidden=True)
-def clone(url, path, auth, filters, fmt, source_type, fetch_data, no_fetch_data,
-          max_workers, yes):
+def clone(url, path, auth, filters, fmt, source_type, no_download, max_workers):
     """
     Clone an existing Git catalog or published catalog snapshot at PATH.
 
-    Dataset files are not downloaded by default. Use --with-download to review
-    and approve a transfer. --filter and --fmt select downloads while preserving
-    the complete catalog and Git history. Use init --from for raw datasets.
+    By default, copy the catalog then ask before downloading dataset files.
+    Declining keeps the catalog and exits successfully. --no-download skips data
+    and the prompt; bare destinations require it. --filter and --fmt narrow the
+    download and cannot be combined with --no-download. The complete catalog and
+    Git history are preserved. Use init followed by add for raw datasets.
     """
-    if fetch_data and no_fetch_data:
-        raise ClickException("--download conflicts with --no-fetch-data")
-    if (filters or fmt is not None) and not fetch_data:
-        raise ClickException("--filter and --fmt require --with-download")
-    if fetch_data and Repo.resolve_repo_paths(path)[1] is None:
-        raise ClickException("Use a worktree destination for --with-download")
-    if yes:
-        click.echo("--yes is deprecated; downloads still require confirmation.",
-                   err=True)
+    if (filters or fmt is not None) and no_download:
+        raise ClickException("--filter and --fmt cannot be used with --no-download")
+    if not no_download and Repo.resolve_repo_paths(path)[1] is None:
+        raise ClickException("Bare clones require --no-download")
+
+    def approve(plan):
+        click.echo(plan.summary())
+        return click.confirm("Download these files?", default=False)
+
     with _translate_cli_errors(DownloadError, GitError, ValueError):
         path_matches("validation", filter=filters or None, fmt=fmt)
         try:
             repo = Repo.clone(url, path, auth=auth,
                               source_type=source_type, progress=True,
+                              download=not no_download, approve=approve,
+                              filter=filters or None, fmt=fmt,
                               max_workers=max_workers)
         except CloneError as exc:
             click.echo(str(exc), err=True)
             raise SystemExit(1) from exc
         click.echo(f'Successfully cloned to "{path}"')
-        if fetch_data:
-            if repo.worktree is None:
-                raise ClickException("Use a worktree destination for --download")
-            plan = repo.plan_download(filter=filters or None, fmt=fmt)
-            _run_download(repo, plan, max_workers=max_workers)
+        if not no_download and repo.download_result is None:
+            click.echo(f'Skipped download; run hm download --all from "{path}" later.')
+        if repo.download_result is not None:
+            if repo.download_result["succeeded"] + repo.download_result["failed"] == 0:
+                click.echo("No files selected for download.")
+            else:
+                _report_download_results(repo.download_result)
 
 
 

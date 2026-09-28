@@ -394,21 +394,25 @@ def test_repo_add_preserves_config_order_and_remote_key(tmp_path):
 
 def test_repo_add_parse_failure_preserves_existing_format(monkeypatch, tmp_path):
     """
-    Test that if ParaFrame.parse() fails during Repo.add(), the existing format in the
+    Test that if ParaFrame.parse() fails during Repo.add(), the existing
+    format in the
     repository's configuration is preserved. This test initializes a repository, sets an
-    initial format, and then monkeypatches ParaFrame.parse() to raise a ValueError.
+    initial format, and then monkeypatches ParaFrame.parse() to raise a
+    ValueError.
     It then attempts to add a new format and checks that the original format remains in
     the configuration.
     Args:
         monkeypatch: pytest fixture that allows for monkeypatching.
         tmp_path: pytest fixture that provides a temporary directory for the test.
     Raises:
-        ValueError: If ParaFrame.parse() is called and raises a ValueError.
+        ValueError: If ParaFrame.parse() is called and raises a
+        ValueError.
     """
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(fmt="old_{number}.txt")
     def fail_parse(*args, **kwargs):
-        """Simulate a failure in ParaFrame.parse() by raising a ValueError."""
+        """Simulate a failure in ParaFrame.parse()
+        by raising a ValueError."""
         raise ValueError("invalid format")
     monkeypatch.setattr("hallmark.repo.ParaFrame.parse", fail_parse)
 
@@ -1293,7 +1297,9 @@ def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
         destination.write_text("downloaded\n", encoding="utf-8")
         return destination.stat().st_size
 
-    monkeypatch.setattr("hallmark.remote.download._fetch_file", fake_download_file)
+    monkeypatch.setattr(
+        "hallmark.remote.download._fetch_file", fake_download_file
+    )
 
     clone = Repo.clone(str(source.dothm.path), tmp_path / "clone",
                        download=True, approve=lambda plan: plan.file_count == 1)
@@ -1318,9 +1324,11 @@ def test_repo_clone_can_skip_remote_data_download(monkeypatch, tmp_path):
     def fail_download(*args, **kwargs):
         raise AssertionError("download should not be attempted")
 
-    monkeypatch.setattr("hallmark.remote.download._fetch_file", fail_download)
+    monkeypatch.setattr(
+        "hallmark.remote.download._fetch_file", fail_download
+    )
 
-    clone = Repo.clone(str(source.dothm.path), tmp_path / "clone")
+    clone = Repo.clone(str(source.dothm.path), tmp_path / "clone", download=False)
 
     assert not (clone.worktree / "a0_i0.h5").exists()
     assert clone.download_result is None
@@ -1346,7 +1354,7 @@ def test_repo_clone_removes_incomplete_destination(tmp_path):
     destination = tmp_path / "clone"
 
     with pytest.raises(CloneError, match="missing required file"):
-        Repo.clone(str(source.dothm.path), destination, fetch_data=False)
+        Repo.clone(str(source.dothm.path), destination, download=False)
     assert not destination.exists(), f"Expected incomplete clone destination \
         {destination} to be removed after failed clone attempt"
 
@@ -1371,9 +1379,10 @@ def test_dothm_yaml_round_trip(tmp_path):
 
 def test_dothm_load_treats_empty_yaml_as_empty_mapping(tmp_path):
     """
-    Test that the Dothm.load() method treats an empty YAML file as an empty mapping.
+    Test that the Dothm.load_state() method treats an empty YAML file as an empty
+    mapping.
     This test creates a repository, writes an empty meta.yml file, and then calls
-    Dothm.load() to load the state. It checks that the loaded meta attribute is
+    Dothm.load_state() to load the state. It checks that the loaded meta attribute is
     an empty dictionary.
     Args:
         tmp_path (Path): A temporary directory provided by pytest.
@@ -1588,7 +1597,8 @@ def test_iter_repository_files_excludes_symlinks(tmp_path):
 
 def test_regex_sub_replaces_all_matches_in_one_pass():
     """
-    Test that apply_regex_replacement() replaces all matches in a single pass, rather than
+    Test that apply_regex_replacement() replaces all matches in a single pass, rather
+    than
     performing multiple passes. This test uses a regex pattern to match numbers in a
     string and replaces them with their negated values. It checks that all matches are
     replaced correctly in one pass, without any unintended side effects.
@@ -2058,17 +2068,12 @@ def test_row_to_path_rejects_unsafe_paths(fmt, row):
         row_to_path(row, fmt)
 
 
-### fmt_entries_from_config tests ###
-
-
-
-
-
 ### filename_fields tests ###
 
 def test_fmt_fields_returns_unique_fields_in_original_order():
     """
-    Test that filename_fields returns a list of unique field names in the order they first
+    Test that filename_fields returns a list of unique field names in the order they
+    first
     appear in the format string. It checks that the function correctly identifies and
     returns the fields without duplicates.
     """
@@ -2100,8 +2105,10 @@ def test_single_data_fmt(config, expected):
         config: The configuration dictionary to test.
         expected: The expected return value from single_data_format.
     """
-    assert single_data_format(config) == expected, f"Expected single_data_format({config}) \
+    assert single_data_format(config) == expected, (
+        f"Expected single_data_format({config}) \
         to be {expected}, got {single_data_format(config)}"
+    )
 
 
 ### Repo.add_worktree tests ###
@@ -2217,13 +2224,13 @@ def test_add_worktree_rejects_invalid_data_config_before_creation(tmp_path):
 
 def test_add_worktree_wraps_existing_branch_link_failure(monkeypatch, tmp_path):
     """
-    Test that adding a worktree wraps a failure in the dothm.link method with a
+    Test that adding a worktree wraps a failure in the dothm.link_worktree method with a
     RuntimeError.
     Args:
         monkeypatch: pytest fixture for temporarily modifying attributes.
         tmp_path: pytest fixture that provides a temporary directory for the test.
     Raises:
-        RuntimeError: If the dothm.link method fails during worktree creation.
+        RuntimeError: If the dothm.link_worktree method fails during worktree creation.
         DothmError: The underlying cause of the failure, wrapped by RuntimeError.
     """
     repo = Repo.init(tmp_path / "repo")
@@ -2232,7 +2239,7 @@ def test_add_worktree_wraps_existing_branch_link_failure(monkeypatch, tmp_path):
     repo.commit("main data")
     repo.dothm.git.branch("experiment")
     def fail_link(*args, **kwargs):
-        """Simulate a failure in the dothm.link method."""
+        """Simulate a failure in the dothm.link_worktree method."""
         raise DothmError("link failed")
     monkeypatch.setattr(repo.dothm, "link_worktree", fail_link)
 
@@ -2459,7 +2466,7 @@ def test_state_update_and_replace_share_data_normalization():
     pd.testing.assert_frame_equal(replaced.data, expected, check_dtype=False)
 
 
-### repo_manifest tests ###
+### repo.manifest tests ###
 
 def test_manifest_frame_normalizes_missing_and_integral_float_values():
     """
@@ -2480,7 +2487,8 @@ def test_manifest_frame_normalizes_missing_and_integral_float_values():
 
 def test_manifest_entries_share_canonical_path_generation():
     """
-    Test that iter_manifest_entries and file_versions_by_path share the same canonical path
+    Test that iter_manifest_entries and file_versions_by_path share the same canonical
+    path
     generation logic. This test creates a State object with a specific configuration and
     data, then checks that both functions produce consistent results for the manifest
     entries and mapping.
@@ -2507,13 +2515,16 @@ def test_manifest_entries_empty_when_config_has_no_data_fmt():
 
     assert list(iter_manifest_entries(state)) == [], f"Expected no manifest entries \
         when no data fmt exists, got {list(iter_manifest_entries(state))}"
-    assert file_versions_by_path(state) == {}, f"Expected empty manifest map when no data fmt \
+    assert file_versions_by_path(state) == {}, (
+        f"Expected empty manifest map when no data fmt \
         exists, got {file_versions_by_path(state)}"
+    )
 
 
 def test_manifest_map_uses_explicit_fmt_override():
     """
-    file_versions_by_path should honor an explicit fmt argument even if config does not define
+    file_versions_by_path should honor an explicit fmt argument even if config does not
+    define
     a data fmt.
     """
     state = State(
@@ -2528,13 +2539,15 @@ def test_manifest_map_uses_explicit_fmt_override():
         f"Expected explicit fmt override mapping, got {actual}"
 
 
-### repo_worktree tests ###
+### repo.changes tests ###
 
 def test_worktree_changes_accepts_uppercase_expected_checksum(tmp_path):
     """
-    Test that find_changed_and_missing_files accepts an uppercase expected checksum and correctly
+    Test that find_changed_and_missing_files accepts an uppercase expected checksum and
+    correctly
     identifies that there are no modified or missing files. This test creates a repo,
-    adds a file, computes its checksum, and then calls find_changed_and_missing_files with the
+    adds a file, computes its checksum, and then calls find_changed_and_missing_files
+    with the
     uppercase version of the checksum. It checks that the returned modified and missing
     lists are empty.
     Args:
@@ -2544,13 +2557,15 @@ def test_worktree_changes_accepts_uppercase_expected_checksum(tmp_path):
     data_path = repo.worktree / "data.dat"
     data_path.write_text("contents\n", encoding="utf-8")
     checksum = repo.checksum(data_path)
-    modified, missing = find_changed_and_missing_files(repo, {"data.dat": checksum.upper()})
+    modified, missing = find_changed_and_missing_files(
+        repo, {"data.dat": checksum.upper()}
+    )
 
     assert modified == [], f"Expected no modified files, got {modified}"
     assert missing == [], f"Expected no missing files, got {missing}"
 
 
-### repo_state tests ###
+### repo.history tests ###
 
 def test_parse_data_tsv_preserves_na_tokens_and_blank_values():
     """
@@ -2699,6 +2714,53 @@ def test_worktree_rejects_missing_path(tmp_path):
         Worktree(missing_path)
 
 
+@pytest.mark.parametrize("method", ["glob", "rglob", "iterdir"])
+def test_worktree_lists_files(tmp_path, method):
+    file_path = tmp_path / "data.h5"
+    file_path.write_text("data")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    nested_file = nested / "other.h5"
+    nested_file.write_text("other")
+    worktree = Worktree(tmp_path)
+
+    if method == "glob":
+        paths = list(worktree.glob("*.h5"))
+        expected = {file_path}
+    elif method == "rglob":
+        paths = list(worktree.rglob("*.h5"))
+        expected = {file_path, nested_file}
+    else:
+        paths = list(worktree.iterdir())
+        expected = {file_path, nested}
+
+    assert set(paths) == expected
+    if hasattr(Path, "with_segments"):
+        for path in paths:
+            assert type(path) is type(tmp_path)
+
+
+def test_worktree_derived_paths_are_plain_paths(tmp_path):
+    if not hasattr(Path, "with_segments"):
+        pytest.skip("pathlib.with_segments requires Python 3.12")
+    worktree = Worktree(tmp_path)
+    paths = [
+        worktree.joinpath("missing.h5"),
+        worktree.with_name("missing"),
+        worktree.with_suffix(".h5"),
+        worktree.parent,
+    ]
+    expected = [
+        tmp_path.joinpath("missing.h5"),
+        tmp_path.with_name("missing"),
+        tmp_path.with_suffix(".h5"),
+        tmp_path.parent,
+    ]
+    assert paths == expected
+    for path in paths:
+        assert type(path) is type(tmp_path)
+
+
 ### error.py tests ###
 
 def test_clone_error_replaces_complete_resolved_path(monkeypatch, tmp_path):
@@ -2738,7 +2800,7 @@ def test_checkout_remote_branch(tmp_path):
     clone = Repo.clone(
         str(source.dothm.path),
         tmp_path / "clone",
-        fetch_data=False,
+        download=False,
     )
 
     # The cloned repository should have the tracked file in its worktree.
@@ -2816,52 +2878,3 @@ def test_checkout_remote_branch(tmp_path):
     assert (clone.worktree / "data.txt").read_text(
         encoding="utf-8"
     ) == "experiment contents\n"
-
-
-@pytest.mark.parametrize("method", ["glob", "rglob", "iterdir"])
-def test_worktree_lists_files(tmp_path, method):
-    file_path = tmp_path / "data.h5"
-    file_path.write_text("data")
-    nested = tmp_path / "nested"
-    nested.mkdir()
-    nested_file = nested / "other.h5"
-    nested_file.write_text("other")
-    worktree = Worktree(tmp_path)
-
-    if method == "glob":
-        paths = list(worktree.glob("*.h5"))
-        expected = {file_path}
-    elif method == "rglob":
-        paths = list(worktree.rglob("*.h5"))
-        expected = {file_path, nested_file}
-    else:
-        paths = list(worktree.iterdir())
-        expected = {file_path, nested}
-
-    assert set(paths) == expected
-    if hasattr(Path, "with_segments"):
-        for path in paths:
-            assert type(path) is type(tmp_path)
-
-
-
-def test_worktree_derived_paths_are_plain_paths(tmp_path):
-    if not hasattr(Path, "with_segments"):
-        pytest.skip("pathlib.with_segments requires Python 3.12")
-    worktree = Worktree(tmp_path)
-    paths = [
-        worktree.joinpath("missing.h5"),
-        worktree.with_name("missing"),
-        worktree.with_suffix(".h5"),
-        worktree.parent,
-    ]
-    expected = [
-        tmp_path.joinpath("missing.h5"),
-        tmp_path.with_name("missing"),
-        tmp_path.with_suffix(".h5"),
-        tmp_path.parent,
-    ]
-    assert paths == expected
-    for path in paths:
-        assert type(path) is type(tmp_path)
-

@@ -237,7 +237,8 @@ def test_remote_add_rejects_bare_symlink_before_access(tmp_path, metadata_server
 
 
 @pytest.mark.parametrize("kwargs", [
-    {"filter": "*.fits"}, {"fmt": "{name}.fits"}, {"source_type": "directory"},
+    {"filter": "*.fits", "download": False},
+    {"fmt": "{name}.fits", "download": False}, {"source_type": "directory"},
     {"download": True, "approve": lambda plan: True, "fmt": "{name:invalid}"},
 ])
 def test_clone_invalid_selection_fails_before_source_access(
@@ -336,7 +337,7 @@ def test_snapshot_clone_does_not_require_payload_authentication(
         root + "config.yml": yaml.safe_dump({"data": [{"db": "data.tsv"}],
                                               "remote": [remote]}),
         root + "meta.yml": "{}\n", root + "data.tsv": "path\na.fits\n"})
-    repo = Repo.clone(root, tmp_path / "clone")
+    repo = Repo.clone(root, tmp_path / "clone", download=False)
     assert repo.state.config["remote"] == [remote]
     assert all(url.startswith(root) for url in metadata_server[1])
     assert repo.plan_download().remote_auth == "missing-local-profile"

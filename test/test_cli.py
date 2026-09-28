@@ -557,7 +557,7 @@ def test_clone_existing_destination_fails_with_plain_git_stderr():
         (target / "placeholder.txt").write_text("test\n", encoding="utf-8")
         result = runner.invoke(
             hallmark,
-            ["clone", "--no-fetch-data", str(source / ".hm"), str(target)])
+            ["clone", str(source / ".hm"), str(target)])
 
         assert result.exit_code != 0, \
             f"Expected non-zero exit code for clone, got {result.exit_code}"
@@ -615,7 +615,7 @@ def test_clone_copies_committed_hallmark_state():
         GitRepo(str(source / ".hm")).index.commit("commit initial hallmark state")
         result = runner.invoke(
             hallmark,
-            ["clone", "--no-fetch-data", str(source / ".hm"), "target"])
+            ["clone", str(source / ".hm"), "target", "--no-download"])
 
         assert result.exit_code == 0, \
             f"Expected exit code 0 for clone, got {result.exit_code}"
@@ -639,7 +639,7 @@ def test_clone_reports_download_error_cleanly(monkeypatch, tmp_path):
 
     monkeypatch.setattr(Repo, "download", fail_download)
     result = CliRunner().invoke(hallmark, [
-        "clone", str(source.dothm.path), str(tmp_path / "target"), "--download"],
+        "clone", str(source.dothm.path), str(tmp_path / "target")],
         input="y\n")
     assert result.exit_code != 0
     assert "Error: Remote download failed" in result.output
@@ -647,19 +647,11 @@ def test_clone_reports_download_error_cleanly(monkeypatch, tmp_path):
 
 
 def test_clone_cli_skips_download_when_no_remote_files(monkeypatch, tmp_path):
-    repo = SimpleNamespace(worktree=tmp_path,
-                           plan_download=lambda **kwargs: _download_plan(0, tmp_path))
-
-    class FakeRepo:
-        resolve_repo_paths = Repo.resolve_repo_paths
-
-        @staticmethod
-        def clone(url, path, **kwargs):
-            return repo
-
-    monkeypatch.setattr(cli_module, "Repo", FakeRepo)
+    source = Repo.init(tmp_path / "source")
+    source.commit("Empty catalog")
+    monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(hallmark, [
-        "clone", "source", "target", "--download"])
+        "clone", str(source.dothm.path), "target"])
     assert result.exit_code == 0, result.output
     assert 'Successfully cloned to "target"' in result.output
     assert "No files selected for download." in result.output
@@ -692,33 +684,6 @@ def test_clone_rejects_nonpositive_max_workers(max_workers):
 
 
 ### build tests ###
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 ### download tests ###
@@ -885,9 +850,8 @@ def test_download_cli_reports_only_first_ten_errors(monkeypatch):
 
 @pytest.mark.parametrize("count", [1, 100])
 @pytest.mark.parametrize("answer", ["n\n", "", "\n"])
-@pytest.mark.parametrize("legacy_yes", [False, True])
 def test_download_cli_requires_affirmative_approval(
-        monkeypatch, count, answer, legacy_yes):
+        monkeypatch, count, answer):
     repo = _install_repo(monkeypatch)
     repo.plan_download = lambda *args, **kwargs: _download_plan(count)
 
@@ -895,45 +859,33 @@ def test_download_cli_requires_affirmative_approval(
         raise AssertionError("rejected or absent approval must not download")
 
     repo.download = reject_download
-    args = ["download", "--all"] + (["--yes"] if legacy_yes else [])
+    args = ["download", "--all"]
     result = CliRunner().invoke(hallmark, args, input=answer)
     assert result.exit_code != 0
     assert f"{count} file(s)" in result.output
     assert "Download these files? [y/N]" in result.output
     assert "Aborted!" in result.output
-    if legacy_yes:
-        assert "--yes is deprecated" in result.output
 
 
-@pytest.mark.parametrize("arguments", [[], ["--no-fetch-data"]])
-def test_clone_cli_defaults_to_metadata_only(monkeypatch, tmp_path, arguments):
+def test_clone_cli_no_download_copies_metadata_only(monkeypatch, tmp_path):
     source = _local_cli_catalog(tmp_path / "source")
 
     def reject_download(*args, **kwargs):
-        raise AssertionError("default clone must not plan or download payloads")
+        raise AssertionError("catalog-only clone must not plan or download payloads")
 
     monkeypatch.setattr(Repo, "plan_download", reject_download)
     monkeypatch.setattr(Repo, "download", reject_download)
     target = tmp_path / "target"
     result = CliRunner().invoke(hallmark, [
-        "clone", str(source.dothm.path), str(target), *arguments])
+        "clone", str(source.dothm.path), str(target), "--no-download"])
     assert result.exit_code == 0, result.output
     assert (target / ".hm/data.tsv").is_file()
     assert not (target / "tiny.fits").exists()
     assert "Download these files?" not in result.output
 
 
-
-
-def test_clone_cli_rejects_conflicting_download_aliases():
-    result = CliRunner().invoke(hallmark, [
-        "clone", "source", "target", "--download", "--no-fetch-data"])
-    assert result.exit_code != 0
-    assert "--download conflicts with --no-fetch-data" in result.output
-
-
 @pytest.mark.parametrize("during_clone", [False, True])
-@pytest.mark.parametrize("answer", ["y\n", "n\n", ""])
+@pytest.mark.parametrize("answer", ["y\n", "n\n", "\n", ""])
 def test_cli_downloads_only_approved_selected_payload(
         monkeypatch, tmp_path, during_clone, answer):
     from mock_server import MockServer
@@ -954,7 +906,7 @@ def test_cli_downloads_only_approved_selected_payload(
     if during_clone:
         target = tmp_path / "target"
         arguments = ["clone", str(source.dothm.path), str(target),
-                     "--filter", "*.fits", "--download"]
+                     "--filter", "*.fits"]
     else:
         target = source.worktree
         monkeypatch.chdir(target)
@@ -968,17 +920,20 @@ def test_cli_downloads_only_approved_selected_payload(
         assert requests_made == ["https://example.test/data/tiny.fits"]
         assert (target / "tiny.fits").read_bytes() == b"fits"
     else:
-        assert result.exit_code != 0
+        if during_clone and answer in {"n\n", "\n"}:
+            assert result.exit_code == 0, result.output
+            assert (target / ".hm/data.tsv").is_file()
+        else:
+            assert result.exit_code != 0
         assert requests_made == []
         assert not (target / "tiny.fits").exists()
     assert not (target / "other.txt").exists()
 
 
-
-
 @pytest.mark.parametrize("arguments", [
-    ["--filter", "*.fits"], ["--fmt", "{name}.fits"],
-    ["--with-download", "--fmt", "{name:invalid}"],
+    ["--no-download", "--filter", "*.fits"],
+    ["--no-download", "--fmt", "{name}.fits"],
+    ["--fmt", "{name:invalid}"],
 ])
 def test_clone_cli_rejects_invalid_selection_before_source_access(
         monkeypatch, arguments):
@@ -989,8 +944,6 @@ def test_clone_cli_rejects_invalid_selection_before_source_access(
     result = CliRunner().invoke(hallmark, ["clone", "source", "target", *arguments])
     assert result.exit_code != 0
     assert "Error:" in result.output
-
-
 
 
 def test_set_config_cli_persists_backend_options(monkeypatch, tmp_path):
@@ -1007,3 +960,30 @@ def test_set_config_cli_persists_backend_options(monkeypatch, tmp_path):
     assert remote["backend_options"] == {"collection": ["release-1", "release-2"]}
 
 
+@pytest.mark.parametrize("answer", ["y\n", "n\n", "\n", ""])
+def test_add_then_download_requires_confirmation(monkeypatch, tmp_path, answer):
+    from hallmark.transport import OperationContext
+    from hallmark.transport.base import RemoteObjectMissing
+    from mock_server import MockServer
+
+    def metadata(context, path):
+        if path == "":
+            return '<h1>Index of data</h1><a href="a.fits">a.fits</a>'
+        raise RemoteObjectMissing("Missing metadata")
+
+    server = MockServer("https://example.test/data/")
+    server.add_file("a.fits", b"fits")
+    monkeypatch.setattr(OperationContext, "read_text", metadata)
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    destination = tmp_path / "target"
+    runner = CliRunner()
+    assert runner.invoke(hallmark, ["init", str(destination)]).exit_code == 0
+    monkeypatch.chdir(destination)
+    result = runner.invoke(hallmark, ["add", "https://example.test/data/"])
+    assert result.exit_code == 0, result.output
+    assert not (destination / "a.fits").exists()
+    result = runner.invoke(hallmark, ["download", "--all"], input=answer)
+    assert "Download these files? [y/N]" in result.output
+    assert Repo(destination).state.data["path"].tolist() == ["a.fits"]
+    assert (destination / "a.fits").exists() == (answer == "y\n")
+    assert (result.exit_code == 0) == (answer == "y\n")

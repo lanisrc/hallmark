@@ -27,13 +27,25 @@ from .dothm import Dothm
 from .state import State
 from .worktree import Worktree
 from .objects import Objects
-from ..error import DestinationExistsError
 from ..paraframe import ParaFrame
 from .manifest import build_file_table, file_versions_by_path, iter_manifest_entries
-from .history import load_head_state
-from ..utils import FILE_IO_CHUNK_SIZE, use_working_directory, iter_repository_files, require_nonempty_string, resolve_path_in_root
-from .changes import filter_files_in_directory, find_changed_and_missing_files
-from .config import branch_encodings, branch_filename_format, set_config, single_data_format
+from .history import (
+    load_head_state)
+from ..error import DestinationExistsError
+from ..utils import (
+    FILE_IO_CHUNK_SIZE,
+    use_working_directory,
+    iter_repository_files,
+    require_nonempty_string,
+    resolve_path_in_root)
+from .changes import (
+    filter_files_in_directory,
+    find_changed_and_missing_files)
+from .config import (
+    branch_encodings,
+    branch_filename_format,
+    set_config,
+    single_data_format)
 
 @dataclass(init=False)
 class Repo:
@@ -192,20 +204,23 @@ class Repo:
             Worktree.init(worktree_path)
         return cls(path)
 
-    def _download_after_creation(self, *, approve, max_workers, progress,
+    def _download_cloned_files(self, *, approve, max_workers, progress,
                                  filter=None, fmt=None):
         """Run an approved transfer after catalog creation has completed."""
         from ..remote.download import DownloadError
 
         plan = self.plan_download(filter=filter, fmt=fmt)
-        if plan.file_count and approve(plan) is True:
-            self.download_result = self.download(
-                plan, approved=True, max_workers=max_workers, progress=progress)
-            if self.download_result["failed"]:
-                details = "\n".join(self.download_result["errors"][:5])
-                raise DownloadError(
-                    f"Failed to download {self.download_result['failed']} "
-                    f"file(s):\n{details}")
+        if plan.file_count and approve is not None and not approve(plan):
+            return
+        self.download_result = self.download(
+            plan, approved=True, max_workers=max_workers, progress=progress)
+        if self.download_result["failed"]:
+            details = "\n".join(self.download_result["errors"][:5])
+            raise DownloadError(
+                f"Failed to download {self.download_result['failed']} "
+                f"file(s):\n{details}\n"
+                f'Catalog kept at "{self.dothm.path}". '
+                "Successfully downloaded files were kept.")
 
     @classmethod
     def clone(
@@ -218,18 +233,16 @@ class Repo:
         fmt: Optional[str] = None,
         source_type: str = "auto",
         progress: bool = False,
-        download: bool = False,
+        download: bool = True,
         approve=None,
         max_workers: int = 4,
-        fetch_data: Optional[bool] = None,
-        show_progress: Optional[bool] = None,
     ) -> "Repo":
         """
         Clone an existing Hallmark Git catalog or published snapshot.
 
         Git sources retain their history. Published catalog snapshots
-        start new local history. Dataset files are
-        downloaded only when requested and approved after catalog creation.
+        start new local history. Dataset files download by default after
+        catalog creation, without prompting unless an approval callback is supplied.
         Declining approval leaves the catalog available without dataset files.
 
         Args:
@@ -246,48 +259,38 @@ class Repo:
             progress (bool): Show download progress. Defaults
                 to False.
             download (bool): Request downloads after preparing the catalog.
-                Defaults to False and requires an approval callback when True.
-            approve (callable, optional): Called with the completed download
-                plan. Return the Boolean True to approve the transfer.
+                Defaults to True. Bare destinations require ``download=False``.
+            approve (callable, optional): Called with a nonempty download plan.
+                Return True to permit the transfer. Without a callback,
+                downloads proceed without prompting. Declining keeps the catalog.
             max_workers (int): Maximum download workers. Defaults to 4.
-            fetch_data (bool, optional): Compatibility alias for ``download``.
-            show_progress (bool, optional): Compatibility alias for ``progress``.
 
         Returns:
             Repo: The cloned repository. ``download_result`` contains results
-            when an approved, nonempty download was performed.
+            when a download was attempted, including an empty selection.
 
         Raises:
             DestinationExistsError: If the destination already exists.
             CloneError: If a requested catalog is missing or invalid.
             ValueError: If source options are invalid or conflict.
             DownloadError: If metadata access or downloading fails, or a download
-                is requested without a callback or worktree destination.
+                is requested for a bare destination.
         """
         from ..remote.clone import clone_catalog
         from ..remote.discovery import path_matches
         from ..remote.download import DownloadError, _require_positive_integer
 
         _require_positive_integer(max_workers, label="max_workers")
-        if fetch_data is not None:
-            if download and not fetch_data:
-                raise ValueError("download and fetch_data conflict")
-            download = fetch_data
-        if show_progress is not None:
-            progress = show_progress
         if (filter is not None or fmt is not None) and not download:
             raise ValueError("clone filter and fmt require download=True; "
-                             "use init(from_url=...) to select a new catalog")
-        if download and not callable(approve):
-            raise DownloadError(
-                "Downloading during clone requires an approve(plan) callback")
+                             "use init() followed by add(URL) to select a new catalog")
         if download and cls.resolve_repo_paths(path)[1] is None:
             raise DownloadError(
-                "Clone a worktree to download; bare catalogs need an output path")
+                "Bare clones require download=False; use a worktree to download data")
         path_matches("validation", filter=filter, fmt=fmt)
         repo = clone_catalog(cls, url, path, auth=auth, source_type=source_type)
         if download:
-            repo._download_after_creation(
+            repo._download_cloned_files(
                 approve=approve, max_workers=max_workers, progress=progress,
                 filter=filter, fmt=fmt)
         return repo
