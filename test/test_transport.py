@@ -9,7 +9,6 @@ import signal
 import subprocess
 import sys
 import time
-import traceback
 from urllib.parse import quote
 
 import pytest
@@ -17,8 +16,10 @@ import requests
 import yaml
 
 from hallmark import Repo
-from hallmark.remote.download import _download_file, download_remote_data
-from hallmark.repo_builder import _manifest_matches, build_repo
+from hallmark.remote.plan import DownloadItem, DownloadPlan
+from hallmark.remote.download import execute_download_plan
+from conftest import download_selection
+from hallmark.remote.discovery import discover_remote_files
 from hallmark.repo.config import normalize_remotes
 from hallmark.transport import OperationContext, RemoteSpec
 from hallmark.transport.auth import resolve_ssh_settings
@@ -29,7 +30,7 @@ from hallmark.transport.base import (
     TransferCancelled,
     validate_remote_path,
 )
-from hallmark.transport.ssh import SshTransport, quote_sftp_path
+from hallmark.transport.ssh import SshBackend, quote_sftp_path
 
 
 @pytest.fixture(autouse=True)
@@ -105,7 +106,7 @@ def test_controls_rejected_at_all_path_boundaries(path, tmp_path):
     with pytest.raises(RemoteConfigurationError):
         quote_sftp_path("/" + path)
     with pytest.raises(RemoteConfigurationError):
-        _download_file("ssh://campus/" + path, tmp_path / "out")
+        RemoteSpec.from_url("ssh://campus/" + path)
 
 
 def write_auth(monkeypatch, tmp_path, profiles, defaults=None):
@@ -138,7 +139,9 @@ def test_profile_precedence_binding_and_isolation(monkeypatch, tmp_path):
         },
         {"transfer_timeout": 77},
     )
-    first = resolve_ssh_settings(RemoteSpec.from_url("ssh://carol@campus:2222/data", "one"))
+    first = resolve_ssh_settings(
+        RemoteSpec.from_url("ssh://carol@campus:2222/data", "one")
+    )
     second = resolve_ssh_settings(RemoteSpec.from_url("sftp://campus/data", "two"))
     assert (first.user, first.port, first.transfer_timeout) == ("carol", 2222, 77)
     assert (second.user, second.port) == ("bob", 2201)
@@ -174,7 +177,8 @@ def test_profile_xdg_and_removal(monkeypatch, tmp_path):
         "version: 1\nprofiles:\n  lab:\n    hosts: [campus]\n    user: alice\n"
     )
     assert (
-        resolve_ssh_settings(RemoteSpec.from_url("ssh://campus/data", "lab")).user == "alice"
+        resolve_ssh_settings(RemoteSpec.from_url("ssh://campus/data", "lab")).user
+        == "alice"
     )
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url="ssh://campus/data", remote_auth="lab")
@@ -215,15 +219,12 @@ def test_http_error_redacts_exception_and_cause(monkeypatch, tmp_path):
     def fail(*args, **kwargs):
         raise requests.ConnectionError("https://user:secret@example.test/?token=secret")
 
-    monkeypatch.setattr(requests, "get", fail)
-    url = "https://user:secret@example.test/data?token=secret"
-    with pytest.raises(DownloadError) as error:
-        _download_file(url, tmp_path / "out")
-    formatted = traceback.format_exception(
-        type(error.value), error.value, error.value.__traceback__
-    )
-    assert "secret" not in "".join(formatted)
-    assert "secret" not in repr(error.value)
+    monkeypatch.setattr(requests.Session, "get", fail)
+    plan = DownloadPlan([DownloadItem("file")], "https://user:secret@example.test/data/",
+                        tmp_path)
+    result = execute_download_plan(None, plan, approved=True)
+    assert result["failed"] == 1
+    assert "secret" not in "".join(result["errors"])
 
 
 @pytest.mark.parametrize("location", [
@@ -308,30 +309,10 @@ def test_symlink_swap_after_planning(monkeypatch, tmp_path):
         folder.rmdir()
         folder.symlink_to(outside, target_is_directory=True)
 
-    monkeypatch.setattr("hallmark.transport.http.HttpTransport.prepare", swap)
-    result = download_remote_data(
-        repo, repo.worktree, selected_files=[(Path("sub/data"), None)]
-    , approved=True)
+    monkeypatch.setattr("hallmark.transport.http.HttpBackend.prepare", swap)
+    result = download_selection(repo, repo.worktree, [(Path('sub/data'), None)])
     assert result["failed"] == 1
     assert list(outside.iterdir()) == []
-
-
-@pytest.mark.parametrize("scheme", ["https", "ssh"])
-def test_builder_discovers_without_backend_flags(monkeypatch, tmp_path, scheme):
-    calls = []
-    monkeypatch.setattr(
-        "hallmark.repo_builder._build_repo", lambda *a, **kw: calls.append((a, kw))
-    )
-    build_repo(tmp_path / "repo", "lab", [], dataset_url=f"{scheme}://unused/data")
-    assert len(calls) == 1
-    assert not (tmp_path / "repo").exists()
-
-
-def test_manifest_preserves_whitespace_and_percent():
-    text = "a" * 64 + "   leading%20 name  \n"
-    assert _manifest_matches(text, "sha256") == [("a" * 64, " leading%20 name  ")]
-    with pytest.raises(ValueError, match="escaped"):
-        _manifest_matches("\\" + "a" * 64 + "  line\\nbreak\n", "sha256")
 
 
 @pytest.mark.ssh_client
@@ -408,7 +389,9 @@ def test_bounded_process_errors(fake_process, mode, message):
 def test_process_start_failure():
     with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         with pytest.raises(DownloadError, match="Unable to start"):
-            context.transport._run_ssh_command(["/nonexistent/hallmark-test"], timeout=1)
+            context.transport._run_ssh_command(
+                ["/nonexistent/hallmark-test"], timeout=1
+            )
 
 
 @pytest.mark.parametrize("reaping_in_progress", [False, True])
@@ -466,7 +449,9 @@ def test_cancel_active_process_group(fake_process, tmp_path):
         context.settings = replace(context.settings, shutdown_timeout=1)
         with ThreadPoolExecutor(1) as pool:
             future = pool.submit(
-                context.transport._run_ssh_command, fake_process + ["sleep", str(pids)], timeout=30
+                context.transport._run_ssh_command,
+                fake_process + ["sleep", str(pids)],
+                timeout=30,
             )
             deadline = time.monotonic() + 5
             while not pids.exists() and time.monotonic() < deadline:
@@ -488,15 +473,13 @@ def test_partial_failure_preserves_destination(monkeypatch, fake_process, tmp_pa
     repo.set_config(remote_url="ssh://unused/data")
     destination = repo.worktree / "data.bin"
     destination.write_bytes(b"original")
-    monkeypatch.setattr(SshTransport, "prepare", lambda self: None)
+    monkeypatch.setattr(SshBackend, "prepare", lambda self: None)
 
     def fetch(self, path, destination, **kwargs):
         self._run_ssh_command(fake_process + ["partial", str(destination)], timeout=5)
 
-    monkeypatch.setattr(SshTransport, "fetch", fetch)
-    result = download_remote_data(
-        repo, repo.worktree, selected_files=[(Path("data.bin"), None)]
-    , approved=True)
+    monkeypatch.setattr(SshBackend, "fetch", fetch)
+    result = download_selection(repo, repo.worktree, [(Path('data.bin'), None)])
     assert result["failed"] == 1
     assert destination.read_bytes() == b"original"
     assert not list(Path(repo.worktree).glob("*.part"))
@@ -507,17 +490,14 @@ def test_checksum_failure_is_atomic(monkeypatch, tmp_path):
     repo.set_config(remote_url="ssh://unused/data")
     destination = repo.worktree / "data.bin"
     destination.write_bytes(b"original")
-    monkeypatch.setattr(SshTransport, "prepare", lambda self: None)
+    monkeypatch.setattr(SshBackend, "prepare", lambda self: None)
     monkeypatch.setattr(
-        SshTransport, "fetch", lambda self, path, dest, **kw: dest.write_bytes(b"wrong")
+        SshBackend, "fetch", lambda self, path, dest, **kw: dest.write_bytes(b"wrong")
     )
-    result = download_remote_data(
+    result = download_selection(
         repo,
         repo.worktree,
-        selected_files=[
-            (Path("data.bin"), ("sha256", hashlib.sha256(b"right").hexdigest()))
-        ],
-     approved=True)
+        [(Path('data.bin'), ('sha256', hashlib.sha256(b'right').hexdigest()))])
     assert result["failed"] == 1
     assert destination.read_bytes() == b"original"
     assert not list(Path(repo.worktree).glob("*.part"))
@@ -528,16 +508,14 @@ def test_cancel_before_publish(monkeypatch, tmp_path):
     repo.set_config(remote_url="ssh://unused/data")
     destination = repo.worktree / "item"
     destination.write_bytes(b"original")
-    monkeypatch.setattr(SshTransport, "prepare", lambda self: None)
+    monkeypatch.setattr(SshBackend, "prepare", lambda self: None)
 
     def fetch(self, path, dest, **kwargs):
         dest.write_bytes(b"complete")
         self.context.cancel()
 
-    monkeypatch.setattr(SshTransport, "fetch", fetch)
-    result = download_remote_data(
-        repo, repo.worktree, selected_files=[(Path("item"), None)]
-    , approved=True)
+    monkeypatch.setattr(SshBackend, "fetch", fetch)
+    result = download_selection(repo, repo.worktree, [(Path('item'), None)])
     assert result["failed"] == 1
     assert destination.read_bytes() == b"original"
     assert not list(Path(repo.worktree).glob("*.part"))
@@ -548,7 +526,7 @@ def test_keyboard_interrupt_stops_owned_workers(monkeypatch, tmp_path, fake_proc
     repo.set_config(remote_url="ssh://unused/data")
     transports = []
     ready = tmp_path / "pids"
-    monkeypatch.setattr(SshTransport, "prepare", lambda self: None)
+    monkeypatch.setattr(SshBackend, "prepare", lambda self: None)
 
     def fetch(self, path, destination, **kwargs):
         transports.append(self)
@@ -562,12 +540,10 @@ def test_keyboard_interrupt_stops_owned_workers(monkeypatch, tmp_path, fake_proc
         assert ready.exists()
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(SshTransport, "fetch", fetch)
+    monkeypatch.setattr(SshBackend, "fetch", fetch)
     monkeypatch.setattr("hallmark.remote.download.wait", interrupt)
     with pytest.raises(KeyboardInterrupt):
-        download_remote_data(
-            repo, repo.worktree, max_workers=1, selected_files=[(Path("item"), None)]
-        , approved=True)
+        download_selection(repo, repo.worktree, [(Path('item'), None)], max_workers=1)
     assert not (repo.worktree / "item").exists()
     assert not list(Path(repo.worktree).glob("*.part"))
     assert all(not transport._processes for transport in transports)
@@ -609,7 +585,6 @@ def test_cli_profile_roundtrip(monkeypatch, tmp_path):
 
 
 def test_http_manifest_auth_failure_is_not_optional(monkeypatch):
-    from hallmark.repo_builder import list_remote_files
     from mock_server import MockServer
 
     server = MockServer("https://example.test/data/")
@@ -626,7 +601,8 @@ def test_http_manifest_auth_failure_is_not_optional(monkeypatch):
     server.get = unauthorized
     monkeypatch.setattr(requests, "Session", lambda: server)
     with pytest.raises(DownloadError, match="HTTP 401"):
-        list_remote_files(server.base_url)
+        with OperationContext(RemoteSpec.from_url(server.base_url)) as context:
+            discover_remote_files(context)
 
 
 @pytest.mark.parametrize(
@@ -674,62 +650,41 @@ def test_short_socket_ignores_long_tempdir(monkeypatch, tmp_path):
         assert context.transport._socket_dir is None
 
 
-def test_manifest_strength_and_conflict():
-    from hallmark.repo_builder import _record_checksum
+def test_discovered_manifest_preserves_names_and_rejects_escaped_names():
+    from types import SimpleNamespace
+    from hallmark.remote.discovery import _attach_published_checksums
+    from hallmark.transport.base import RemoteEntry
 
-    checksums = {}
-    _record_checksum(checksums, "file", "sha256", "a" * 64)
-    _record_checksum(checksums, "file", "md5", "b" * 32)
-    assert checksums["file"] == ("sha256", "a" * 64)
+    name = " leading%20 name  "
+    text = "a" * 64 + "  " + name + "\n"
+
+    def read_text(path):
+        return text
+
+    entries = {name: RemoteEntry(name), "sha256sums": RemoteEntry("sha256sums")}
+    context = SimpleNamespace(read_text=read_text)
+    _attach_published_checksums(context, entries)
+    assert entries[name].checksum == "a" * 64
+    text = "\\" + "a" * 64 + "  line\\nbreak\n"
+    with pytest.raises(DownloadError, match="escaped"):
+        _attach_published_checksums(context, entries)
+
+
+def test_discovered_manifest_prefers_strong_checksum_and_rejects_conflict():
+    from types import SimpleNamespace
+    from hallmark.remote.discovery import _attach_published_checksums
+    from hallmark.transport.base import RemoteEntry
+
+    texts = {"sha256sums": "a" * 64 + "  file\n", "md5sums": "b" * 32 + "  file\n"}
+
+    def read_text(path):
+        return texts[path]
+
+    entries = {name: RemoteEntry(name) for name in ["file", *texts]}
+    context = SimpleNamespace(read_text=read_text)
+    _attach_published_checksums(context, entries)
+    assert entries["file"].checksum_algorithm == "sha256"
+    assert entries["file"].checksum == "a" * 64
+    texts["sha256sums"] = "c" * 64 + "  file\n"
     with pytest.raises(DownloadError, match="Conflicting"):
-        _record_checksum(checksums, "file", "sha256", "c" * 64)
-
-
-def test_explicit_http_source_is_exact_and_keeps_output_remotes(monkeypatch, tmp_path):
-    from mock_server import MockServer
-
-    server = MockServer("https://example.test/already-the-dataset/")
-    server.add_directory("", [("data-object", "README.md")])
-    server.add_file("README.md", b"notes")
-    monkeypatch.setattr(requests, "Session", lambda: server)
-    repo = build_repo(
-        tmp_path / "catalog",
-        "label",
-        [],
-        dataset_url=server.base_url,
-        index_format="cyverse-html",
-        remotes=[{"name": "mirror", "url": "https://elsewhere.test/data"}],
-    )
-    assert repo.state.config["remote"][0]["url"] == "https://elsewhere.test/data"
-    entry = repo.state.config["data"][0]
-    assert not any(key in entry for key in ("md5", "sha1", "sha256"))
-    assert entry.get("checksum") in (None, "unknown")
-
-
-def test_build_cli_passes_source_controls(monkeypatch, tmp_path):
-    from click.testing import CliRunner
-    from hallmark.cli import hallmark
-
-    calls = []
-    monkeypatch.setattr("hallmark.cli.build_repo", lambda **kw: calls.append(kw))
-    result = CliRunner().invoke(
-        hallmark,
-        [
-            "build",
-            str(tmp_path),
-            "lab",
-            "--fmt",
-            "run_{i}.h5=data.tsv",
-            "--dataset-url",
-            "ssh://campus/data",
-            "--dataset-auth",
-            "lab",
-            "--allow-remote-commands",
-            "--remote-hash",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert calls[0]["dataset_url"] == "ssh://campus/data"
-    assert calls[0]["dataset_auth"] == "lab"
-    assert calls[0]["allow_remote_commands"] is True
-    assert calls[0]["remote_hash"] is True
+        _attach_published_checksums(context, entries)

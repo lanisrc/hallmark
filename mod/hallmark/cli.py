@@ -18,18 +18,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import click
-import requests
 import yaml
 from click import ClickException
 from git.exc import GitError
 
 from . import Repo
-from .utils import validate_path_name
-from .repo_builder import build_repo
 from .remote.download import DownloadError
 from .remote.discovery import path_matches
 from .error import CheckoutError, CloneError
-from .repo.config import validate_tsv_filename
 
 
 # use a context manager to translate application errors into clean Click errors
@@ -66,17 +62,6 @@ _REPO_READ_ERRORS = (
     ValueError,
     FileNotFoundError,
     CheckoutError)
-
-# exception types translated to a clean CLI error by the hallmark build command
-_BUILD_DATASET_ERRORS = (
-    DownloadError,
-    RuntimeError,
-    ValueError,
-    FileNotFoundError,
-    FileExistsError,
-    GitError,
-    yaml.YAMLError)
-
 
 def _report_download_results(results: dict) -> None:
     """
@@ -150,7 +135,7 @@ def hallmark(ctx):
     manage data products in a complex workflow.
     """
     # if the invoked subcommand is one of the commands that does not require a repo
-    if ctx.invoked_subcommand in [None, "init", "clone", "build"]:
+    if ctx.invoked_subcommand in [None, "init", "clone"]:
         # return early without attempting to open a repository
         return
     # attempt to open the hallmark repository in the current directory
@@ -531,110 +516,3 @@ def clone(url, path, auth, filters, fmt, source_type, fetch_data, no_fetch_data,
 
 
 
-@hallmark.command(short_help="Deprecated: use init --from for remote datasets.")
-@click.argument("directory")
-@click.argument("dataset_name")
-@click.option(
-    "--remote", "remotes", multiple=True,
-    help="Remote to record, as NAME=URL or just NAME. May be repeated "
-         "for multiple remotes.")
-@click.option(
-    "--config-file", "config_file",
-    type=click.Path(exists=True, dir_okay=True, file_okay=True),
-    help="Path to config.yml or a repository directory containing config.yml. "
-         "Load formats and, unless --remote is given, data remotes.")
-@click.option(
-    "--fmt", "fmts", multiple=True,
-    help="Filename format and TSV name, as FMT=DB (e.g. "
-         "'a{a}_i{i}.h5=data.tsv'). May be repeated for multiple formats.")
-@click.option(
-    "--overwrite",
-    is_flag=True,
-    help="Replace the destination repository if it already exists.")
-@click.option("--dataset-url",
-              help="Exact dataset URL to search recursively. Recorded remotes "
-                   "do not change this root.")
-@click.option("--dataset-auth", help="Local SSH profile for the dataset source.")
-@click.option("--index-format", type=click.Choice(["cyverse-html"]), hidden=True)
-@click.option("--allow-remote-commands", is_flag=True,
-              hidden=True, help="Deprecated; discovery uses SFTP.")
-@click.option("--remote-hash", is_flag=True,
-              hidden=True, help="Unsupported; discovery does not hash dataset files.")
-def build(directory, dataset_name, remotes, config_file, fmts, overwrite,
-          dataset_url, dataset_auth, index_format, allow_remote_commands, remote_hash):
-    """
-    Build a catalog at DIRECTORY/DATASET_NAME.hm.
-
-    This command is deprecated. Use hallmark init --from URL PATH for remote
-    datasets, or hallmark init PATH to create a local repository.
-
-    --dataset-url selects the exact discovery root; otherwise DATASET_NAME
-    identifies a dataset beneath the CyVerse curated-data directory.
-    --remote records data locations without changing the discovery root.
-
-    Supply filename formats with --fmt or --config-file. If neither is
-    provided, existing formats are reused or a generic path catalog is
-    created. Dataset files are not downloaded during catalog creation.
-    """
-    click.echo("build is deprecated; use hallmark init --from URL PATH.", err=True)
-    if config_file and fmts:
-        raise ClickException("Use only one of --config-file or --fmt, not both.")
-    # validate the dataset name to ensure it is a valid path component
-    with _translate_cli_errors(ValueError):
-        dataset_name = validate_path_name(dataset_name, label="dataset name")
-
-    repo_path = Path(directory) / f"{dataset_name}.hm"
-    parsed_remotes = []
-    for entry in remotes:
-        # if the remote entry contains an "=", it is in the form NAME=URL
-        if "=" in entry:
-            name, url = entry.split("=", 1)
-            parsed_remotes.append({"name": name, "url": url})
-        else:
-            parsed_remotes.append({"name": entry})
-
-    fmt_entries = None
-    if fmts:
-        fmt_entries = []
-        for entry in fmts:
-            # if the fmt entry does not contain an "=", it is invalid
-            if "=" not in entry:
-                raise ClickException(
-                    f"--fmt values must use FMT=DB, got {entry!r}.")
-            # split the fmt entry into its format and database name components
-            fmt, db = entry.rsplit("=", 1)
-            fmt = fmt.strip()
-            # Validate that the fmt is not empty or whitespace-only
-            if not fmt:
-                raise ClickException("--fmt must define a non-empty format")
-            # normalize the db name to ensure it is valid and ends with ".tsv"
-            try:
-                with _translate_cli_errors(*_BUILD_DATASET_ERRORS):
-                    db = validate_tsv_filename(db)
-            # handle any network-related exceptions raised
-            except requests.exceptions.RequestException as exc:
-                raise ClickException(
-                    f"Failed to reach dataset {dataset_name!r}: {exc}") from exc
-
-            # if the checks pass, append the fmt and db to the fmt_entries list
-            fmt_entries.append({"fmt": fmt, "db": db})
-
-    source_options = {key: value for key, value in {
-        "dataset_url": dataset_url, "dataset_auth": dataset_auth,
-        "index_format": index_format, "allow_remote_commands": allow_remote_commands,
-        "remote_hash": remote_hash}.items() if value is not None and value is not False}
-    # build the hallmark repository with the specified parameters
-    try:
-        with _translate_cli_errors(*_BUILD_DATASET_ERRORS):
-            build_repo(
-                repo_path=repo_path,
-                dataset_name=dataset_name,
-                fmt_entries=fmt_entries,
-                config_file=config_file,
-                remotes=parsed_remotes or None,
-                overwrite=overwrite, **source_options)
-    except requests.exceptions.RequestException as exc:
-        raise ClickException(
-            f"Failed to reach dataset {dataset_name!r}: {exc}") from exc
-
-    click.echo(f'Successfully built hallmark repository at "{repo_path}".')

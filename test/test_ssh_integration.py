@@ -19,7 +19,6 @@ import yaml
 from hallmark import Repo
 from hallmark.cli import hallmark
 from hallmark.remote.download import download_remote_data, select_download_files
-from hallmark.repo_builder import build_repo
 from hallmark.transport import OperationContext, RemoteSpec
 from hallmark.transport.base import (
     DownloadError, RemoteObjectMissing, TransferCancelled,
@@ -236,70 +235,6 @@ def test_simultaneous_profiles_have_separate_masters(ssh_server, monkeypatch):
     assert first.poll() is not None
 
 
-def test_build_manifest_download_clone_workflow(ssh_server, tmp_path):
-    root = ssh_server["root"]
-    (root / "nested").mkdir()
-    (root / "nested/item_1.dat").write_bytes(b"science")
-    (root / "README.md").write_bytes(b"notes")
-    (root / "bad_2.dat").write_bytes(b"changed")
-    strong = hashlib.sha256(b"science").hexdigest()
-    (root / "export.sha256sums").write_text(
-        strong + "  nested/item_1.dat\n" + "a" * 64 + "  bad_2.dat\n"
-    )
-    repo = build_repo(
-        tmp_path / "catalog",
-        "lab",
-        [
-            {"fmt": "nested/item_{i}.dat", "db": "data.tsv"},
-            {"fmt": "bad_{i}.dat", "db": "bad.tsv"},
-        ],
-        dataset_url=ssh_server["url"],
-    )
-    assert repo.state.config["remote"] == [{"name": "origin", "url": ssh_server["url"]}]
-    static = next(
-        entry for entry in repo.state.config["data"] if entry.get("file") == "README.md"
-    )
-    assert not any(key in static for key in ("md5", "sha1", "sha256"))
-    assert static.get("checksum") in (None, "unknown")
-    destination = tmp_path / "downloads"
-    files = select_download_files(repo, all_files=True)
-    result = download_remote_data(
-        repo, destination, selected_files=files, approved=True,
-    )
-    assert result["succeeded"] == 3
-    assert result["failed"] == 1
-    assert (destination / "nested/item_1.dat").read_bytes() == b"science"
-    assert not (destination / "bad_2.dat").exists()
-    assert not list(destination.rglob("*.part"))
-
-    # Python and CLI clones both use the recorded SSH data remote.
-    single = build_repo(
-        tmp_path / "single",
-        "lab",
-        [{"fmt": "nested/item_{i}.dat", "db": "data.tsv"}],
-        dataset_url=ssh_server["url"],
-    )
-    # Remove the intentionally incorrect static entry before cloning.
-    single.state.config["data"] = [
-        entry
-        for entry in single.state.config["data"]
-        if entry.get("file") != "bad_2.dat"
-    ]
-    single.dothm.save_state(single.state)
-    single.dothm.index.add(["config.yml"])
-    single.dothm.index.commit("Remove deliberately invalid test entry")
-    clone = Repo.clone(
-        str(single.dothm.path), tmp_path / "python-clone",
-        download=True, approve=lambda plan: True,
-    )
-    assert (clone.worktree / "nested/item_1.dat").read_bytes() == b"science"
-    result = CliRunner().invoke(
-        hallmark,
-        ["clone", str(single.dothm.path), str(tmp_path / "cli-clone"), "--download"],
-        input="y\n",
-    )
-    assert result.exit_code == 0, result.output
-    assert (tmp_path / "cli-clone/nested/item_1.dat").read_bytes() == b"science"
 
 
 def _wait_for_partial_file(directory, pattern, total_size, task):
@@ -455,31 +390,6 @@ def test_local_session_limit(ssh_server, tmp_path, monkeypatch):
     assert result["failed"] == 0
 
 
-def test_profile_source_recording_and_explicit_output(
-    ssh_server, tmp_path, monkeypatch
-):
-    auth = tmp_path / "auth.yml"
-    auth.write_text("version: 1\nprofiles:\n  lab:\n    hosts: [hm-test]\n")
-    monkeypatch.setenv("HALLMARK_AUTH_FILE", str(auth))
-    repo = build_repo(
-        tmp_path / "catalog",
-        "label",
-        [],
-        dataset_url=ssh_server["url"],
-        dataset_auth="lab",
-    )
-    assert repo.state.config["remote"][0]["auth"] == "lab"
-    explicit = build_repo(
-        tmp_path / "explicit",
-        "label",
-        [],
-        remotes=[{"name": "mirror", "url": "https://example.test/data"}],
-        dataset_url=ssh_server["url"],
-        dataset_auth="lab",
-    )
-    assert explicit.state.config["remote"] == [
-        {"name": "mirror", "url": "https://example.test/data"}
-    ]
 
 
 def test_ssh_listing_omits_symlinks_and_rejects_controls(ssh_server, tmp_path):

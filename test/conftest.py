@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 
 from hallmark import ParaFrame, Repo
+from hallmark.remote.download import _select_remote_config, execute_download_plan
+from hallmark.remote.plan import DownloadItem, DownloadPlan
 
 
 Standard_files = [
@@ -52,7 +54,9 @@ def hallmark_test_suite_dictionary(tmp_path_factory):
     encoded_specs = _encoded_data_spec()
 
     # Create paraframes, glob files, glob pattern and repo behavior objects
-    standard_pf = ParaFrame.parse("a{a}_i{i}.h5", base_path=repo.worktree)
+    standard_pf = ParaFrame.parse(
+        "a{a}_i{i}.h5", base_path=repo.worktree
+    )
 
     encoded_pf = ParaFrame.parse(
         "encoded/a{aspin}_i{i}.h5",
@@ -92,3 +96,15 @@ def hallmark_test_suite_dictionary(tmp_path_factory):
         "commit_result": commit_result,
         "repo_path": repo_path,
     }
+
+
+def download_selection(repo, output, selected, max_workers=4, show_progress=False,
+                       remote_name=None):
+    remote = _select_remote_config(repo, remote_name=remote_name)
+    plan = DownloadPlan(
+        [DownloadItem(path, checksum) for path, checksum in selected],
+        remote["url"], output, remote_auth=remote.get("auth"),
+        remote_backend=remote.get("backend"),
+        backend_options=remote.get("backend_options") or {})
+    return execute_download_plan(repo, plan, approved=True, max_workers=max_workers,
+                                 show_progress=show_progress)
