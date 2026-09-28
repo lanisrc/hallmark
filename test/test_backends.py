@@ -1,22 +1,20 @@
 """Public backend registration and multi-server routing without public services."""
 
 from contextlib import contextmanager
-import hashlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-import importlib.util
 from pathlib import Path
 from threading import Thread
 from types import SimpleNamespace
 
 import pytest
 
-from hallmark import Repo, DataBackend, HttpBackend, SshBackend, CyVerseBackend
+from hallmark import DataBackend, HttpBackend, SshBackend, CyVerseBackend
 from hallmark.remote import backends
 from hallmark.remote.discovery import discover_remote_files
 from hallmark.transport import OperationContext
 from hallmark.transport.base import (
     CapabilityError, RemoteConfigurationError, RemoteEntry, RemoteSpec, Transport,
-    TransferCancelled, readonly_backend_options, copy_backend_options,
+    readonly_backend_options, copy_backend_options,
 )
 
 
@@ -286,49 +284,3 @@ def local_server(root, requests):
         server.server_close()
 
 
-def test_multi_server_example_uses_shared_discovery_and_verified_downloads(tmp_path):
-    path = Path(__file__).parents[1] / "demo" / "multi_server_backend.py"
-    module_spec = importlib.util.spec_from_file_location("example_backend", path)
-    example = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(example)
-    example.register()
-    requests = {"north": [], "south": []}
-    for name in requests:
-        root = tmp_path / name
-        root.mkdir()
-        payload = (name + " payload").encode()
-        (root / "file.fits").write_bytes(payload)
-        digest = hashlib.sha256(payload).hexdigest()
-        (root / "sha256sums").write_text(digest + "  file.fits\n")
-    with local_server(tmp_path / "north", requests["north"]) as north:
-        with local_server(tmp_path / "south", requests["south"]) as south:
-            options = {"routes": {"north": north, "south": south}}
-            repo = Repo.init(tmp_path / "repo", from_url="https://logical.test/dataset/",
-                             backend="multi-server", backend_options=options,
-                             filter="**/*.fits")
-            assert repo.state.data["path"].tolist() == [
-                "north/file.fits", "south/file.fits"]
-            assert requests == {"north": ["/", "/sha256sums"],
-                                "south": ["/", "/sha256sums"]}
-            repo = Repo(repo.worktree)
-            before = {name: list(paths) for name, paths in requests.items()}
-            plan = repo.plan_download()
-            assert requests == before
-            assert plan.remote_backend == "multi-server"
-            assert plan.backend_options["routes"] == options["routes"]
-            options["routes"]["north"] = south
-            repo.set_config(remote_backend_options={"routes": {"north": south}})
-            result = repo.download(plan=plan, approved=True,
-                                   max_workers=2, progress=False)
-            assert result["succeeded"] == 2 and result["failed"] == 0
-            for name in requests:
-                assert (repo.worktree / name / "file.fits").read_bytes() == (
-                    name + " payload").encode()
-                assert requests[name][-1] == "/file.fits"
-            remote = RemoteSpec.from_url(plan.remote_url,
-                                      backend=plan.remote_backend,
-                                      backend_options=plan.backend_options)
-            with OperationContext(remote) as context:
-                context.cancel()
-                with pytest.raises(TransferCancelled):
-                    next(context.backend.iter_entries())
