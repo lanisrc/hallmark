@@ -25,7 +25,7 @@ import pandas as pd
 import yaml
 
 from .error import CloneError, DothmError
-from .helper_functions import (
+from .utils import (
     atomic_output_path, load_yaml_file, validate_path_component)
 from .state import State
 

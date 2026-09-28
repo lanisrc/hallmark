@@ -5,7 +5,7 @@ from collections.abc import Iterator
 
 import pandas as pd
 
-from .helper_functions import safe_str
+from .utils import safe_str
 from .repo_config import fmt_fields, row_to_path, single_data_fmt
 
 

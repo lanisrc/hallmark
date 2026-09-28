@@ -24,7 +24,7 @@ from click import ClickException
 from git.exc import GitError
 
 from . import Repo
-from .helper_functions import validate_path_component
+from .utils import validate_path_component
 from .repo_builder import build_repo
 from .downloader import DownloadError
 from .discovery import path_matches

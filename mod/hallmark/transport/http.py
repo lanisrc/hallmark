@@ -7,7 +7,7 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
-from ..helper_functions import REMOTE_REQUEST_TIMEOUT
+from ..utils import REMOTE_REQUEST_TIMEOUT
 from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
                    RemoteObjectMissing, DataBackend, reject_controls)
 from .index import _parse_index, _response_directory

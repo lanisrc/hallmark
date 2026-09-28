@@ -33,7 +33,7 @@ from .repo_state import (
     load_branch_data, load_head_state, find_remote_branch,
     fetch_missing_objects_from_remote)
 from .error import CheckoutError, DestinationExistsError, DothmError
-from .helper_functions import (
+from .utils import (
     FILE_IO_CHUNK_SIZE,
     chdir,
     iter_repository_files,

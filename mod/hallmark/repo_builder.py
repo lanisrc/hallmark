@@ -22,7 +22,7 @@ from .fmt_detection import (
     KNOWN_STATIC_FILE_STEMS)
 from .dothm import dump_yaml
 from .error import DothmError
-from .helper_functions import (
+from .utils import (
     CHECKSUM_ALGORITHMS,
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
     SUPPORTED_CHECKSUM_ALGORITHMS,

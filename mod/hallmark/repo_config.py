@@ -12,7 +12,7 @@ from pathlib import Path
 from string import Formatter
 from typing import Dict, Optional
 
-from .helper_functions import (
+from .utils import (
     as_list_of_dicts, coerce_fmt_value, normalize_nonempty_string,
     validate_path_component, validate_relative_path)
 

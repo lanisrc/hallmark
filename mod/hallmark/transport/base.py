@@ -11,7 +11,7 @@ from types import MappingProxyType
 from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
 
 from ..error import HallmarkError
-from ..helper_functions import validate_relative_path
+from ..utils import validate_relative_path
 
 
 class DownloadError(HallmarkError):

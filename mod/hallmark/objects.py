@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Optional, Union
 
-from .helper_functions import (
+from .utils import (
     FILE_IO_CHUNK_SIZE,
     atomic_output_path,
     file_checksum,

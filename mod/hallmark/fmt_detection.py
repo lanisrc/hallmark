@@ -9,7 +9,7 @@ from pathlib import Path
 
 import parse
 
-from .helper_functions import CHECKSUM_ALGORITHMS, iter_repository_files
+from .utils import CHECKSUM_ALGORITHMS, iter_repository_files
 
 # common meta extensions to look for when building the fmts
 META_EXTENSIONS = [".py", ".sh", ".md", ".rst", ".cfg", ".ini", ".yml", ".yaml",

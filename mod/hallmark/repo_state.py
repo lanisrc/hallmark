@@ -8,7 +8,7 @@ from git.exc import GitCommandError
 
 import pandas as pd
 
-from .helper_functions import load_yaml
+from .utils import load_yaml
 from .objects import Objects
 from .state import State
 

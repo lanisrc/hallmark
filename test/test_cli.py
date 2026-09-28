@@ -29,7 +29,7 @@ from hallmark import ParaFrame, Repo
 from hallmark.cli import hallmark
 from hallmark.downloader import DownloadError
 from hallmark.download_plan import DownloadItem, DownloadPlan
-from hallmark.helper_functions import chdir
+from hallmark.utils import chdir
 
 cli_module = importlib.import_module("hallmark.cli")
 

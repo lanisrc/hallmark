@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
-from ..helper_functions import load_yaml_file
+from ..utils import load_yaml_file
 from .base import (
     RemoteConfigurationError,
     profile_name,

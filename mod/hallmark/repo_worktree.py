@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .error import CheckoutError
-from .helper_functions import (
+from .utils import (
     SymlinkPathError, resolve_contained_path, validate_relative_path)
 from .repo_config import branch_fmt
 from .repo_manifest import manifest_map, iter_manifest_entries

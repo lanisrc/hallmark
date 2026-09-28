@@ -12,7 +12,7 @@ from hallmark.state import State
 from hallmark.repo_worktree import worktree_changes
 from hallmark.dothm import Dothm
 from hallmark.worktree import Worktree
-from hallmark.helper_functions import (
+from hallmark.utils import (
     load_yaml,
     iter_repository_files,
     regex_sub)
@@ -862,7 +862,7 @@ def test_repo_status_does_not_walk_dothm_directory(monkeypatch, tmp_path):
         for current, directories, files in original_walk(root):
             walked_directories.append(Path(current))
             yield current, directories, files
-    monkeypatch.setattr("hallmark.helper_functions.os.walk", recording_walk)
+    monkeypatch.setattr("hallmark.utils.os.walk", recording_walk)
     snapshot = repo.status()
 
     assert snapshot["untracked"] == ["visible.txt"], "Expected only visible.txt to be \
