@@ -28,10 +28,10 @@ def local_sftp(tmp_path, monkeypatch):
         pytest.skip("Local OpenSSH SFTP subsystem binary is unavailable")
     root = tmp_path / "source"
     root.mkdir()
-    with OperationContext(RemoteSpec.parse(f"sftp://unused{root}/")) as context:
+    with OperationContext(RemoteSpec.from_url(f"sftp://unused{root}/")) as context:
         transport = context.transport
         monkeypatch.setattr(transport, "prepare", lambda: None)
-        spawn = transport._spawn
+        spawn = transport._start_process
 
         def spawn_subsystem(argv, **kwargs):
             assert argv[-5:] == ["-T", "-s", "--", "unused", "sftp"]
@@ -39,7 +39,7 @@ def local_sftp(tmp_path, monkeypatch):
             assert "StrictHostKeyChecking=yes" in argv
             return spawn([server], **kwargs)
 
-        monkeypatch.setattr(transport, "_spawn", spawn_subsystem)
+        monkeypatch.setattr(transport, "_start_process", spawn_subsystem)
         yield context, root
 
 
@@ -92,7 +92,7 @@ def test_reject_controls_without_silently_omitting_file(local_sftp):
 def test_discovery_excludes_root_repository_metadata_and_objects(local_sftp):
     context, root = local_sftp
     for metadata in (".hm", ".git", ".HM", ".GIT"):
-        (root / metadata / "objects").mkdir(parents=True)
+        (root / metadata / "objects").mkdir(parents=True, exist_ok=True)
         (root / metadata / "objects" / "payload").write_bytes(b"private")
     (root / "nested" / ".hm" / "objects").mkdir(parents=True)
     (root / "nested" / ".hm" / "objects" / "payload").write_bytes(b"private")
@@ -110,7 +110,7 @@ def test_metadata_file_size_limit_before_transfer(local_sftp, monkeypatch):
     def unexpected(*args, **kwargs):
         raise AssertionError("Known oversized metadata must not be fetched")
 
-    monkeypatch.setattr(context.transport, "_fetch", unexpected)
+    monkeypatch.setattr(context.transport, "_download_file", unexpected)
     with pytest.raises(DownloadError, match="size limit"):
         context.transport.read_text("metadata", 2)
 
@@ -119,9 +119,9 @@ def _fake_subsystem(monkeypatch, context, script):
     """Use a supplied script when starting an SFTP subsystem process."""
     transport = context.transport
     monkeypatch.setattr(transport, "prepare", lambda: None)
-    spawn = transport._spawn
+    spawn = transport._start_process
     monkeypatch.setattr(
-        transport, "_spawn",
+        transport, "_start_process",
         lambda argv, **kw: spawn([sys.executable, "-c", script], **kw),
     )
 
@@ -132,28 +132,28 @@ def _fake_subsystem(monkeypatch, context, script):
     (struct.pack(">IBI", 5, 2, 4), "version 3"),
 ])
 def test_bad_handshake_is_bounded_and_cleans_process(monkeypatch, payload, message):
-    with OperationContext(RemoteSpec.parse("sftp://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("sftp://unused/data")) as context:
         _fake_subsystem(
             monkeypatch, context,
             "import os; os.read(0, 9); os.write(1, " + repr(payload) + ")",
         )
         with pytest.raises((DownloadError, CapabilityError), match=message):
-            with context.transport._metadata():
+            with context.transport._open_metadata_session():
                 pytest.fail("Invalid handshake was accepted")
         assert not context.transport._processes
 
 
 def test_metadata_timeout_is_per_request_and_cancellable(monkeypatch):
-    with OperationContext(RemoteSpec.parse("sftp://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("sftp://unused/data")) as context:
         _fake_subsystem(monkeypatch, context, "import time; time.sleep(30)")
         context.listing_timeout = 0.1
         with pytest.raises(DownloadError, match="time limit"):
-            with context.transport._metadata():
+            with context.transport._open_metadata_session():
                 pass
         assert not context.transport._processes
         context.listing_timeout = 30
         with ThreadPoolExecutor(1) as pool:
-            future = pool.submit(context.transport._metadata().__enter__)
+            future = pool.submit(context.transport._open_metadata_session().__enter__)
             deadline = time.monotonic() + 2
             while not context.transport._processes and time.monotonic() < deadline:
                 time.sleep(0.01)
@@ -164,17 +164,17 @@ def test_metadata_timeout_is_per_request_and_cancellable(monkeypatch):
 
 
 def test_attributes_preserve_unknowns_and_reject_truncation():
-    assert _Packet(struct.pack(">I", 0)).attributes() == {
+    assert _Packet(struct.pack(">I", 0)).read_attributes() == {
         "size": None, "mode": None, "mtime": None,
     }
     data = struct.pack(">IQIII", 13, 2 ** 40, stat.S_IFREG | 0o600, 123, 456)
-    assert _Packet(data).attributes() == {
+    assert _Packet(data).read_attributes() == {
         "size": 2 ** 40, "mode": stat.S_IFREG | 0o600, "mtime": 456,
     }
     with pytest.raises(DownloadError, match="Truncated"):
-        _Packet(data[:-1]).attributes()
+        _Packet(data[:-1]).read_attributes()
     with pytest.raises(DownloadError, match="flags"):
-        _Packet(struct.pack(">I", 0x10)).attributes()
+        _Packet(struct.pack(">I", 0x10)).read_attributes()
 
 
 def test_missing_type_uses_lstat_and_cannot_escape_root(monkeypatch):
@@ -194,10 +194,10 @@ def test_missing_type_uses_lstat_and_cannot_escape_root(monkeypatch):
             else:
                 yield "file", {"size": None, "mode": None, "mtime": None}
 
-    with OperationContext(RemoteSpec.parse("sftp://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("sftp://unused/data")) as context:
         session = Session()
         monkeypatch.setattr(
-            context.transport, "_metadata", lambda: nullcontext(session),
+            context.transport, "_open_metadata_session", lambda: nullcontext(session),
         )
         entries = list(context.transport.iter_entries())
         assert [(entry.path, entry.size) for entry in entries] == [("nested/file", 4)]
@@ -223,9 +223,9 @@ source.read(length)
 payload = """ + repr(response) + """
 output.write(struct.pack('>I', len(payload)) + payload); output.flush()
 """
-    with OperationContext(RemoteSpec.parse("sftp://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("sftp://unused/data")) as context:
         _fake_subsystem(monkeypatch, context, script)
         with pytest.raises(DownloadError, match=message):
-            with context.transport._metadata() as session:
+            with context.transport._open_metadata_session() as session:
                 session.lstat("/data")
         assert not context.transport._processes

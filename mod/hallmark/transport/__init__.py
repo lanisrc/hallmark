@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from pathlib import Path
 from threading import Event, Lock, local
 
 import requests
 
-from .auth import resolve_settings
+from .auth import resolve_ssh_settings
 from .base import DataBackend, RemoteEntry, RemoteSpec, TransferCancelled
 
 
@@ -31,7 +29,7 @@ class OperationContext:
         output_root=None,
     ):
         self.remote = remote
-        self.settings = resolve_settings(remote)
+        self.settings = resolve_ssh_settings(remote)
         self.output_root = Path(output_root) if output_root is not None else None
         self.cancelled = Event()
         self.on_bytes = None
@@ -40,7 +38,7 @@ class OperationContext:
         self._local = local()
         self._lock = Lock()
         self._sessions = []
-        from ..backends import get_backend
+        from ..remote.backends import get_backend
 
         try:
             self.transport = get_backend(remote.backend)(self)
@@ -49,28 +47,6 @@ class OperationContext:
             for session in self._sessions:
                 session.close()
             raise
-        self.backend = self.transport
-
-    @contextmanager
-    def executor(self, max_workers):
-        """
-        Create a worker pool whose tasks share this operation's resources.
-
-        Args:
-            max_workers (int): Maximum concurrent workers.
-
-        Yields:
-            ThreadPoolExecutor: Worker pool. Interrupted work is cancelled
-            before waiting for workers to finish.
-        """
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        try:
-            yield executor
-        except BaseException:
-            self.cancel()
-            raise
-        finally:
-            executor.shutdown(wait=True, cancel_futures=True)
 
     def session(self):
         """Return the reusable HTTP session for the current thread."""

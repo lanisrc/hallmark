@@ -8,13 +8,11 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from hallmark.download_plan import DownloadItem, DownloadPlan
-from hallmark.downloader import (
+from hallmark.remote.plan import DownloadItem, DownloadPlan
+from hallmark.remote.download import (
     DownloadError,
-    download_remote_data,
     execute_download_plan,
     plan_download,
-    select_download_files,
 )
 
 
@@ -42,7 +40,7 @@ def test_plan_reads_path_catalog_offline_and_preserves_unknown_sizes(
         catalog, monkeypatch):
     def reject_network(*args, **kwargs):
         raise AssertionError("planning must not contact a server")
-    monkeypatch.setattr("hallmark.downloader.OperationContext", reject_network)
+    monkeypatch.setattr("hallmark.remote.download.OperationContext", reject_network)
     monkeypatch.setattr("requests.sessions.Session.request", reject_network)
     plan = plan_download(catalog)
     assert plan.file_count == 3
@@ -63,8 +61,6 @@ def test_explicit_paths_retain_catalog_checksums_and_metadata(catalog):
     assert plan.items[0].size_bytes == 6
     assert plan.items[1].checksum is None
     assert plan.items[1].size_bytes is None
-    assert select_download_files(catalog, file_paths=["nested/a.fits"]) == [
-        (Path("nested/a.fits"), plan.items[0].checksum)]
 
 
 def test_sizes_survive_nullable_numeric_tsv_serialization(catalog):
@@ -124,11 +120,9 @@ def test_unapproved_execution_never_opens_transport(catalog, monkeypatch, approv
     plan = plan_download(catalog)
     def reject_open(*args, **kwargs):
         raise AssertionError("unapproved transfer opened its transport")
-    monkeypatch.setattr("hallmark.downloader.OperationContext", reject_open)
+    monkeypatch.setattr("hallmark.remote.download.OperationContext", reject_open)
     with pytest.raises(DownloadError, match="approval"):
         execute_download_plan(catalog, plan, approved=approval)
-    with pytest.raises(DownloadError, match="approval"):
-        download_remote_data(catalog, catalog.worktree, approved=approval)
 
 
 @pytest.mark.parametrize("known_size", [True, False])
@@ -186,8 +180,8 @@ def test_approved_execution_uses_pinned_source_and_byte_progress(
             if transfer_fails:
                 raise DownloadError("interrupted transfer")
 
-    monkeypatch.setattr("hallmark.downloader.OperationContext", Context)
-    monkeypatch.setattr("hallmark.downloader.tqdm", Progress)
+    monkeypatch.setattr("hallmark.remote.download.OperationContext", Context)
+    monkeypatch.setattr("hallmark.remote.download.tqdm", Progress)
     result = execute_download_plan(catalog, plan, approved=True, show_progress=True)
     assert opened[0].url == "https://source.test/data/"
     assert ticks == [3, 3]
@@ -245,7 +239,7 @@ def test_plan_pins_backend_and_nested_options_without_loading_plugin(
     def reject_network(*args, **kwargs):
         raise AssertionError("planning must not load or contact a backend")
 
-    monkeypatch.setattr("hallmark.downloader.OperationContext", reject_network)
+    monkeypatch.setattr("hallmark.remote.download.OperationContext", reject_network)
     plan = plan_download(catalog, file_paths="nested/a.fits")
     options["servers"][0]["url"] = "https://changed.test/"
     catalog.state.config["remote"]["backend"] = "another-survey"
@@ -262,7 +256,7 @@ def test_plan_pins_backend_and_nested_options_without_loading_plugin(
         captured.append(source)
         return {"succeeded": 1, "failed": 0, "total_bytes": 6, "errors": []}
 
-    monkeypatch.setattr("hallmark.downloader._download_selected", download)
+    monkeypatch.setattr("hallmark.remote.download._download_selected", download)
     execute_download_plan(catalog, plan, approved=True)
     assert captured[0].backend == "external-survey"
     assert captured[0].backend_options["servers"][0]["url"] == \

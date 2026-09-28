@@ -1,12 +1,14 @@
 .. _private-data:
 
+
 Private data over SSH and SFTP
 ==============================
 
 |hallmark|_ can discover a remote dataset, prepare a local catalog, and download
-selected files after approval. ``init --from`` creates a new ``.hm`` from a
-remote dataset; ``clone`` copies an existing Hallmark Git catalog or published
-catalog snapshot. Both leave dataset files on their servers by default.
+selected files after approval. ``init`` creates an empty ``.hm``; ``add URL``
+stages a remote catalog and ``commit`` records it. ``clone`` copies an existing
+Hallmark Git catalog or published snapshot. Dataset files stay on their servers
+until explicitly downloaded.
 A **data remote** identifies the dataset location; it is independent of the
 Git remote or snapshot URL used to share the catalog.
 
@@ -56,8 +58,11 @@ Suppose the export contains ``runs/run_001.h5``, ``runs/run_002.h5`` and
 
 .. code-block:: bash
 
-   hallmark init ./lab --from 'ssh://lab-data/srv/exports/lab/' \
+   hm init ./lab
+   cd ./lab
+   hm add 'ssh://lab-data/srv/exports/lab/' \
        --fmt 'runs/run_{run:03d}.h5'
+   hm commit -m "Record remote catalog"
 
 This creates ``./lab/.hm`` and catalogs only the matching run files. The URL
 is the exact discovery root. A filename format selects paths and extracts
@@ -66,8 +71,11 @@ without defining parameters:
 
 .. code-block:: bash
 
-   hallmark init ./lab-h5 --from 'sftp://lab-data/srv/exports/lab/' \
+   hm init ./lab-h5
+   cd ./lab-h5
+   hm add 'sftp://lab-data/srv/exports/lab/' \
        --filter '**/*.h5'
+   hm commit -m "Record remote catalog"
 
 Without ``--filter`` or ``--fmt``, discovery recursively covers every directory
 beneath the URL and catalogs all discovered files. A filter still traverses
@@ -86,28 +94,27 @@ catalogs, publish an immutable export with a SHA-256 manifest, for example
 The generated data remote is named ``origin`` and points to the source URL.
 The destination may already contain files, provided it has no ``.hm``;
 initialization preserves those files. An existing ``.hm`` is rejected before
-network access. Use ``hallmark init PATH`` without ``--from`` for a local
-repository. The older remote ``build`` command and ``build_repo`` API remain
-available but are deprecated in favor of ``init --from``.
+network access. ``hm init PATH`` always creates an empty local repository.
+Use ``add URL`` inside it to discover remote data.
 
 Select a built-in backend with ``--backend http``, ``ssh``, or ``cyverse``, or
 name an installed plugin. Without an explicit choice, Hallmark selects a
 backend from the URL. ``--backend-options FILE`` reads a YAML mapping of
 nonsecret backend settings. These settings are saved with the data remote;
 credentials belong in local authentication configuration. See :doc:`backends`
-for the plugin interface and a multiple-server example.
+for the plugin interface.
 
 3. Preview, approve and download
 --------------------------------
 
-Continue from the same workspace:
+From the directory containing ``lab``, enter that repository:
 
 .. code-block:: bash
 
    cd lab
-   hallmark info
-   hallmark download --tsv data.tsv --dry-run
-   hallmark download runs/run_001.h5
+   hm info
+   hm download --tsv data.tsv --dry-run
+   hm download runs/run_001.h5
 
 The dry run reads only the local catalog. It reports file count, known bytes,
 the number of unknown file sizes, destination and source. The CLI reports
@@ -118,7 +125,7 @@ host trust or remote-file existence.
 Every nonempty CLI download displays its plan and asks
 ``Download these files? [y/N]``. Answer ``y`` to authorize the displayed
 transfer. Refusal, a blank answer or end-of-input transfers no dataset files.
-The deprecated ``--yes`` option is accepted but does not bypass confirmation.
+
 During transfer, byte progress and measured throughput provide an ETA when the
 total is known; unknown totals remain indeterminate.
 
@@ -126,8 +133,8 @@ Choose a scope from inside ``lab``:
 
 .. code-block:: bash
 
-   hallmark download --filter 'runs/run_00[12].h5' --dry-run
-   hallmark download --all --output ./payload
+   hm download --filter 'runs/run_00[12].h5' --dry-run
+   hm download --all --output ./payload
 
 Explicit paths use their recorded catalog checksums when available, just like
 ``--tsv`` and ``--all``. A path absent from the catalog can be requested, but
@@ -142,21 +149,24 @@ require an explicit output directory. Repeating a download transfers the
 selection again and replaces destinations only after successful transfer and
 any recorded checksum verification.
 
-To request downloads during initialization, add ``--with-download``. Catalog
-preparation finishes first, then the same plan and approval prompt appear.
-Declining keeps the new catalog available; an empty selection needs no approval:
+After committing the catalog, use ``download`` to review and approve a transfer.
+Declining keeps the catalog available; an empty selection needs no approval:
 
 .. code-block:: bash
 
-   hallmark init ../lab-one --from 'ssh://lab-data/srv/exports/lab/' \
-       --filter 'runs/run_001.h5' --with-download
+   hm init ../lab-one
+   cd ../lab-one
+   hm add 'ssh://lab-data/srv/exports/lab/' \
+       --filter 'runs/run_001.h5'
+   hm commit -m "Record remote catalog"
+   hm download --all
 
 An existing catalog can be cloned from a local path, a Git endpoint, or an
 HTTP/SFTP directory containing its metadata. For example, copy this catalog:
 
 .. code-block:: bash
 
-   hallmark clone ./.hm ../lab-copy
+   hm clone ./.hm ../lab-copy
 
 Git endpoints preserve the complete catalog and history. Published HTTP/SFTP
 snapshots start new local history. A snapshot URL may name the metadata
@@ -166,20 +176,22 @@ selection treats local paths, SCP-style addresses, Git/file/SSH URLs and URLs
 ending in ``.git`` as Git sources. SFTP URLs select snapshots. Other HTTP(S)
 URLs are checked for a snapshot before Git is attempted. Authentication errors,
 connection failures and malformed snapshots are reported rather than treated
-as dataset directories. Use ``init --from`` for raw datasets.
+as dataset directories. Use ``add URL`` for raw datasets.
 
 Clone filters and formats select files to download, leaving the full catalog
-and its history unchanged. They require ``--with-download`` (the older
-``--download`` spelling remains an alias):
+and its history unchanged. Clone offers downloads by default and asks for
+confirmation; Enter or ``n`` keeps the catalog and exits successfully:
 
 .. code-block:: bash
 
-   hallmark clone ./.hm ../lab-selected \
-       --filter 'runs/run_001.h5' --with-download
+   hm clone ./.hm ../lab-selected \
+       --filter 'runs/run_001.h5'
 
-``--no-fetch-data`` remains a compatibility alias for the default behavior
-without dataset downloads. Git authentication and data authentication are
-independent; cloning a catalog does not require credentials for its data.
+Use ``--no-download`` for catalog only, without a prompt. It cannot be combined
+with ``--filter`` or ``--fmt`` and is required for bare destinations. An empty
+selection prints ``No files selected for download.`` without prompting.
+Git authentication and data authentication are independent; catalog-only cloning
+does not require credentials for its data.
 
 4. Use a local authentication profile
 -------------------------------------
@@ -214,13 +226,16 @@ initializing a catalog from a remote dataset:
 
 .. code-block:: bash
 
-   hallmark set-config --remote-name origin --remote-auth lab
-   hallmark download --remote origin --tsv data.tsv --dry-run
-   hallmark init ../lab-profile --from 'ssh://lab-data/srv/exports/lab/' --auth lab
+   hm set-config --remote-name origin --remote-auth lab
+   hm download --remote origin --tsv data.tsv --dry-run
+   hm init ../lab-profile
+   cd ../lab-profile
+   hm add 'ssh://lab-data/srv/exports/lab/' --auth lab
+   hm commit -m "Record remote catalog"
 
 The new catalog's ``origin`` remote records ``auth: lab``. Clear a reference with
-``hallmark set-config --remote-name origin --remote-auth ''`` to use SSH
-configuration alone. With ``init``, ``--auth`` selects data access. With
+``hm set-config --remote-name origin --remote-auth ''`` to use SSH
+configuration alone. With ``add``, ``--auth`` selects data access. With
 ``clone``, it selects access to an SSH/SFTP catalog snapshot; cloned data
 remotes retain their own profile references. Git cloning uses Git's own
 authentication configuration.
@@ -237,19 +252,21 @@ concurrency is the smaller of ``--max-workers`` and local ``max_sessions``
 5. Use the Python API
 ---------------------
 
-These examples use fresh local destinations. Like the CLI, ``Repo.init``
-with ``from_url`` discovers metadata without downloading dataset files:
+These examples use fresh local destinations. ``Repo.init`` creates the empty
+repository; ``repo.add`` discovers metadata without downloading dataset files:
 
 .. code-block:: python
 
    from hallmark import Repo
 
-   repo = Repo.init(
-       "lab-python", from_url="ssh://lab-data/srv/exports/lab/",
+   repo = Repo.init("lab-python")
+   repo.add(
+       "ssh://lab-data/srv/exports/lab/",
        auth="lab",  # Omit when SSH configuration already supplies access.
-       fmt="runs/run_{run:03d}.h5",
+       remote_fmt="runs/run_{run:03d}.h5",
        progress=True,
    )
+   repo.commit("Record remote catalog")
    plan = repo.plan_download(file_paths=["runs/run_001.h5"])
    print(plan.summary())
    print(plan.items)  # Paths, checksums, optional size_bytes and mtime.
@@ -273,8 +290,10 @@ unknown-size counts are available as ``known_bytes`` and
 ``unknown_size_count``. ``estimated_seconds`` stays ``None`` unless all sizes
 are known and ``estimated_bytes_per_second`` was supplied when planning.
 
-For downloads during initialization or cloning, supply a callback that reviews
-the completed plan and returns ``True`` to approve:
+A small review function can approve a separate download. Cloning also accepts
+this function as its optional ``approve`` callback. ``Repo.clone`` downloads
+by default without a callback; ``download=False`` skips data and is required
+for bare destinations. Refusing through the callback keeps the catalog:
 
 .. code-block:: python
 
@@ -282,14 +301,21 @@ the completed plan and returns ``True`` to approve:
        print(plan.summary())
        return input("Download these files? [y/N] ").strip().lower() == "y"
 
-   repo = Repo.init(
-       "lab-with-download", from_url="ssh://lab-data/srv/exports/lab/",
-       filter="runs/run_001.h5", download=True, approve=approve, progress=True,
+   repo = Repo.init("lab-with-download")
+   repo.add(
+       "ssh://lab-data/srv/exports/lab/",
+       filter="runs/run_001.h5", progress=True,
    )
+   repo.commit("Record remote catalog")
+   plan = repo.plan_download()
+   if plan.file_count and approve(plan):
+       result = repo.download(plan, approved=True)
+       if result["failed"]:
+           raise RuntimeError("\n".join(result["errors"]))
 
 ``repo.download`` returns ``succeeded``, ``failed``, ``total_bytes`` and
 ``errors``. Inspect ``failed`` because successful files remain when another
-file fails. Setup failures raise ``hallmark.downloader.DownloadError``.
+file fails. Setup failures raise ``hallmark.remote.download.DownloadError``.
 ``repo.set_config(remote_auth="")`` removes a profile reference; ``None``
 leaves it unchanged.
 
@@ -301,12 +327,17 @@ such as DESI. No CyVerse-specific index option is required:
 
 .. code-block:: bash
 
-   hallmark init ./cyverse --from \
-       'https://data.cyverse.org/dav-anon/iplant/commons/cyverse_curated/EHTC_FirstM87Results_Apr2019/uvfits/' \
+   hm init ./cyverse
+   cd ./cyverse
+   hm add 'https://data.cyverse.org/dav-anon/iplant/commons/cyverse_curated/EHTC_FirstM87Results_Apr2019/uvfits/' \
        --filter 'SR1_M87_2017_095_lo_hops_netcal_StokesI.uvfits'
-   hallmark init ./desi --from \
-       'https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/23040/' \
+   hm commit -m "Record remote catalog"
+   cd ..
+   hm init ./desi
+   cd ./desi
+   hm add 'https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/23040/' \
        --filter 'redrock-main-dark-23040.fits'
+   hm commit -m "Record remote catalog"
 
 Each URL is the full recursive discovery root. A broad root can require many
 listing requests even with a file filter; use a specific subtree when that is
@@ -315,23 +346,25 @@ access retains Requests' normal ``.netrc`` and environment behavior; Hallmark's
 named auth profiles apply to SSH/SFTP.
 
 From either initialized catalog, inspect and approve a selected subset using
-``hallmark download --filter PATTERN --dry-run`` and then the same command
+``hm download --filter PATTERN --dry-run`` and then the same command
 without ``--dry-run``. Python follows the same steps:
 
 .. code-block:: python
 
-   cyverse = Repo.init(
-       "cyverse-python",
-       from_url="https://data.cyverse.org/dav-anon/iplant/commons/"
+   cyverse = Repo.init("cyverse-python")
+   cyverse.add(
+       "https://data.cyverse.org/dav-anon/iplant/commons/"
                 "cyverse_curated/EHTC_FirstM87Results_Apr2019/uvfits/",
        filter="SR1_M87_2017_095_lo_hops_netcal_StokesI.uvfits", progress=True,
    )
-   desi = Repo.init(
-       "desi-python",
-       from_url="https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/"
+   cyverse.commit("Record remote catalog")
+   desi = Repo.init("desi-python")
+   desi.add(
+       "https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/"
                 "healpix/main/dark/230/23040/",
        filter="redrock-main-dark-23040.fits", progress=True,
    )
+   desi.commit("Record remote catalog")
    plan = desi.plan_download(all_files=True)
    print(plan.summary())
 
@@ -353,9 +386,9 @@ clone the existing metadata using their Git credentials:
 
 .. code-block:: bash
 
-   hallmark clone 'https://github.com/example/lab-catalog.git' ./shared-lab
+   hm clone 'https://github.com/example/lab-catalog.git' ./shared-lab --no-download
    cd shared-lab
-   hallmark download --all --dry-run
+   hm download --all --dry-run
 
 This clone needs no ``lab`` profile. Define the local profile before approving
 a data transfer. The Git origin points to GitHub; the data remote named
@@ -377,7 +410,7 @@ Then clone the snapshot:
 
 .. code-block:: bash
 
-   hallmark clone 'https://catalogs.example.org/lab/' ./snapshot-lab
+   hm clone 'https://catalogs.example.org/lab/' ./snapshot-lab --no-download
 
 Snapshot authentication uses the metadata server's settings. The SSH data
 URL and ``lab`` reference are preserved without resolving that profile during

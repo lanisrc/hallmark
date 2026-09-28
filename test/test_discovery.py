@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hallmark.discovery import discover, path_matches
-from hallmark.backends import HttpBackend
+from hallmark.remote.discovery import discover_remote_files, path_matches
+from hallmark.remote.backends import HttpBackend
 from hallmark.transport.base import (
     CapabilityError, DownloadError, RemoteEntry, RemoteSpec, TransferCancelled,
 )
@@ -14,7 +14,7 @@ from hallmark.transport.base import (
 class Source:
     """Serve directory listings and record requests for discovery tests."""
     def __init__(self, pages, url="https://data.test/public/"):
-        self.remote = RemoteSpec.parse(url)
+        self.remote = RemoteSpec.from_url(url)
         self.pages = pages
         self.reads = []
         if self.remote.scheme in {"http", "https"}:
@@ -42,7 +42,7 @@ def test_auto_index_walks_all_directories_without_payloads(url):
         "nested/": index("item.bin", "deeper/", "../"),
         "nested/deeper/": index("file.txt"),
     }, url)
-    entries = discover(source)
+    entries = discover_remote_files(source)
     assert [entry.path for entry in entries] == [
         "nested/deeper/file.txt", "nested/item.bin", "root.fits"]
     assert source.reads == ["", "nested/", "nested/deeper/"]
@@ -53,7 +53,7 @@ def test_cyverse_markup_is_detected_automatically():
     source = Source({"": '<table><tr class="object data-object">'
                      '<td class="name"><a href="file.fits">file</a>'
                      '</td></tr></table>'})
-    assert [entry.path for entry in discover(source)] == ["file.fits"]
+    assert [entry.path for entry in discover_remote_files(source)] == ["file.fits"]
 
 
 @pytest.mark.parametrize("page, size, mtime", [
@@ -69,13 +69,13 @@ def test_cyverse_markup_is_detected_automatically():
      ' 17-Sep-2026 02:31 1.2M\n', None, None),
 ])
 def test_exact_sizes_are_preserved_and_rounded_sizes_remain_unknown(page, size, mtime):
-    assert discover(Source({"": page})) == [
+    assert discover_remote_files(Source({"": page})) == [
         RemoteEntry(path="file.fits", size=size, mtime=mtime)]
 
 
 def test_hallmark_and_git_directories_are_not_dataset_files():
     source = Source({"": index(".hm/", ".git/", ".HM/", "file.fits")})
-    assert [entry.path for entry in discover(source)] == ["file.fits"]
+    assert [entry.path for entry in discover_remote_files(source)] == ["file.fits"]
     assert source.reads == [""]
 
 
@@ -88,7 +88,7 @@ def test_desi_style_landing_page_links_to_scoped_indexes():
         "dr1/spectro/": index("redshift.fits"),
         "edr/": index("old.fits"),
     })
-    assert [entry.path for entry in discover(source)] == [
+    assert [entry.path for entry in discover_remote_files(source)] == [
         "dr1/spectro/redshift.fits", "edr/old.fits"]
 
 
@@ -96,7 +96,7 @@ def test_desi_style_landing_page_links_to_scoped_indexes():
     '<title>Index of /empty/</title>', '<table><tbody></tbody></table>',
 ])
 def test_recognized_empty_index(page):
-    assert discover(Source({"": page})) == []
+    assert discover_remote_files(Source({"": page})) == []
 
 
 @pytest.mark.parametrize("page", [
@@ -107,7 +107,7 @@ def test_recognized_empty_index(page):
 ])
 def test_unsupported_page_is_not_an_empty_catalog(page):
     with pytest.raises(CapabilityError, match="no usable directory listing"):
-        discover(Source({"": page}))
+        discover_remote_files(Source({"": page}))
 
 
 def test_link_resolution_preserves_literal_names_and_stays_under_root():
@@ -118,7 +118,7 @@ def test_link_resolution_preserves_literal_names_and_stays_under_root():
         "sub dir/": index("file%20name.fits", "../"),
         "%20/": index("literal%2520.fits"),
     })
-    assert [entry.path for entry in discover(source)] == [
+    assert [entry.path for entry in discover_remote_files(source)] == [
         "%20/literal%20.fits", "root%.fits", "sub dir/file name.fits"]
     assert source.reads == ["", "sub dir/", "%20/"]
 
@@ -126,7 +126,7 @@ def test_link_resolution_preserves_literal_names_and_stays_under_root():
 @pytest.mark.parametrize("href", ["%2e%2e/secret/", "sub%5cfile", "bad%00file"])
 def test_encoded_unsafe_paths_are_rejected(href):
     with pytest.raises((DownloadError, ValueError)):
-        discover(Source({"": index(href)}))
+        discover_remote_files(Source({"": index(href)}))
 
 
 @pytest.mark.parametrize("path, pattern, matched", [
@@ -153,7 +153,7 @@ def test_exact_format_and_filter_are_both_required():
 def test_invalid_filter_types_fail_before_source_access(invalid):
     source = Source({"": index("file.fits")})
     with pytest.raises(ValueError, match="glob string"):
-        discover(source, filter=invalid)
+        discover_remote_files(source, filter=invalid)
     assert source.reads == []
 
 
@@ -168,7 +168,7 @@ def test_redirected_listing_uses_final_directory_and_deduplicates_crawl(final_ur
         "release one/nested/": index("other.fits"),
     })
     source.transport.text_urls = {"alias/": final_url}
-    entries = discover(source)
+    entries = discover_remote_files(source)
     assert [entry.path for entry in entries] == [
         "release one/file.fits", "release one/nested/other.fits"]
     assert source.reads == ["", "alias/", "release one/nested/"]
@@ -177,8 +177,9 @@ def test_redirected_listing_uses_final_directory_and_deduplicates_crawl(final_ur
 def test_filter_traverses_unmatched_directories_and_excludes_other_payloads():
     source = Source({"": index("root.fits", "nested/", "notes.txt"),
                      "nested/": index("other.fits", "other.bin")})
-    assert [entry.path for entry in discover(source, filter="**/*.fits")] == [
-        "nested/other.fits", "root.fits"]
+    assert [
+        entry.path for entry in discover_remote_files(source, filter="**/*.fits")
+    ] == ["nested/other.fits", "root.fits"]
     assert source.reads == ["", "nested/"]
 
 
@@ -188,7 +189,7 @@ def test_only_conventional_checksum_metadata_is_read():
         "": index("data.fits", "sha256sums.txt", "custom_checksum_payload.bin"),
         "sha256sums.txt": f"{digest}  data.fits\n",
     })
-    entries = discover(source, filter="*.fits")
+    entries = discover_remote_files(source, filter="*.fits")
     assert entries == [RemoteEntry(path="data.fits", checksum_algorithm="sha256",
                                    checksum=digest)]
     assert source.reads == ["", "sha256sums.txt"]
@@ -197,7 +198,7 @@ def test_only_conventional_checksum_metadata_is_read():
 def test_checksum_manifest_cannot_add_unlisted_files():
     source = Source({"": index("sha256sums.txt"),
                      "sha256sums.txt": "a" * 64 + "  phantom.fits\n"})
-    assert [entry.path for entry in discover(source)] == ["sha256sums.txt"]
+    assert [entry.path for entry in discover_remote_files(source)] == ["sha256sums.txt"]
 
 
 def test_nested_manifest_accepts_published_directory_prefixed_paths():
@@ -207,7 +208,7 @@ def test_nested_manifest_accepts_published_directory_prefixed_paths():
         "release/project/": index("sha256sums", "file.fits"),
         "release/project/sha256sums": "a" * 64 + "  project/file.fits\n",
     })
-    assert discover(source, filter="**/*.fits")[0].checksum == "a" * 64
+    assert discover_remote_files(source, filter="**/*.fits")[0].checksum == "a" * 64
 
 
 def test_conflicting_manifests_fail():
@@ -217,7 +218,7 @@ def test_conflicting_manifests_fail():
         "project.sha256sums": "b" * 64 + "  file.fits\n",
     })
     with pytest.raises(DownloadError, match="Conflicting"):
-        discover(source)
+        discover_remote_files(source)
 
 
 def test_sftp_metadata_and_progress_callback():
@@ -231,7 +232,9 @@ def test_sftp_metadata_and_progress_callback():
 
     source.transport = SimpleNamespace(iter_entries=entries, prepare=lambda: None)
     snapshots = []
-    selected = discover(source, filter="**/*.fits", progress=snapshots.append)
+    selected = discover_remote_files(
+        source, filter="**/*.fits", progress=snapshots.append
+    )
     assert selected == [RemoteEntry(path="root.fits", size=12, mtime=123)]
     assert snapshots[-1] == {"directories": 2, "files": 2,
                              "matched": 1, "current": "nested"}
@@ -247,7 +250,7 @@ def test_cancellation_does_not_return_a_partial_inventory():
 
     source.check_cancelled = cancel
     with pytest.raises(TransferCancelled):
-        discover(source)
+        discover_remote_files(source)
 
 
 def test_discovery_bar_has_unknown_total(monkeypatch):
@@ -266,7 +269,7 @@ def test_discovery_bar_has_unknown_total(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr("hallmark.discovery.tqdm", Bar)
-    discover(Source({"": index("a.fits")}), progress=True)
+    monkeypatch.setattr("hallmark.remote.discovery.tqdm", Bar)
+    discover_remote_files(Source({"": index("a.fits")}), progress=True)
     assert bars[0]["total"] is None
     assert not bars[0]["disable"]

@@ -11,33 +11,33 @@ Core Repository
    :members:
    :show-inheritance:
 
-.. automodule:: hallmark.repo_state
+.. automodule:: hallmark.repo.history
    :members:
    :show-inheritance:
 
-.. automodule:: hallmark.repo_config
+.. automodule:: hallmark.repo.config
    :members:
    :show-inheritance:
 
-.. automodule:: hallmark.repo_manifest
+.. automodule:: hallmark.repo.manifest
    :members:
    :show-inheritance:
 
 Repository Worktrees
 --------------------
 
-.. automodule:: hallmark.worktree
+.. automodule:: hallmark.repo.worktree
    :members:
    :show-inheritance:
 
-.. automodule:: hallmark.repo_worktree
+.. automodule:: hallmark.repo.changes
    :members:
    :show-inheritance:
 
 State Management
 ----------------
 
-.. automodule:: hallmark.state
+.. automodule:: hallmark.repo.state
    :members:
    :show-inheritance:
 
@@ -48,29 +48,25 @@ Data Handling
    :members:
    :show-inheritance:
 
-.. automodule:: hallmark.objects
+.. automodule:: hallmark.repo.objects
    :members:
    :show-inheritance:
 
 Downloading
 -----------
 
-.. automodule:: hallmark.downloader
+.. automodule:: hallmark.remote.download
    :members:
    :show-inheritance:
 
 Utilities
 ---------
 
-.. automodule:: hallmark.helper_functions
+.. automodule:: hallmark.utils
    :members:
    :show-inheritance:
 
-.. automodule:: hallmark.fmt_detection
-   :members:
-   :show-inheritance:
-
-.. automodule:: hallmark.dothm
+.. automodule:: hallmark.repo.dothm
    :members:
    :show-inheritance:
 
@@ -93,42 +89,47 @@ Preparing a repository
 
 Create a local repository::
 
-   hallmark init ./local-project
+   hm init ./local-project
 
-Initialize a catalog from a remote dataset without downloading dataset files::
+Stage and commit a remote catalog without downloading dataset files::
 
-   hallmark init ./desi --from \
-       https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/healpix/main/dark/230/23040/ \
-       --filter 'redrock-main-dark-23040.fits'
-   hallmark init ./lab --from ssh://lab-data/srv/data/ --fmt 'run{run:d}.h5'
+   hm init ./lab
+   cd ./lab
+   hm add 'ssh://lab-data/srv/data/run{run:d}.h5'
+   hm commit -m 'Add remote data'
 
-Use ``hallmark clone SOURCE PATH`` for an existing Hallmark Git repository
+Use ``hm clone SOURCE PATH`` for an existing Hallmark Git repository
 or published HTTP/SFTP snapshot. Git clones retain the full catalog and its
 history; snapshots start new local history. Use ``--source-type git`` or
-``--source-type catalog`` to override automatic detection. The older ``build``
-command remains available but is deprecated in favor of ``init --from``.
+``--source-type catalog`` to override automatic detection.
 
 Downloading remote data
 -----------------------
 
 Preview the selected files using the local catalog, then confirm a download::
 
-   hallmark download --all --dry-run
-   hallmark download --filter 'runs/**'
+   hm download --all --dry-run
+   hm download --filter 'runs/**'
 
 Explicit paths and ``--tsv data.tsv`` also select files. Every nonempty transfer
-requires interactive confirmation, including transfers requested through
-``init --with-download`` or ``clone --with-download``. Clone accepts its older
-``--download`` alias. Clone filters and formats require ``--with-download``
-and leave the complete catalog unchanged. The old ``--yes`` option no longer
-bypasses approval.
+in the CLI requires interactive confirmation, including the default clone
+transfer. ``clone --no-download`` skips data and the prompt. Clone filters and
+formats cannot be combined with this flag and leave the complete catalog unchanged.
+Declining clone's prompt keeps the catalog and exits successfully.
 A filter or filename format never authorizes a transfer.
 
-Python uses the same plan. First inspect the selected files::
+``Repo.clone(url, path)`` downloads by default without prompting. Pass
+``download=False`` for catalog-only or bare clones. An optional ``approve(plan)``
+callback gates a nonempty transfer: only Boolean True downloads; refusal keeps
+the catalog. A bare destination with downloads enabled fails before cloning.
+
+For separate Python downloads, first inspect the selected files::
 
    from hallmark import Repo
 
-   repo = Repo.init('lab', from_url='ssh://lab-data/srv/data/', progress=True)
+   repo = Repo.init('lab')
+   repo.add('ssh://lab-data/srv/data/', progress=True)
+   repo.commit('Add remote data')
    plan = repo.plan_download(filter='runs/**')
    print(plan.summary())
 
@@ -143,7 +144,7 @@ checksums even when repository configuration later changes. Size estimates
 require recorded file sizes; duration estimates also require a supplied
 transfer rate.
 
-.. automodule:: hallmark.download_plan
+.. automodule:: hallmark.remote.plan
    :members:
 
 Data backends
@@ -153,16 +154,12 @@ See :doc:`backends` for registration, installed plugins and the transfer
 contract. Backend classes are also exported from ``hallmark``. Existing
 ``hallmark.transport`` imports remain compatibility aliases.
 
-.. automodule:: hallmark.backends
+.. automodule:: hallmark.remote.backends
    :members:
    :show-inheritance:
 
-Dataset builders and data remotes
----------------------------------
-
-.. autofunction:: hallmark.repo_builder.build_repo
-
-.. autofunction:: hallmark.repo_builder.list_remote_files
+Data remotes
+------------
 
 Associate a data remote with a local SSH authentication profile::
 
@@ -176,8 +173,7 @@ The repository stores the profile name. The SSH settings remain in the
 local authentication file. Passing ``remote_auth=None`` leaves the
 reference unchanged.
 
-The legacy ``download_remote_data`` function also requires ``approved=True``.
-Both download APIs return a dictionary containing ``succeeded``,
+``Repo.download`` returns a dictionary containing ``succeeded``,
 ``failed``, ``total_bytes``, and ``errors``. Check ``failed`` and ``errors``
 for individual transfer failures. Configuration errors and failed SSH
 connection checks raise ``DownloadError`` before downloads begin.

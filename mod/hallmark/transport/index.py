@@ -6,7 +6,12 @@ import re
 from html.parser import HTMLParser
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
-from .base import CapabilityError, DownloadError, literal_path, reject_controls
+from .base import (
+    CapabilityError,
+    DownloadError,
+    validate_remote_path,
+    reject_control_characters,
+)
 
 
 class _IndexParser(HTMLParser):
@@ -66,27 +71,27 @@ class _IndexParser(HTMLParser):
                     self.current["size"] = int(raw)
 
 
-def _origin(url):
+def _url_connection_details(url):
     """Return connection fields used to compare directory-listing URLs."""
     return (url.scheme, url.hostname,
             url.port or (443 if url.scheme == "https" else 80),
             url.username, url.password)
 
 
-def _index_link(root_url, directory, href, kind):
+def _resolve_listing_link(root_url, directory, href, kind):
     """Resolve a link only when it stays beneath the supplied URL root."""
-    reject_controls(href, "Index href")
+    reject_control_characters(href, "Index href")
     root = urlsplit(root_url.rstrip("/") + "/")
     current = urljoin(root.geturl(), quote(directory, safe="/"))
     resolved = urlsplit(urljoin(current, href))
-    if _origin(resolved) != _origin(root):
+    if _url_connection_details(resolved) != _url_connection_details(root):
         return None
     # Sorting and navigation links do not identify dataset files.
     if resolved.query or resolved.fragment:
         return None
     root_path = unquote(root.path, errors="strict")
     path = unquote(resolved.path, errors="strict")
-    reject_controls(path, "Index path")
+    reject_control_characters(path, "Index path")
     if "\\" in path or ".." in path.split("/"):
         raise DownloadError("Remote index contains an unsafe path")
     if not path.startswith(root_path):
@@ -97,17 +102,17 @@ def _index_link(root_url, directory, href, kind):
     if any(part.lower() in {".hm", ".git"} for part in relative.split("/")):
         return None
     is_directory = kind == "directory" or resolved.path.endswith("/")
-    relative = literal_path(relative.rstrip("/")).as_posix()
+    relative = validate_remote_path(relative.rstrip("/")).as_posix()
     return relative + ("/" if is_directory else ""), is_directory
 
 
-def _parse_index(text, root_url, directory, parser_class=_IndexParser):
+def _parse_directory_listing(text, root_url, directory, parser_class=_IndexParser):
     """Extract file and directory metadata from a supported HTML index."""
     parser = parser_class()
     parser.feed(text)
     links = []
     for entry in parser.links:
-        link = _index_link(root_url, directory, entry["href"], entry["kind"])
+        link = _resolve_listing_link(root_url, directory, entry["href"], entry["kind"])
         if link is not None:
             path, is_directory = link
             size = entry["size"]
@@ -132,7 +137,7 @@ def _parse_index(text, root_url, directory, parser_class=_IndexParser):
     return links
 
 
-def _response_directory(context, requested):
+def _redirected_directory(context, requested):
     """Use a redirected listing's canonical location when resolving child links."""
     transport = getattr(context, "transport", None)
     final_url = getattr(transport, "text_urls", {}).get(requested)
@@ -140,10 +145,10 @@ def _response_directory(context, requested):
         return requested
     root = urlsplit(context.remote.url.rstrip("/") + "/")
     final = urlsplit(final_url)
-    if (_origin(root) == _origin(final)
+    if (_url_connection_details(root) == _url_connection_details(final)
             and unquote(root.path).rstrip("/") == unquote(final.path).rstrip("/")):
         return ""
-    link = _index_link(context.remote.url, "", final_url, "directory")
+    link = _resolve_listing_link(context.remote.url, "", final_url, "directory")
     if link is None:
         raise DownloadError("Redirected directory is outside the dataset root")
     return link[0]

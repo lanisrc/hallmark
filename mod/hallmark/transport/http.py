@@ -7,10 +7,10 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
-from ..helper_functions import REMOTE_REQUEST_TIMEOUT
+from ..utils import REMOTE_REQUEST_TIMEOUT
 from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
-                   RemoteObjectMissing, DataBackend, reject_controls)
-from .index import _parse_index, _response_directory
+                   RemoteObjectMissing, DataBackend, reject_control_characters)
+from .index import _parse_directory_listing, _redirected_directory
 
 
 class HttpBackend(DataBackend):
@@ -21,14 +21,14 @@ class HttpBackend(DataBackend):
             raise RemoteConfigurationError("HTTP backends require an HTTP(S) URL")
         self.text_urls = {}
 
-    def _parse_index(self, text, directory):
+    def _parse_directory_listing(self, text, directory):
         """Read generic indexes and recognize the CyVerse dialect automatically."""
         from .cyverse import CyVerseIndexParser, is_cyverse_index
 
         if is_cyverse_index(text):
-            return _parse_index(text, self.context.remote.url, directory,
+            return _parse_directory_listing(text, self.context.remote.url, directory,
                                 parser_class=CyVerseIndexParser)
-        return _parse_index(text, self.context.remote.url, directory)
+        return _parse_directory_listing(text, self.context.remote.url, directory)
 
     def iter_entries(self, on_directory=None):
         """Yield metadata from recursive listings without reading payloads."""
@@ -40,11 +40,13 @@ class HttpBackend(DataBackend):
             visited.add(directory)
             self.context.check_cancelled()
             text = self.context.read_text(directory)
-            canonical = _response_directory(self.context, directory)
+            canonical = _redirected_directory(self.context, directory)
             if canonical != directory and canonical in visited:
                 continue
             visited.add(canonical)
-            for path, is_directory, size, mtime in self._parse_index(text, canonical):
+            for path, is_directory, size, mtime in self._parse_directory_listing(
+                text, canonical
+            ):
                 if is_directory:
                     if path not in visited:
                         queue.append(path)
@@ -53,15 +55,15 @@ class HttpBackend(DataBackend):
             if on_directory is not None:
                 on_directory(canonical)
 
-    def _get(self, path):
+    def _open_file_response(self, path):
         """Open a streaming response with the configured request timeout."""
         return self.context.session().get(
-            getattr(self, "direct_url", None) or self.context.remote.file_url(path),
+            self.context.remote.file_url(path),
             stream=True,
             timeout=REMOTE_REQUEST_TIMEOUT,
         )
 
-    def _error(self, exc):
+    def _download_error(self, exc):
         # Requests exceptions can embed credentials in their URL or response body.
         """Describe an HTTP failure without exposing response contents."""
         status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -69,7 +71,7 @@ class HttpBackend(DataBackend):
         detail = f"HTTP {status}" if isinstance(status, int) else type(exc).__name__
         return cls(f"Failed to download from {self.context.remote.display}: {detail}")
 
-    def _metadata_get(self, relative_path):
+    def _open_metadata_response(self, relative_path):
         """Follow bounded metadata redirects only within the declared source root."""
         url = self.context.remote.file_url(relative_path)
         root = urlsplit(self.context.remote.url)
@@ -82,10 +84,10 @@ class HttpBackend(DataBackend):
         for _ in range(11):
             self.context.check_cancelled()
             try:
-                reject_controls(url, "Metadata URL")
+                reject_control_characters(url, "Metadata URL")
                 target = urlsplit(url)
                 path = unquote(target.path, errors="strict")
-                reject_controls(path, "Metadata path")
+                reject_control_characters(path, "Metadata path")
                 within_root = (root_path == "/" or path == root_path
                                or path.startswith(root_path + "/"))
                 if (endpoint(target) != endpoint(root) or not within_root
@@ -111,7 +113,7 @@ class HttpBackend(DataBackend):
     def fetch(self, relative_path, destination, *, chunk_size=8192):
         """Stream a file to the destination, checking for cancellation."""
         try:
-            with self._get(relative_path) as response:
+            with self._open_file_response(relative_path) as response:
                 response.raise_for_status()
                 with destination.open("wb") as handle:
                     for chunk in response.iter_content(chunk_size=chunk_size):
@@ -121,12 +123,12 @@ class HttpBackend(DataBackend):
                             if self.context.on_bytes is not None:
                                 self.context.on_bytes(len(chunk))
         except requests.RequestException as exc:
-            raise self._error(exc) from None
+            raise self._download_error(exc) from None
     def read_text(self, relative_path, limit):
         """Read metadata within the source root and byte limit."""
         content = bytearray()
         try:
-            response, final_url = self._metadata_get(relative_path)
+            response, final_url = self._open_metadata_response(relative_path)
             with response:
                 response.raise_for_status()
                 for chunk in response.iter_content(chunk_size=8192):
@@ -139,7 +141,4 @@ class HttpBackend(DataBackend):
             self.text_urls[relative_path] = final_url
             return text
         except requests.RequestException as exc:
-            raise self._error(exc) from None
-
-
-HttpTransport = HttpBackend
+            raise self._download_error(exc) from None

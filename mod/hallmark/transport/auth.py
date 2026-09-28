@@ -6,13 +6,13 @@ import os
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
-from ..helper_functions import load_yaml_file
+from ..utils import load_yaml_file
 from .base import (
     RemoteConfigurationError,
-    profile_name,
-    reject_controls,
-    ssh_host,
-    ssh_user,
+    validate_profile_name,
+    reject_control_characters,
+    validate_ssh_host,
+    validate_ssh_user,
 )
 
 
@@ -35,14 +35,14 @@ class SSHSettings:
     max_sessions: int = 4
 
 
-def _settings(values):
+def _validate_ssh_settings(values):
     """Validate local SSH options and normalize identity-file paths."""
     allowed = {item.name for item in fields(SSHSettings)}
     if not isinstance(values, dict) or set(values) - allowed:
         raise RemoteConfigurationError("Unsupported local SSH settings fields")
     values = dict(values)
     if "user" in values:
-        ssh_user(values["user"])
+        validate_ssh_user(values["user"])
     for key in (
         "port",
         "connect_timeout",
@@ -63,7 +63,7 @@ def _settings(values):
         value = values["identity_file"]
         if not isinstance(value, str) or not value:
             raise RemoteConfigurationError("identity_file must be a local path")
-        reject_controls(value, "identity_file")
+        reject_control_characters(value, "identity_file")
         # OpenSSH expands % tokens and environment substitutions inside paths.
         if "%" in value or "$" in value:
             raise RemoteConfigurationError("identity_file cannot contain expansions")
@@ -71,7 +71,7 @@ def _settings(values):
     return values
 
 
-def resolve_settings(remote):
+def resolve_ssh_settings(remote):
     """
     Resolve local SSH settings before opening a connection.
 
@@ -114,7 +114,7 @@ def resolve_settings(remote):
         or document["version"] != 1
     ):
         raise RemoteConfigurationError("Auth file must use version: 1")
-    defaults = _settings(document.get("defaults", {}))
+    defaults = _validate_ssh_settings(document.get("defaults", {}))
     # User, port, and identity settings require a profile bound to specific hosts.
     if set(defaults) & {"user", "port", "identity_file"}:
         raise RemoteConfigurationError("Global SSH defaults cannot select an identity")
@@ -124,7 +124,7 @@ def resolve_settings(remote):
         raise RemoteConfigurationError("Auth profiles must be a mapping")
     validated = {}
     for name, profile in profiles.items():
-        profile_name(name)
+        validate_profile_name(name)
         if not isinstance(profile, dict):
             raise RemoteConfigurationError("Each auth profile must be a mapping")
         hosts = profile.get("hosts")
@@ -134,8 +134,9 @@ def resolve_settings(remote):
             or any(not isinstance(host, str) for host in hosts)
         ):
             raise RemoteConfigurationError("Each auth profile requires hosts")
-        hosts = [ssh_host(host).lower() for host in hosts]
-        values = _settings({k: v for k, v in profile.items() if k != "hosts"})
+        hosts = [validate_ssh_host(host).lower() for host in hosts]
+        values = _validate_ssh_settings(
+            {k: v for k, v in profile.items() if k != "hosts"})
         validated[name] = (hosts, values)
     if remote.auth is not None:
         if remote.auth not in validated:

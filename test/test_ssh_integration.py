@@ -18,13 +18,12 @@ import yaml
 
 from hallmark import Repo
 from hallmark.cli import hallmark
-from hallmark.downloader import download_remote_data, select_download_files
-from hallmark.repo_builder import build_repo
 from hallmark.transport import OperationContext, RemoteSpec
+from conftest import download_selection
 from hallmark.transport.base import (
     DownloadError, RemoteObjectMissing, TransferCancelled,
 )
-from hallmark.transport.ssh import SshTransport
+from hallmark.transport.ssh import SshBackend
 
 pytestmark = pytest.mark.ssh_integration
 
@@ -90,10 +89,10 @@ Host *
     UserKnownHostsFile {known}
     GlobalKnownHostsFile /dev/null
 """)
-    original = SshTransport._options
+    original = SshBackend._ssh_options
     monkeypatch.setattr(
-        SshTransport,
-        "_options",
+        SshBackend,
+        "_ssh_options",
         lambda self, **kw: ["-F", str(client_config)] + original(self, **kw),
     )
     monkeypatch.delenv("HALLMARK_AUTH_FILE", raising=False)
@@ -144,7 +143,7 @@ def test_parallel_exact_files_and_master_cleanup(ssh_server, tmp_path, scheme):
         path.parent.mkdir(exist_ok=True)
         path.write_text(name)
     url = ssh_server["url"].replace("ssh:", scheme + ":")
-    with OperationContext(RemoteSpec.parse(url)) as context:
+    with OperationContext(RemoteSpec.from_url(url)) as context:
         transport = context.transport
         transport.prepare()
         master = transport._master
@@ -174,9 +173,7 @@ def test_explicit_endpoint_and_missing_file(ssh_server, tmp_path):
     repo.set_config(remote_url=url)
     output = repo.worktree / "missing"
     output.write_bytes(b"keep")
-    result = download_remote_data(
-        repo, repo.worktree, selected_files=[(Path("missing"), None)]
-    , approved=True)
+    result = download_selection(repo, repo.worktree, [(Path('missing'), None)])
     assert result["failed"] == 1
     assert output.read_bytes() == b"keep"
     assert not list(Path(repo.worktree).glob("*.part"))
@@ -196,7 +193,7 @@ def test_host_trust_and_auth_fail_preflight(ssh_server, tmp_path, trust):
         # Both keys are ephemeral; the replacement is not authorized on the server.
         config = server["config"].read_text().replace("/client\n", "/untrusted\n")
         server["config"].write_text(config)
-    with OperationContext(RemoteSpec.parse(server["url"])) as context:
+    with OperationContext(RemoteSpec.from_url(server["url"])) as context:
         with pytest.raises(DownloadError, match="Cannot establish"):
             context.transport.prepare()
         assert not context.transport._processes
@@ -222,8 +219,8 @@ def test_simultaneous_profiles_have_separate_masters(ssh_server, monkeypatch):
         )
     )
     monkeypatch.setenv("HALLMARK_AUTH_FILE", str(auth))
-    with OperationContext(RemoteSpec.parse(server["url"], "one")) as one:
-        with OperationContext(RemoteSpec.parse(server["url"], "two")) as two:
+    with OperationContext(RemoteSpec.from_url(server["url"], "one")) as one:
+        with OperationContext(RemoteSpec.from_url(server["url"], "two")) as two:
             with ThreadPoolExecutor(2) as pool:
                 list(pool.map(lambda context: context.transport.prepare(), [one, two]))
             assert one.transport._socket != two.transport._socket
@@ -234,72 +231,6 @@ def test_simultaneous_profiles_have_separate_masters(ssh_server, monkeypatch):
         assert first.poll() is None
         one.transport.fetch("item", server["base"] / "copy")
     assert first.poll() is not None
-
-
-def test_build_manifest_download_clone_workflow(ssh_server, tmp_path):
-    root = ssh_server["root"]
-    (root / "nested").mkdir()
-    (root / "nested/item_1.dat").write_bytes(b"science")
-    (root / "README.md").write_bytes(b"notes")
-    (root / "bad_2.dat").write_bytes(b"changed")
-    strong = hashlib.sha256(b"science").hexdigest()
-    (root / "export.sha256sums").write_text(
-        strong + "  nested/item_1.dat\n" + "a" * 64 + "  bad_2.dat\n"
-    )
-    repo = build_repo(
-        tmp_path / "catalog",
-        "lab",
-        [
-            {"fmt": "nested/item_{i}.dat", "db": "data.tsv"},
-            {"fmt": "bad_{i}.dat", "db": "bad.tsv"},
-        ],
-        dataset_url=ssh_server["url"],
-    )
-    assert repo.state.config["remote"] == [{"name": "origin", "url": ssh_server["url"]}]
-    static = next(
-        entry for entry in repo.state.config["data"] if entry.get("file") == "README.md"
-    )
-    assert not any(key in static for key in ("md5", "sha1", "sha256"))
-    assert static.get("checksum") in (None, "unknown")
-    destination = tmp_path / "downloads"
-    files = select_download_files(repo, all_files=True)
-    result = download_remote_data(
-        repo, destination, selected_files=files, approved=True,
-    )
-    assert result["succeeded"] == 3
-    assert result["failed"] == 1
-    assert (destination / "nested/item_1.dat").read_bytes() == b"science"
-    assert not (destination / "bad_2.dat").exists()
-    assert not list(destination.rglob("*.part"))
-
-    # Python and CLI clones both use the recorded SSH data remote.
-    single = build_repo(
-        tmp_path / "single",
-        "lab",
-        [{"fmt": "nested/item_{i}.dat", "db": "data.tsv"}],
-        dataset_url=ssh_server["url"],
-    )
-    # Remove the intentionally incorrect static entry before cloning.
-    single.state.config["data"] = [
-        entry
-        for entry in single.state.config["data"]
-        if entry.get("file") != "bad_2.dat"
-    ]
-    single.dothm.dump(single.state)
-    single.dothm.index.add(["config.yml"])
-    single.dothm.index.commit("Remove deliberately invalid test entry")
-    clone = Repo.clone(
-        str(single.dothm.path), tmp_path / "python-clone",
-        download=True, approve=lambda plan: True,
-    )
-    assert (clone.worktree / "nested/item_1.dat").read_bytes() == b"science"
-    result = CliRunner().invoke(
-        hallmark,
-        ["clone", str(single.dothm.path), str(tmp_path / "cli-clone"), "--download"],
-        input="y\n",
-    )
-    assert result.exit_code == 0, result.output
-    assert (tmp_path / "cli-clone/nested/item_1.dat").read_bytes() == b"science"
 
 
 def _wait_for_partial_file(directory, pattern, total_size, task):
@@ -325,9 +256,9 @@ def test_real_cancel_transfer_and_preserve_other_master(ssh_server, tmp_path):
     server = ssh_server
     payload = b"x" * 128 * 1024
     (server["root"] / "large").write_bytes(payload)
-    with OperationContext(RemoteSpec.parse(server["url"])) as survivor:
+    with OperationContext(RemoteSpec.from_url(server["url"])) as survivor:
         survivor.transport.prepare()
-        with OperationContext(RemoteSpec.parse(server["url"])) as context:
+        with OperationContext(RemoteSpec.from_url(server["url"])) as context:
             context.settings = replace(
                 context.settings, shutdown_timeout=1, transfer_timeout=15
             )
@@ -365,7 +296,7 @@ def test_sftp_only_discovers_metadata_and_fetches(ssh_server, tmp_path):
     (root / "nested").mkdir()
     name = "nested/a b#?%+ü'\"[*].fits"
     (root / name).write_bytes(b"science")
-    with OperationContext(RemoteSpec.parse(ssh_server["url"])) as context:
+    with OperationContext(RemoteSpec.from_url(ssh_server["url"])) as context:
         directories = []
         entries = list(context.transport.iter_entries(on_directory=directories.append))
         assert {entry.path: entry.size for entry in entries} == {"item": 4, name: 7}
@@ -391,7 +322,7 @@ def test_sftp_only_init_plans_then_requires_payload_approval(
     (root / "nested" / "science.fits").write_bytes(b"science")
     (root / "notes.txt").write_bytes(b"notes")
     fetched = []
-    fetch = SshTransport._fetch
+    fetch = SshBackend._download_file
 
     def record_fetch(self, path, destination, file_limit=None):
         fetched.append(path)
@@ -400,19 +331,17 @@ def test_sftp_only_init_plans_then_requires_payload_approval(
     def reject_git_probe(*args, **kwargs):
         raise AssertionError("SFTP directory detection must not invoke remote Git")
 
-    monkeypatch.setattr(SshTransport, "_fetch", record_fetch)
-    monkeypatch.setattr("hallmark.catalog.Dothm.clone", reject_git_probe)
+    monkeypatch.setattr(SshBackend, "_download_file", record_fetch)
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", reject_git_probe)
     plans = []
 
     def decline(plan):
         plans.append(plan)
         return False
 
-    repo = Repo.init(
-        tmp_path / "initialized",
-        from_url=ssh_server["url"].replace("ssh:", scheme + ":"),
-        filter="**/*.fits", download=True, approve=decline,
-    )
+    repo = Repo.init(tmp_path / "initialized")
+    repo.add(ssh_server["url"].replace("ssh:", scheme + ":"), filter="**/*.fits")
+    decline(repo.plan_download())
     assert fetched == []
     assert repo.state.data["path"].tolist() == ["nested/science.fits"]
     assert len(plans) == 1
@@ -430,7 +359,7 @@ def test_sftp_only_init_plans_then_requires_payload_approval(
 @pytest.mark.parametrize("ssh_server", ["no-sftp"], indirect=True)
 def test_disabled_subsystem_fails(ssh_server, tmp_path):
     (ssh_server["root"] / "item").write_bytes(b"data")
-    with OperationContext(RemoteSpec.parse(ssh_server["url"])) as context:
+    with OperationContext(RemoteSpec.from_url(ssh_server["url"])) as context:
         with pytest.raises(DownloadError):
             context.transport.fetch("item", tmp_path / "copy")
         assert not (tmp_path / "copy").exists()
@@ -445,53 +374,22 @@ def test_local_session_limit(ssh_server, tmp_path, monkeypatch):
     monkeypatch.setenv("HALLMARK_AUTH_FILE", str(auth))
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url=ssh_server["url"])
-    result = download_remote_data(
-        repo,
-        repo.worktree,
-        max_workers=4,
-        selected_files=[(Path(str(i)), None) for i in range(4)],
-     approved=True)
+    result = download_selection(
+        repo, repo.worktree, [(Path(str(i)), None) for i in range(4)], max_workers=4)
     assert result["succeeded"] == 4
     assert result["failed"] == 0
-
-
-def test_profile_source_recording_and_explicit_output(
-    ssh_server, tmp_path, monkeypatch
-):
-    auth = tmp_path / "auth.yml"
-    auth.write_text("version: 1\nprofiles:\n  lab:\n    hosts: [hm-test]\n")
-    monkeypatch.setenv("HALLMARK_AUTH_FILE", str(auth))
-    repo = build_repo(
-        tmp_path / "catalog",
-        "label",
-        [],
-        dataset_url=ssh_server["url"],
-        dataset_auth="lab",
-    )
-    assert repo.state.config["remote"][0]["auth"] == "lab"
-    explicit = build_repo(
-        tmp_path / "explicit",
-        "label",
-        [],
-        remotes=[{"name": "mirror", "url": "https://example.test/data"}],
-        dataset_url=ssh_server["url"],
-        dataset_auth="lab",
-    )
-    assert explicit.state.config["remote"] == [
-        {"name": "mirror", "url": "https://example.test/data"}
-    ]
 
 
 def test_ssh_listing_omits_symlinks_and_rejects_controls(ssh_server, tmp_path):
     root = ssh_server["root"]
     (root / "item").write_bytes(b"data")
     (root / "link").symlink_to(root / "item")
-    with OperationContext(RemoteSpec.parse(ssh_server["url"])) as context:
-        assert context.transport.list_entries() == ["item"]
+    with OperationContext(RemoteSpec.from_url(ssh_server["url"])) as context:
+        assert [entry.path for entry in context.transport.iter_entries()] == ["item"]
     (root / "bad\nname").write_bytes(b"data")
-    with OperationContext(RemoteSpec.parse(ssh_server["url"])) as context:
+    with OperationContext(RemoteSpec.from_url(ssh_server["url"])) as context:
         with pytest.raises(DownloadError, match="control"):
-            context.transport.list_entries()
+            list(context.transport.iter_entries())
 
 
 def test_permission_denied_preserves_existing_file(ssh_server, tmp_path):
@@ -503,9 +401,7 @@ def test_permission_denied_preserves_existing_file(ssh_server, tmp_path):
     destination = repo.worktree / "private"
     destination.write_bytes(b"original")
     try:
-        result = download_remote_data(
-            repo, repo.worktree, selected_files=[(Path("private"), None)]
-        , approved=True)
+        result = download_selection(repo, repo.worktree, [(Path('private'), None)])
         assert result["failed"] == 1
         assert destination.read_bytes() == b"original"
         assert not list(Path(repo.worktree).glob("*.part"))
@@ -521,7 +417,7 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
     destination = repo.worktree / "large"
     destination.write_bytes(b"original")
     transports = []
-    prepare = SshTransport.prepare
+    prepare = SshBackend.prepare
 
     def slow_prepare(self):
         prepare(self)
@@ -532,14 +428,13 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
         if self not in transports:
             transports.append(self)
 
-    monkeypatch.setattr(SshTransport, "prepare", slow_prepare)
+    monkeypatch.setattr(SshBackend, "prepare", slow_prepare)
     with ThreadPoolExecutor(1) as pool:
         task = pool.submit(
-            download_remote_data,
+            download_selection,
             repo,
             repo.worktree,
-            selected_files=[(Path("large"), None)],
-         approved=True)
+            [(Path("large"), None)])
         try:
             _wait_for_partial_file(repo.worktree, "*.part", len(payload), task)
             assert len(transports) == 1
@@ -552,3 +447,41 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
     assert destination.read_bytes() == b"original"
     assert not list(Path(repo.worktree).glob("*.part"))
     assert not transports[0]._processes
+
+
+def test_add_commit_download_clone_workflow(ssh_server, tmp_path):
+    root = ssh_server["root"]
+    (root / "nested").mkdir()
+    (root / "nested/item_1.dat").write_bytes(b"science")
+    (root / "bad_2.dat").write_bytes(b"changed")
+    strong = hashlib.sha256(b"science").hexdigest()
+    (root / "sha256sums").write_text(
+        strong + "  nested/item_1.dat\n" + "a" * 64 + "  bad_2.dat\n")
+    repo = Repo.init(tmp_path / "catalog")
+    repo.add(ssh_server["url"], filter="**/*.dat")
+    assert not (repo.worktree / "nested").exists()
+    repo.commit("Record remote files")
+    result = repo.download(repo.plan_download(), approved=True)
+    assert result["succeeded"] == 1
+    assert result["failed"] == 1
+    assert (repo.worktree / "nested/item_1.dat").read_bytes() == b"science"
+    assert not (repo.worktree / "bad_2.dat").exists()
+    assert not list(repo.worktree.rglob("*.part"))
+    clone = Repo.clone(str(repo.dothm.path), tmp_path / "python-clone", download=False)
+    assert clone.dothm.head.commit.hexsha == repo.dothm.head.commit.hexsha
+    assert not (clone.worktree / "nested").exists()
+    result = CliRunner().invoke(hallmark, [
+        "clone", str(repo.dothm.path), str(tmp_path / "cli-clone"),
+        "--filter", "nested/*.dat"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "cli-clone/nested/item_1.dat").read_bytes() == b"science"
+
+
+def test_add_records_profile_reference(ssh_server, tmp_path, monkeypatch):
+    auth = tmp_path / "auth.yml"
+    auth.write_text("version: 1\nprofiles:\n  lab:\n    hosts: [hm-test]\n")
+    monkeypatch.setenv("HALLMARK_AUTH_FILE", str(auth))
+    (ssh_server["root"] / "item.dat").write_bytes(b"science")
+    repo = Repo.init(tmp_path / "catalog")
+    repo.add(ssh_server["url"], auth="lab")
+    assert Repo(repo.worktree).state.config["remote"][0]["auth"] == "lab"

@@ -15,7 +15,6 @@
 
 import os
 import requests
-import yaml
 import importlib
 import pytest
 import pandas as pd
@@ -27,9 +26,9 @@ from types import SimpleNamespace
 
 from hallmark import ParaFrame, Repo
 from hallmark.cli import hallmark
-from hallmark.downloader import DownloadError
-from hallmark.download_plan import DownloadItem, DownloadPlan
-from hallmark.helper_functions import chdir
+from hallmark.remote.download import DownloadError
+from hallmark.remote.plan import DownloadItem, DownloadPlan
+from hallmark.utils import use_working_directory
 
 cli_module = importlib.import_module("hallmark.cli")
 
@@ -77,7 +76,7 @@ def _local_cli_catalog(path):
     repo.state.data = pd.DataFrame([
         {"path": "tiny.fits", "size_bytes": 4},
         {"path": "other.txt", "size_bytes": 5}])
-    repo.dothm.dump(repo.state)
+    repo.dothm.save_state(repo.state)
     repo.dothm.index.commit("Catalog two remote files")
     return repo
 
@@ -141,7 +140,7 @@ def test_cli_info_shows_dothm_and_worktree_paths():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             result = runner.invoke(hallmark, ["info"])
 
             assert result.exit_code == 0, \
@@ -165,7 +164,7 @@ def test_cli():
         result = runner.invoke(hallmark, ["init", "repo"])
         assert result.exit_code == 0, f"Expected exit code 0, got {result.exit_code}"
 
-        with chdir("repo"):
+        with use_working_directory("repo"):
             assert Path(".hm").is_dir(), "Expected .hm directory to exist after init"
 
             for file in files:
@@ -234,7 +233,7 @@ def test_cli_add_dot_and_explicit_paths():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
             Path("a0_i30.h5").write_text("a0_i30.h5\n", encoding="utf-8")
 
@@ -274,7 +273,7 @@ def test_cli_add_regex_flag(monkeypatch):
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             called = {}
 
             def fake_add(self, fmt, encoding=False):
@@ -301,7 +300,7 @@ def test_cli_status():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
             Path("a0_i30.h5").write_text("a0_i30.h5\n", encoding="utf-8")
             runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
@@ -337,7 +336,7 @@ def test_cli_set_config_and_add_dot():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             result = runner.invoke(
                 hallmark,
                 [
@@ -406,7 +405,7 @@ def test_cli_status_shows_staged_state_after_set_config():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             result = runner.invoke(hallmark, ["set-config", "--fmt", "b{a}_i{i}.h5"])
             assert result.exit_code == 0, \
                 f"Expected exit code 0 for set-config, got {result.exit_code}"
@@ -437,7 +436,7 @@ def test_cli_set_config_rejects_malformed_encoding():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             result = runner.invoke(hallmark, ["set-config", "--encoding", "aspin"])
 
             assert result.exit_code != 0, f"Expected non-zero exit code for malformed \
@@ -455,7 +454,7 @@ def test_cli_log():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             result = runner.invoke(hallmark, ["log"])
             assert result.exit_code == 0, \
                 f"Expected exit code 0 for log, got {result.exit_code}"
@@ -487,7 +486,7 @@ def test_cli_branch_lists_local_branches_and_marks_current():
     runner = CliRunner()
     with runner.isolated_filesystem():
         runner.invoke(hallmark, ["init", "repo"])
-        with chdir("repo"):
+        with use_working_directory("repo"):
             Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
             runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
             runner.invoke(hallmark, ["commit", "-m", "add first file"])
@@ -532,8 +531,7 @@ def test_cli_help_lists_commands():
         f"Expected 'set-config' command in help output, got: {result.output}"
     assert "status" in result.output, \
         f"Expected 'status' command in help output, got: {result.output}"
-    assert "build" in result.output, \
-        f"Expected 'build' command in help output, got: {result.output}"
+    assert "  build " not in result.output
     assert "download" in result.output, \
         f"Expected 'download' command in help output, got: {result.output}"
 
@@ -559,7 +557,7 @@ def test_clone_existing_destination_fails_with_plain_git_stderr():
         (target / "placeholder.txt").write_text("test\n", encoding="utf-8")
         result = runner.invoke(
             hallmark,
-            ["clone", "--no-fetch-data", str(source / ".hm"), str(target)])
+            ["clone", str(source / ".hm"), str(target)])
 
         assert result.exit_code != 0, \
             f"Expected non-zero exit code for clone, got {result.exit_code}"
@@ -617,7 +615,7 @@ def test_clone_copies_committed_hallmark_state():
         GitRepo(str(source / ".hm")).index.commit("commit initial hallmark state")
         result = runner.invoke(
             hallmark,
-            ["clone", "--no-fetch-data", str(source / ".hm"), "target"])
+            ["clone", str(source / ".hm"), "target", "--no-download"])
 
         assert result.exit_code == 0, \
             f"Expected exit code 0 for clone, got {result.exit_code}"
@@ -641,7 +639,7 @@ def test_clone_reports_download_error_cleanly(monkeypatch, tmp_path):
 
     monkeypatch.setattr(Repo, "download", fail_download)
     result = CliRunner().invoke(hallmark, [
-        "clone", str(source.dothm.path), str(tmp_path / "target"), "--download"],
+        "clone", str(source.dothm.path), str(tmp_path / "target")],
         input="y\n")
     assert result.exit_code != 0
     assert "Error: Remote download failed" in result.output
@@ -649,19 +647,11 @@ def test_clone_reports_download_error_cleanly(monkeypatch, tmp_path):
 
 
 def test_clone_cli_skips_download_when_no_remote_files(monkeypatch, tmp_path):
-    repo = SimpleNamespace(worktree=tmp_path,
-                           plan_download=lambda **kwargs: _download_plan(0, tmp_path))
-
-    class FakeRepo:
-        lwpaths = Repo.lwpaths
-
-        @staticmethod
-        def clone(url, path, **kwargs):
-            return repo
-
-    monkeypatch.setattr(cli_module, "Repo", FakeRepo)
+    source = Repo.init(tmp_path / "source")
+    source.commit("Empty catalog")
+    monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(hallmark, [
-        "clone", "source", "target", "--download"])
+        "clone", str(source.dothm.path), "target"])
     assert result.exit_code == 0, result.output
     assert 'Successfully cloned to "target"' in result.output
     assert "No files selected for download." in result.output
@@ -694,459 +684,6 @@ def test_clone_rejects_nonpositive_max_workers(max_workers):
 
 
 ### build tests ###
-
-def test_build_cli_parses_fmts_remotes_and_db_suffix(monkeypatch):
-    """
-    Test that the hallmark CLI 'build' command correctly parses format entries,
-    remote entries, and database suffixes from the command line arguments.
-    This test monkeypatches the build_repo function to capture the arguments passed
-    to it and verifies that the parsed values match the expected values.
-    Args:
-        monkeypatch: pytest fixture for monkeypatching functions and attributes.
-    """
-    captured = {}
-    def fake_build_repo(**kwargs):
-        """Fake build_repo function to capture arguments passed to it."""
-        captured.update(kwargs)
-    monkeypatch.setattr(cli_module, "build_repo", fake_build_repo)
-    result = CliRunner().invoke(
-        hallmark,
-        [
-            "build",
-            "repositories",
-            "EHTC_TEST",
-            "--fmt",
-            "images/{source}.fits=science",
-            "--fmt",
-            "README.{format}=readme.tsv",
-            "--remote",
-            "origin=https://origin.test/data",
-            "--remote",
-            "mirror"])
-
-    assert result.exit_code == 0, \
-        f"Expected exit code 0 for build, got {result.exit_code}"
-    assert captured == {
-        "repo_path": Path("repositories/EHTC_TEST.hm"),
-        "dataset_name": "EHTC_TEST",
-        "fmt_entries": [
-            {"fmt": "images/{source}.fits", "db": "science.tsv"},
-            {"fmt": "README.{format}", "db": "readme.tsv"}],
-        "config_file": None,
-        "remotes": [
-            {"name": "origin", "url": "https://origin.test/data"},
-            {"name": "mirror"}],
-        "overwrite": False}, \
-        f"Expected captured arguments to match expected values, got: {captured}"
-    assert "Successfully built hallmark repository" in result.output, \
-        f"Expected success message in output, got: {result.output}"
-
-
-def test_build_cli_rejects_conflicting_format_sources(monkeypatch, tmp_path):
-    """
-    Test that the hallmark CLI 'build' command rejects conflicting format sources
-    when both --config-file and --fmt are provided. This test creates a temporary
-    config file and verifies that the build command fails with expected error message.
-    Args:
-        monkeypatch: pytest fixture for monkeypatching functions and attributes.
-        tmp_path: pytest fixture for creating a temporary directory.
-    """
-    config_path = tmp_path / "config.yml"
-    config_path.write_text("data: []\n", encoding="utf-8")
-    result = CliRunner().invoke(
-        hallmark,
-        [
-            "build",
-            str(tmp_path),
-            "EHTC_TEST",
-            "--config-file",
-            str(config_path),
-            "--fmt",
-            "{name}.fits=data"])
-
-    assert result.exit_code != 0, f"Expected non-zero exit code for build with \
-        conflicting format sources, got {result.exit_code}"
-    assert "Use only one of --config-file or --fmt" in result.output, \
-        f"Expected error message about conflicting format sources, got: {result.output}"
-
-
-def test_build_cli_rejects_malformed_fmt():
-    """
-    Test that the hallmark CLI 'build' command rejects malformed format entries
-    when the --fmt argument does not include a database suffix. This test verifies
-    that the build command fails with expected error message when a malformed format
-    entry is provided.
-    """
-    result = CliRunner().invoke(
-        hallmark,
-        ["build", "repositories", "EHTC_TEST", "--fmt", "missing-db"])
-
-    assert result.exit_code != 0, f"Expected non-zero exit code for build with \
-        malformed fmt, got {result.exit_code}"
-    assert "--fmt values must use FMT=DB" in result.output, \
-        f"Expected error message about malformed fmt, got: {result.output}"
-
-
-def test_build_cli_forwards_config_file_to_builder(monkeypatch, tmp_path):
-    """
-    Test that the hallmark CLI 'build' command forwards the --config-file argument
-    to the build_repo function. This test creates a temporary config file, monkeypatches
-    the build_repo function to capture the arguments passed to it, and verifies that
-    the config_file argument is correctly forwarded.
-    Args:
-        monkeypatch: pytest fixture for monkeypatching functions and attributes.
-        tmp_path: pytest fixture for creating a temporary directory.
-    """
-    config_path = tmp_path / "config.yml"
-    config_path.write_text(
-        yaml.safe_dump({
-                "data": [
-                    {"file": "README.md"},
-                    {"fmt": "{name}.fits", "db": "science.tsv"},],
-                "remote": [{"name": "origin", "url": "https://example.test"}]}
-            ),encoding="utf-8")
-    captured = {}
-    monkeypatch.setattr(
-        cli_module, "build_repo", lambda **kwargs: captured.update(kwargs))
-    result = CliRunner().invoke(
-        hallmark, [
-            "build",
-            str(tmp_path),
-            "EHTC_TEST",
-            "--config-file",
-            str(config_path)])
-
-    assert result.exit_code == 0, \
-        f"Expected exit code 0 for build, got {result.exit_code}"
-    assert captured["config_file"] == str(config_path), \
-        f"Expected config_file to be forwarded, got: {captured.get('config_file')}"
-    assert captured["fmt_entries"] is None, \
-        f"Expected fmt_entries to remain None, got: {captured['fmt_entries']}"
-    assert captured["remotes"] is None, f"Expected remotes to remain None when \
-        --remote is absent, got: {captured['remotes']}"
-
-
-def test_build_cli_remote_option_overrides_config_remotes(monkeypatch, tmp_path):
-    """
-    Test that the hallmark CLI 'build' command allows the --remote option to override
-    remote entries specified in the configuration file. This test creates a temporary
-    config file with a remote entry, monkeypatches the build_repo function to capture
-    the arguments passed to it, and verifies that the parsed values match the expected
-    values when the --remote option is provided.
-    Args:
-        monkeypatch: pytest fixture for monkeypatching functions and attributes.
-        tmp_path: pytest fixture for creating a temporary directory.
-    """
-    config_path = tmp_path / "config.yml"
-    config_path.write_text(
-        yaml.safe_dump({
-                "data": [{"fmt": "{name}.fits", "db": "science.tsv"}],
-                "remote": [{"name": "origin", "url": "https://old.test"}]}
-            ),encoding="utf-8")
-    captured = {}
-    monkeypatch.setattr(
-        cli_module, "build_repo", lambda **kwargs: captured.update(kwargs))
-    result = CliRunner().invoke(
-        hallmark, [
-            "build",
-            str(tmp_path),
-            "EHTC_TEST",
-            "--config-file",
-            str(config_path),
-            "--remote",
-            "mirror=https://new.test"])
-
-    assert result.exit_code == 0, \
-        f"Expected exit code 0 for build, got {result.exit_code}"
-    assert captured["config_file"] == str(config_path), \
-        f"Expected config_file to be forwarded, got: {captured.get('config_file')}"
-    assert captured["remotes"] == [
-        {"name": "mirror", "url": "https://new.test"}], f"Expected remotes to be \
-            overridden by --remote option, got: {captured['remotes']}"
-
-
-def test_build_cli_rejects_config_without_fmts(tmp_path):
-    """
-    Test that the hallmark CLI 'build' command rejects a configuration file that does
-    not contain any format entries. This test creates a temporary config file without
-    any format entries and verifies that the build command fails with the expected
-    error message.
-    Args:
-        tmp_path: pytest fixture for creating a temporary directory.
-    """
-    config_path = tmp_path / "config.yml"
-    config_path.write_text("data:\n- file: README.md\n", encoding="utf-8")
-    result = CliRunner().invoke(
-        hallmark,
-        [
-            "build",
-            str(tmp_path),
-            "EHTC_TEST",
-            "--config-file",
-            str(config_path)])
-
-    assert result.exit_code != 0, f"Expected non-zero exit code for build with config \
-        without fmt, got {result.exit_code}"
-    assert "No fmt entries found" in result.output, \
-        f"Expected error message about missing fmt entries, got: {result.output}"
-
-
-@pytest.mark.parametrize(
-    "error, expected",
-    [
-        (RuntimeError("runtime failure"), "runtime failure"),
-        (ValueError("value failure"), "value failure"),
-        (FileNotFoundError("missing file"), "missing file"),
-        (GitError("git failure"), "git failure"),
-        (
-            requests.ConnectionError("offline"),
-            "Failed to reach dataset 'EHTC_TEST': offline")])
-def test_build_cli_translates_builder_errors(monkeypatch, error, expected):
-    """
-    Test that the hallmark CLI 'build' command translates various builder errors into
-    user-friendly error messages. This test monkeypatches the build_repo function to
-    raise different types of errors and verifies that the build command fails with the
-    expected error message.
-    Args:
-        monkeypatch: pytest fixture for monkeypatching functions and attributes.
-        error: The error to be raised by the build_repo function.
-        expected: The expected error message to be found in the build command output.
-    """
-    def fail_build(**kwargs):
-        """Fake build_repo function that raises the specified error."""
-        raise error
-    monkeypatch.setattr(cli_module, "build_repo", fail_build)
-    result = CliRunner().invoke(
-        hallmark,
-        ["build", "repositories", "EHTC_TEST", "--fmt", "{name}.fits=data"])
-
-    assert result.exit_code != 0, f"Expected non-zero exit code for build with error \
-        {error}, got {result.exit_code}"
-    assert expected in result.output, \
-        f"Expected error message '{expected}' in output, got: {result.output}"
-
-
-def test_build_cli_forwards_overwrite(monkeypatch, tmp_path):
-    """
-    Test that the hallmark CLI 'build' command forwards the --overwrite option to the
-    build_repo function. This test monkeypatches the build_repo function to capture the
-    arguments passed to it and verifies that the overwrite argument is set to True when
-    the --overwrite option is provided.
-    Args:
-        monkeypatch: pytest fixture for monkeypatching functions and attributes.
-        tmp_path: pytest fixture for creating a temporary directory.
-    """
-    captured = {}
-    def fake_build_repo(**kwargs):
-        """Fake build_repo function to capture arguments passed to it."""
-        captured.update(kwargs)
-    monkeypatch.setattr("hallmark.cli.build_repo", fake_build_repo)
-    runner = CliRunner()
-    result = runner.invoke(
-        hallmark,[
-            "build",
-            str(tmp_path),
-            "EHTC_TEST",
-            "--fmt",
-            "data_{number}.txt=data.tsv",
-            "--overwrite"])
-
-    assert result.exit_code == 0, \
-        f"Expected exit code 0 for build with overwrite, got {result.exit_code}"
-    assert captured["overwrite"] is True, \
-        f"Expected overwrite to be True, got {captured['overwrite']}"
-
-
-@pytest.mark.parametrize(
-    "dataset_name",[
-        "../escape",
-        "nested/dataset",
-        "/absolute",
-        "C:/outside",
-        r"C:\outside",
-        "",
-        "."])
-def test_build_cli_rejects_unsafe_dataset_name(monkeypatch, tmp_path, dataset_name):
-    """
-    Test that the hallmark CLI 'build' command rejects unsafe dataset names that could
-    lead to directory traversal or other security issues. This test monkeypatches the
-    build_repo function to ensure it is not called and verifies that the build command
-    fails with the expected error message when an unsafe dataset name is provided.
-    Args:
-        monkeypatch: pytest fixture for monkeypatching functions and attributes.
-        tmp_path: pytest fixture for creating a temporary directory.
-        dataset_name: The unsafe dataset name to be tested.
-    Raises:
-        AssertionError: If the build_repo function is called, which should not happen
-        for unsafe dataset names.
-    """
-    def unexpected_build(**_kwargs):
-        """Fake build_repo function that should not be called."""
-        raise AssertionError("build_repo should not be called")
-    monkeypatch.setattr(cli_module, "build_repo", unexpected_build)
-    result = CliRunner().invoke(
-        hallmark,[
-            "build",
-            str(tmp_path),
-            dataset_name,
-            "--fmt",
-            "data_{number}.txt=data.tsv"])
-
-    assert result.exit_code != 0, f"Expected non-zero exit code for build with unsafe \
-        dataset name, got {result.exit_code}"
-    assert "dataset name" in result.output, \
-        f"Expected error message about unsafe dataset name, got: {result.output}"
-
-
-@pytest.mark.parametrize(
-    "db_name",[
-        "../../outside",
-        "/absolute/data.tsv",
-        "nested/data.tsv",
-        r"..\outside.tsv",
-        "",
-        "."])
-def test_build_cli_rejects_unsafe_tsv_name(monkeypatch, tmp_path, db_name):
-    """
-    Test that the hallmark CLI 'build' command rejects unsafe TSV database name that
-    could lead to directory traversal or other security issues. This test monkeypatches
-    the build_repo function to ensure it is not called and verifies that the build
-    command fails with the expected error message when an unsafe TSV name is provided.
-    Args:
-        monkeypatch: pytest fixture for monkeypatching functions and attributes.
-        tmp_path: pytest fixture for creating a temporary directory.
-        db_name: The unsafe TSV database name to be tested.
-    Raises:
-        AssertionError: If the build_repo function is called, which should not happen
-        for unsafe TSV names.
-    """
-    def unexpected_build(**_kwargs):
-        """Fake build_repo function that should not be called."""
-        raise AssertionError("build_repo should not be called")
-    monkeypatch.setattr(cli_module, "build_repo", unexpected_build)
-    result = CliRunner().invoke(
-        hallmark,[
-            "build",
-            str(tmp_path),
-            "EHTC_TEST",
-            "--fmt",
-            f"data_{{number}}.txt={db_name}"])
-
-    assert result.exit_code != 0, f"Expected non-zero exit code for build with unsafe \
-        TSV name, got {result.exit_code}"
-    assert "TSV database name" in result.output, \
-        f"Expected error message about unsafe TSV name, got: {result.output}"
-
-
-@pytest.mark.parametrize(
-    "contents, expected", [
-        ("- first\n- second\n", "YAML document must contain a mapping"),
-        ("data: [\n", "while parsing")])
-def test_build_cli_reports_invalid_config_file(tmp_path, contents, expected):
-    """
-    Test that the hallmark CLI 'build' command reports an error when the provided
-    configuration file is invalid or malformed. This test creates a temporary config
-    file with invalid contents and verifies that the build command fails with the
-    expected error message.
-    Args:
-     tmp_path: pytest fixture for creating a temporary directory.
-        contents: The invalid contents to be written to the config file.
-    """
-    config_path = tmp_path / "config.yml"
-    config_path.write_text(contents, encoding="utf-8")
-    result = CliRunner().invoke(
-        hallmark,
-        ["build", str(tmp_path), "EHTC_TEST", "--config-file", str(config_path)])
-
-    assert result.exit_code != 0, f"Expected non-zero exit code for build with invalid \
-        config file, got {result.exit_code}"
-    assert expected in result.output, \
-        f"Expected error message fragment {expected!r}, got: {result.output}"
-
-
-def test_build_cli_forwards_config_directory_to_builder(monkeypatch, tmp_path):
-    """
-    Test that the hallmark CLI 'build' command forwards a directory passed via
-    --config-file to build_repo unchanged, letting the builder resolve config.yml.
-    Args:
-        monkeypatch: pytest fixture for monkeypatching functions and attributes.
-        tmp_path: pytest fixture for creating a temporary directory.
-    """
-    config_dir = tmp_path / "source.hm"
-    config_dir.mkdir()
-    captured = {}
-    monkeypatch.setattr(
-        cli_module, "build_repo", lambda **kwargs: captured.update(kwargs))
-    result = CliRunner().invoke(
-        hallmark, [
-            "build",
-            str(tmp_path),
-            "EHTC_TEST",
-            "--config-file",
-            str(config_dir)])
-
-    assert result.exit_code == 0, \
-        f"Expected exit code 0 for build, got {result.exit_code}"
-    assert captured["config_file"] == str(config_dir), f"Expected config directory path\
-          to be forwarded, got: {captured.get('config_file')}"
-    assert captured["fmt_entries"] is None, \
-        f"Expected fmt_entries to remain None, got: {captured['fmt_entries']}"
-
-
-def test_build_cli_remote_name_only_with_config_file(monkeypatch, tmp_path):
-    """
-    Test that --remote NAME (without URL) is forwarded as a named remote when
-    --config-file is also provided.
-    Args:
-        monkeypatch: pytest fixture for monkeypatching functions and attributes.
-        tmp_path: pytest fixture for creating a temporary directory.
-    """
-    config_path = tmp_path / "config.yml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {"data": [{"fmt": "{name}.fits", "db": "science.tsv"}]}), encoding="utf-8")
-    captured = {}
-    monkeypatch.setattr(
-        cli_module, "build_repo", lambda **kwargs: captured.update(kwargs))
-    result = CliRunner().invoke(
-        hallmark, [
-            "build",
-            str(tmp_path),
-            "EHTC_TEST",
-            "--config-file",
-            str(config_path),
-            "--remote",
-            "mirror"])
-
-    assert result.exit_code == 0, \
-        f"Expected exit code 0 for build, got {result.exit_code}"
-    assert captured["config_file"] == str(config_path), \
-        f"Expected config_file to be forwarded, got: {captured.get('config_file')}"
-    assert captured["remotes"] == [{"name": "mirror"}], \
-        f"Expected name-only remote to be forwarded, got: {captured['remotes']}"
-
-
-def test_build_cli_reports_missing_config_yml_in_directory(tmp_path):
-    """
-    Test that build reports a clear error when --config-file points to a directory
-    that does not contain config.yml.
-    Args:
-        tmp_path: pytest fixture for creating a temporary directory.
-    """
-    config_dir = tmp_path / "missing-config.hm"
-    config_dir.mkdir()
-    result = CliRunner().invoke(
-        hallmark, [
-            "build",
-            str(tmp_path),
-            "EHTC_TEST",
-            "--config-file",
-            str(config_dir)])
-
-    assert result.exit_code != 0, f"Expected non-zero exit code for build with missing \
-        config.yml in directory, got {result.exit_code}"
-    assert "Config file does not exist" in result.output, \
-        f"Expected missing config file error, got: {result.output}"
 
 
 ### download tests ###
@@ -1313,9 +850,8 @@ def test_download_cli_reports_only_first_ten_errors(monkeypatch):
 
 @pytest.mark.parametrize("count", [1, 100])
 @pytest.mark.parametrize("answer", ["n\n", "", "\n"])
-@pytest.mark.parametrize("legacy_yes", [False, True])
 def test_download_cli_requires_affirmative_approval(
-        monkeypatch, count, answer, legacy_yes):
+        monkeypatch, count, answer):
     repo = _install_repo(monkeypatch)
     repo.plan_download = lambda *args, **kwargs: _download_plan(count)
 
@@ -1323,68 +859,33 @@ def test_download_cli_requires_affirmative_approval(
         raise AssertionError("rejected or absent approval must not download")
 
     repo.download = reject_download
-    args = ["download", "--all"] + (["--yes"] if legacy_yes else [])
+    args = ["download", "--all"]
     result = CliRunner().invoke(hallmark, args, input=answer)
     assert result.exit_code != 0
     assert f"{count} file(s)" in result.output
     assert "Download these files? [y/N]" in result.output
     assert "Aborted!" in result.output
-    if legacy_yes:
-        assert "--yes is deprecated" in result.output
 
 
-@pytest.mark.parametrize("arguments", [[], ["--no-fetch-data"]])
-def test_clone_cli_defaults_to_metadata_only(monkeypatch, tmp_path, arguments):
+def test_clone_cli_no_download_copies_metadata_only(monkeypatch, tmp_path):
     source = _local_cli_catalog(tmp_path / "source")
 
     def reject_download(*args, **kwargs):
-        raise AssertionError("default clone must not plan or download payloads")
+        raise AssertionError("catalog-only clone must not plan or download payloads")
 
     monkeypatch.setattr(Repo, "plan_download", reject_download)
     monkeypatch.setattr(Repo, "download", reject_download)
     target = tmp_path / "target"
     result = CliRunner().invoke(hallmark, [
-        "clone", str(source.dothm.path), str(target), *arguments])
+        "clone", str(source.dothm.path), str(target), "--no-download"])
     assert result.exit_code == 0, result.output
     assert (target / ".hm/data.tsv").is_file()
     assert not (target / "tiny.fits").exists()
     assert "Download these files?" not in result.output
 
 
-def test_init_cli_forwards_discovery_options(monkeypatch, tmp_path):
-    captured = {}
-    options = tmp_path / "backend.yml"
-    options.write_text("collection: latest\n")
-
-    class FakeRepo:
-        @staticmethod
-        def init(path, **kwargs):
-            captured.update(path=path, **kwargs)
-            return SimpleNamespace(worktree=Path(path))
-
-    monkeypatch.setattr(cli_module, "Repo", FakeRepo)
-    result = CliRunner().invoke(hallmark, [
-        "init", str(tmp_path / "target"), "--from", "ssh://lab-data/export/",
-        "--auth", "lab", "--backend", "ssh", "--backend-options", str(options),
-        "--filter", "**/*.fits", "--filter", "README*", "--fmt", "{name}.fits",
-        "--max-workers", "2"])
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "from_url": "ssh://lab-data/export/", "path": str(tmp_path / "target"),
-        "auth": "lab", "backend": "ssh", "backend_options": {"collection": "latest"},
-        "filter": ("**/*.fits", "README*"), "fmt": "{name}.fits",
-        "progress": True, "max_workers": 2}
-
-
-def test_clone_cli_rejects_conflicting_download_aliases():
-    result = CliRunner().invoke(hallmark, [
-        "clone", "source", "target", "--download", "--no-fetch-data"])
-    assert result.exit_code != 0
-    assert "--download conflicts with --no-fetch-data" in result.output
-
-
 @pytest.mark.parametrize("during_clone", [False, True])
-@pytest.mark.parametrize("answer", ["y\n", "n\n", ""])
+@pytest.mark.parametrize("answer", ["y\n", "n\n", "\n", ""])
 def test_cli_downloads_only_approved_selected_payload(
         monkeypatch, tmp_path, during_clone, answer):
     from mock_server import MockServer
@@ -1405,7 +906,7 @@ def test_cli_downloads_only_approved_selected_payload(
     if during_clone:
         target = tmp_path / "target"
         arguments = ["clone", str(source.dothm.path), str(target),
-                     "--filter", "*.fits", "--download"]
+                     "--filter", "*.fits"]
     else:
         target = source.worktree
         monkeypatch.chdir(target)
@@ -1419,33 +920,20 @@ def test_cli_downloads_only_approved_selected_payload(
         assert requests_made == ["https://example.test/data/tiny.fits"]
         assert (target / "tiny.fits").read_bytes() == b"fits"
     else:
-        assert result.exit_code != 0
+        if during_clone and answer in {"n\n", "\n"}:
+            assert result.exit_code == 0, result.output
+            assert (target / ".hm/data.tsv").is_file()
+        else:
+            assert result.exit_code != 0
         assert requests_made == []
         assert not (target / "tiny.fits").exists()
     assert not (target / "other.txt").exists()
 
 
-@pytest.mark.parametrize("options", ["[]\n", "scalar\n", "options: [\n"])
-def test_init_cli_rejects_invalid_backend_options_before_access(
-        monkeypatch, tmp_path, options):
-    config = tmp_path / "options.yml"
-    config.write_text(options)
-
-    def fail(*args, **kwargs):
-        raise AssertionError("Invalid options must be rejected before initialization")
-
-    monkeypatch.setattr(Repo, "init", fail)
-    result = CliRunner().invoke(hallmark, [
-        "init", str(tmp_path / "target"), "--from", "https://example.test/data/",
-        "--backend-options", str(config)])
-    assert result.exit_code != 0
-    assert "Error:" in result.output
-    assert not (tmp_path / "target").exists()
-
-
 @pytest.mark.parametrize("arguments", [
-    ["--filter", "*.fits"], ["--fmt", "{name}.fits"],
-    ["--with-download", "--fmt", "{name:invalid}"],
+    ["--no-download", "--filter", "*.fits"],
+    ["--no-download", "--fmt", "{name}.fits"],
+    ["--fmt", "{name:invalid}"],
 ])
 def test_clone_cli_rejects_invalid_selection_before_source_access(
         monkeypatch, arguments):
@@ -1456,20 +944,6 @@ def test_clone_cli_rejects_invalid_selection_before_source_access(
     result = CliRunner().invoke(hallmark, ["clone", "source", "target", *arguments])
     assert result.exit_code != 0
     assert "Error:" in result.output
-
-
-def test_init_cli_success_does_not_echo_source_credentials(monkeypatch, tmp_path):
-    def initialize(path, **kwargs):
-        return SimpleNamespace(worktree=Path(path))
-
-    monkeypatch.setattr(Repo, "init", initialize)
-    result = CliRunner().invoke(hallmark, [
-        "init", str(tmp_path / "target"), "--from",
-        "https://user:secret@example.test/data/?token=private"])
-    assert result.exit_code == 0, result.output
-    assert "Successfully initialized" in result.output
-    assert "secret" not in result.output
-    assert "private" not in result.output
 
 
 def test_set_config_cli_persists_backend_options(monkeypatch, tmp_path):
@@ -1486,8 +960,8 @@ def test_set_config_cli_persists_backend_options(monkeypatch, tmp_path):
     assert remote["backend_options"] == {"collection": ["release-1", "release-2"]}
 
 
-@pytest.mark.parametrize("answer", ["y\n", "n\n", ""])
-def test_init_cli_downloads_only_after_confirmation(monkeypatch, tmp_path, answer):
+@pytest.mark.parametrize("answer", ["y\n", "n\n", "\n", ""])
+def test_add_then_download_requires_confirmation(monkeypatch, tmp_path, answer):
     from hallmark.transport import OperationContext
     from hallmark.transport.base import RemoteObjectMissing
     from mock_server import MockServer
@@ -1502,9 +976,13 @@ def test_init_cli_downloads_only_after_confirmation(monkeypatch, tmp_path, answe
     monkeypatch.setattr(OperationContext, "read_text", metadata)
     monkeypatch.setattr(requests, "Session", lambda: server)
     destination = tmp_path / "target"
-    result = CliRunner().invoke(hallmark, [
-        "init", str(destination), "--from", "https://example.test/data/",
-        "--with-download"], input=answer)
+    runner = CliRunner()
+    assert runner.invoke(hallmark, ["init", str(destination)]).exit_code == 0
+    monkeypatch.chdir(destination)
+    result = runner.invoke(hallmark, ["add", "https://example.test/data/"])
+    assert result.exit_code == 0, result.output
+    assert not (destination / "a.fits").exists()
+    result = runner.invoke(hallmark, ["download", "--all"], input=answer)
     assert "Download these files? [y/N]" in result.output
     assert Repo(destination).state.data["path"].tolist() == ["a.fits"]
     assert (destination / "a.fits").exists() == (answer == "y\n")

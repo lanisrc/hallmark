@@ -1,15 +1,16 @@
 Data backends
 =============
 
+
 A data backend discovers files and transfers them from a data source. It does
 not determine where the Hallmark catalog is hosted. The same catalog can be
 shared through GitHub, an HTTP server or SFTP while its backend accesses a
-separate data service or several servers.
+separate data service.
 
 Built-in backends and configuration
 -----------------------------------
 
-``hallmark.backends`` exposes the common ``DataBackend`` base and these
+``hallmark.remote.backends`` exposes the common ``DataBackend`` base and these
 implementations:
 
 * ``HttpBackend`` transfers HTTP(S) files and discovers supported HTML indexes.
@@ -23,17 +24,23 @@ selection takes precedence. For example:
 
 .. code-block:: bash
 
-   hallmark init ./observations --from 'https://data.example.org/export/' \
+   hm init ./observations
+   cd ./observations
+   hm add 'https://data.example.org/export/' \
        --backend http --filter '**/*.fits'
+   hm commit -m "Record remote catalog"
 
 For an installed plugin, pass its registered name and an optional YAML mapping:
 
 .. code-block:: bash
 
-   hallmark init ./survey --from 'https://survey.example.org/release/' \
+   hm init ./survey
+   cd ./survey
+   hm add 'https://survey.example.org/release/' \
        --backend survey --backend-options ./survey-options.yml
+   hm commit -m "Record remote catalog"
 
-``Repo.init(..., from_url=url, backend="survey", backend_options=options)``
+``repo.add(url, backend="survey", backend_options=options)``
 accepts the same settings in Python. The data remote stores ``backend`` and
 ``backend_options`` alongside its ``name``, ``url`` and optional ``auth``:
 
@@ -99,10 +106,10 @@ operation has been cancelled.
    * - ``close()``
      - Release connections and processes when the operation ends.
 
-``list_entries()`` is a convenience wrapper over ``iter_entries()``. Raise
+Raise
 ``CapabilityError`` when a backend cannot list or read metadata, and
 ``RemoteObjectMissing`` for an absent metadata object. These exceptions are
-available from ``hallmark.backends``. Do not disguise authentication failures
+available from ``hallmark.remote.backends``. Do not disguise authentication failures
 as missing objects.
 
 Discovery reads listings and published metadata only. It must not download
@@ -126,7 +133,7 @@ For example, an HTTP service can publish a small ``manifest.json`` array with
 
    import json
 
-   from hallmark.backends import HttpBackend, RemoteEntry
+   from hallmark.remote.backends import HttpBackend, RemoteEntry
 
 
    class SurveyBackend(HttpBackend):
@@ -146,7 +153,7 @@ For example, an HTTP service can publish a small ``manifest.json`` array with
            if on_directory is not None:
                on_directory("")
 
-Register the class for the current Python process before initialization or
+Register the class for the current Python process before remote discovery or
 transfer:
 
 .. code-block:: python
@@ -155,10 +162,12 @@ transfer:
    from my_survey.backend import SurveyBackend
 
    register_backend("survey", SurveyBackend)
-   repo = Repo.init(
-       "survey", from_url="https://survey.example.org/release/",
+   repo = Repo.init("survey")
+   repo.add(
+       "https://survey.example.org/release/",
        backend="survey",
    )
+   repo.commit("Record remote catalog")
 
 For CLI use and other collaborators, publish the class as an entry point in
 the plugin package's ``pyproject.toml``:
@@ -174,48 +183,3 @@ that do not subclass ``DataBackend`` are rejected. Register through one route
 per process. Repository configuration stores registered names, never arbitrary
 Python import paths. Old ``hallmark.transport`` imports remain supported as
 compatibility aliases.
-
-Mapping one catalog across servers
-----------------------------------
-
-The :download:`multiple-server backend example <../demo/multi_server_backend.py>`
-combines HTTP roots beneath logical prefixes. For example, the options file
-can contain:
-
-.. code-block:: yaml
-
-   routes:
-     north: https://north.example.org/export/
-     south: https://south.example.org/export/
-
-The catalog records ``north/run_001.fits`` and ``south/run_002.fits``. The
-backend maps those paths to their configured server roots and retains each
-server's available metadata. Download plans capture the complete routing map.
-These prefixes organize catalog paths; they do not require moving the data or
-placing ``.hm`` on either server.
-
-From the source checkout, register the demonstration backend explicitly:
-
-.. code-block:: python
-
-   from hallmark import Repo
-   from demo.multi_server_backend import register
-
-   register()
-   repo = Repo.init(
-       "combined",
-       from_url="https://north.example.org/export/",
-       backend="multi-server",
-       backend_options={"routes": {
-           "north": "https://north.example.org/export/",
-           "south": "https://south.example.org/export/",
-       }},
-   )
-   plan = repo.plan_download(filter="north/**/*.fits")
-   print(plan.summary())
-
-The example is tested with two disposable local HTTP servers. The URLs above
-are illustrative. Collaboration-specific adapters for DESI, LSST, Roman, JWST
-or Euclid can implement their own manifests, directory conventions or API
-routing through the same contract; those service-specific plugins are not
-included with Hallmark.

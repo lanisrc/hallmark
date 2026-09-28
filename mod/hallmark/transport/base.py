@@ -11,7 +11,7 @@ from types import MappingProxyType
 from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
 
 from ..error import HallmarkError
-from ..helper_functions import validate_relative_path
+from ..utils import validate_relative_path
 
 
 class DownloadError(HallmarkError):
@@ -34,7 +34,7 @@ class TransferCancelled(DownloadError):
     """Raised when a transfer is cancelled."""
 
 
-def backend_name(value):
+def validate_backend_name(value):
     """Validate a registered backend name, never an import path."""
     if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value):
         raise RemoteConfigurationError(
@@ -42,11 +42,11 @@ def backend_name(value):
     return value
 
 
-def freeze_backend_options(options=None):
+def readonly_backend_options(options=None):
     """Copy YAML-compatible options into a deeply immutable mapping."""
     active = set()
 
-    def freeze(value):
+    def make_readonly(value):
         if isinstance(value, (Mapping, list, tuple)):
             if id(value) in active:
                 raise RemoteConfigurationError("Backend options cannot contain cycles")
@@ -56,9 +56,9 @@ def freeze_backend_options(options=None):
                     if any(not isinstance(key, str) for key in value):
                         raise RemoteConfigurationError(
                             "Backend option keys must be strings")
-                    return MappingProxyType({key: freeze(item)
+                    return MappingProxyType({key: make_readonly(item)
                                              for key, item in value.items()})
-                return tuple(freeze(item) for item in value)
+                return tuple(make_readonly(item) for item in value)
             finally:
                 active.remove(id(value))
         if value is None or isinstance(value, (str, bool, int, float)):
@@ -70,22 +70,22 @@ def freeze_backend_options(options=None):
         options = {}
     if not isinstance(options, Mapping):
         raise RemoteConfigurationError("Backend options must be a mapping")
-    return freeze(options)
+    return make_readonly(options)
 
 
-def thaw_backend_options(options=None):
+def copy_backend_options(options=None):
     """Return an independent YAML-compatible copy of backend options."""
-    def thaw(value):
+    def copy_values(value):
         if isinstance(value, Mapping):
-            return {key: thaw(item) for key, item in value.items()}
+            return {key: copy_values(item) for key, item in value.items()}
         if isinstance(value, (list, tuple)):
-            return [thaw(item) for item in value]
+            return [copy_values(item) for item in value]
         return value
 
-    return thaw(freeze_backend_options(options))
+    return copy_values(readonly_backend_options(options))
 
 
-def reject_controls(value: str, label: str) -> None:
+def reject_control_characters(value: str, label: str) -> None:
     """Reject control characters and text that cannot be encoded as UTF-8."""
     try:
         value.encode("utf-8")
@@ -95,10 +95,10 @@ def reject_controls(value: str, label: str) -> None:
         raise RemoteConfigurationError(f"{label} contains control characters")
 
 
-def literal_path(value) -> Path:
+def validate_remote_path(value) -> Path:
     """Validate a literal catalog path without decoding or trimming it."""
     raw = str(value)
-    reject_controls(raw, "Remote path")
+    reject_control_characters(raw, "Remote path")
     if not raw.strip():
         raise RemoteConfigurationError("Remote path cannot be empty")
     try:
@@ -107,14 +107,14 @@ def literal_path(value) -> Path:
         raise RemoteConfigurationError(str(exc)) from None
 
 
-def profile_name(value: str) -> str:
+def validate_profile_name(value: str) -> str:
     """Validate and return a local authentication profile name."""
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
         raise RemoteConfigurationError("Auth profile must match [A-Za-z0-9_-]{1,64}")
     return value
 
 
-def ssh_host(value: str) -> str:
+def validate_ssh_host(value: str) -> str:
     # Aliases are not necessarily DNS names. Limit expansion tokens to characters
     # that cannot become shell syntax in a user's ProxyCommand/Match configuration.
     """Validate an SSH hostname, configuration alias, or IPv6 address."""
@@ -130,7 +130,7 @@ def ssh_host(value: str) -> str:
     return value
 
 
-def ssh_user(value: str) -> str:
+def validate_ssh_user(value: str) -> str:
     """Validate and return an SSH username."""
     if not isinstance(value, str) or not re.fullmatch(
         r"[A-Za-z0-9_][A-Za-z0-9_.-]*", value
@@ -199,12 +199,12 @@ class RemoteSpec:
             if selected == "http" and (self.host == "cyverse.org"
                                       or self.host.endswith(".cyverse.org")):
                 selected = "cyverse"
-        object.__setattr__(self, "backend", backend_name(selected))
+        object.__setattr__(self, "backend", validate_backend_name(selected))
         object.__setattr__(self, "backend_options",
-                           freeze_backend_options(self.backend_options))
+                           readonly_backend_options(self.backend_options))
 
     @classmethod
-    def parse(cls, url: str, auth: str | None = None, *,
+    def from_url(cls, url: str, auth: str | None = None, *,
               backend=None, backend_options=None) -> RemoteSpec:
         """
         Parse and validate a data-remote URL.
@@ -224,10 +224,10 @@ class RemoteSpec:
         """
         if not isinstance(url, str) or not url.strip():
             raise RemoteConfigurationError("Remote URL must be a non-empty string")
-        reject_controls(url, "Remote URL")
+        reject_control_characters(url, "Remote URL")
         url = url.strip()
         if auth is not None:
-            profile_name(auth)
+            validate_profile_name(auth)
         try:
             parsed = urlsplit(url)
             host, port = parsed.hostname, parsed.port
@@ -242,7 +242,7 @@ class RemoteSpec:
         if not host or port == 0 or parsed.netloc.endswith(":"):
             raise RemoteConfigurationError("Invalid remote URL host or port")
         if scheme in {"ssh", "sftp"}:
-            ssh_host(host)
+            validate_ssh_host(host)
             if parsed.password is not None:
                 raise RemoteConfigurationError("SSH URLs cannot contain passwords")
             if "?" in url or "#" in url:
@@ -255,13 +255,13 @@ class RemoteSpec:
             try:
                 root = unquote(parsed.path, errors="strict")
                 user = (
-                    ssh_user(unquote(parsed.username, errors="strict"))
+                    validate_ssh_user(unquote(parsed.username, errors="strict"))
                     if parsed.username is not None
                     else None
                 )
             except UnicodeError:
                 raise RemoteConfigurationError("SSH URL must encode UTF-8") from None
-            reject_controls(root, "SSH root")
+            reject_control_characters(root, "SSH root")
             if (
                 not root.startswith("/")
                 or root.startswith("//")
@@ -281,13 +281,15 @@ class RemoteSpec:
         return cls(url, scheme, host, root, user, port, auth,
                    backend, backend_options)
 
-    def pathname(self, relative_path: str) -> str:
+    def file_path(self, relative_path: str) -> str:
         """Append a literal relative path to the dataset root."""
-        return self.root.rstrip("/") + "/" + literal_path(relative_path).as_posix()
+        return (
+            self.root.rstrip("/") + "/" + validate_remote_path(relative_path).as_posix()
+        )
 
     def file_url(self, relative_path: str) -> str:
         """Encode a literal catalog path as a URL beneath the dataset root."""
-        path = literal_path(relative_path).as_posix() if relative_path else ""
+        path = validate_remote_path(relative_path).as_posix() if relative_path else ""
         if relative_path.endswith("/") and path:
             path += "/"
         if self.scheme in {"http", "https"}:
@@ -337,10 +339,6 @@ class DataBackend:
         """
         raise NotImplementedError
 
-    def list_entries(self):
-        """Return the relative paths from a recursive directory listing."""
-        return [entry.path for entry in self.iter_entries()]
-
     def iter_entries(self, on_directory=None):
         """
         Yield file metadata from a recursive directory listing.
@@ -377,7 +375,3 @@ class DataBackend:
     def cancel(self):
         """Stop active backend work after the context's cancellation is set."""
         pass
-
-
-# Existing transport imports remain valid for downstream integrations.
-Transport = DataBackend
