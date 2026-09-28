@@ -17,7 +17,12 @@ from ..utils import (
     validate_path_name, validate_relative_path)
 
 from ..transport.base import (
-    RemoteSpec, backend_name, profile_name, reject_controls, thaw_backend_options)
+    RemoteSpec,
+    validate_backend_name,
+    validate_profile_name,
+    reject_control_characters,
+    copy_backend_options,
+)
 
 
 def _update_remote_config(
@@ -98,13 +103,13 @@ def _update_remote_config(
     if remote_auth == "":
         selected.pop("auth", None)
     elif remote_auth is not None:
-        selected["auth"] = profile_name(remote_auth)
+        selected["auth"] = validate_profile_name(remote_auth)
     if remote_backend == "":
         selected.pop("backend", None)
     elif remote_backend is not None:
-        selected["backend"] = backend_name(remote_backend)
+        selected["backend"] = validate_backend_name(remote_backend)
     if remote_backend_options is not None:
-        selected["backend_options"] = thaw_backend_options(
+        selected["backend_options"] = copy_backend_options(
             remote_backend_options)
     # normalize the remotes configuration to ensure it is a list of dictionaries
     normalized = normalize_remotes(remotes)
@@ -186,16 +191,16 @@ def normalize_remotes(remotes) -> list[dict]:
                 "Remote entries support only name, url, auth, backend and "
                 "backend_options fields")
         if "auth" in entry:
-            profile_name(entry["auth"])
+            validate_profile_name(entry["auth"])
         if "backend" in entry:
-            entry["backend"] = backend_name(entry["backend"])
+            entry["backend"] = validate_backend_name(entry["backend"])
         if "backend_options" in entry:
-            entry["backend_options"] = thaw_backend_options(
+            entry["backend_options"] = copy_backend_options(
                 entry["backend_options"])
         if isinstance(entry.get("url"), str):
-            reject_controls(entry["url"], "Remote URL")
+            reject_control_characters(entry["url"], "Remote URL")
             # allow names without URLs while configuring a data remote
-            RemoteSpec.parse(
+            RemoteSpec.from_url(
                 entry["url"], entry.get("auth"), backend=entry.get("backend"),
                 backend_options=entry.get("backend_options"))
         # for each required key ("name" and "url"), validate that it exists
@@ -426,10 +431,10 @@ def set_config(
     # if a new remote URL is provided, validate that it is a non-empty string
     if remote_url is not None:
         if isinstance(remote_url, str):
-            reject_controls(remote_url, "Remote URL")
+            reject_control_characters(remote_url, "Remote URL")
         remote_url = require_nonempty_string(remote_url, label="remote_url")
     if remote_auth not in (None, ""):
-        profile_name(remote_auth)
+        validate_profile_name(remote_auth)
 
     # if a new format string or encoding updates are provided
     if fmt is not None or encoding_updates is not None:

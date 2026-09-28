@@ -21,13 +21,13 @@ from hallmark.remote.download import _download_file, download_remote_data
 from hallmark.repo_builder import _manifest_matches, build_repo
 from hallmark.repo.config import normalize_remotes
 from hallmark.transport import OperationContext, RemoteSpec
-from hallmark.transport.auth import resolve_settings
+from hallmark.transport.auth import resolve_ssh_settings
 from hallmark.transport.base import (
     CapabilityError,
     DownloadError,
     RemoteConfigurationError,
     TransferCancelled,
-    literal_path,
+    validate_remote_path,
 )
 from hallmark.transport.ssh import SshTransport, batch_argument
 
@@ -52,10 +52,10 @@ def isolated_auth(monkeypatch, tmp_path):
     ],
 )
 def test_literal_url_round_trip(scheme, name):
-    remote = RemoteSpec.parse(f"{scheme}://user@campus:2222/srv/a%20b/")
+    remote = RemoteSpec.from_url(f"{scheme}://user@campus:2222/srv/a%20b/")
     url = remote.file_url(name)
-    assert RemoteSpec.parse(url).root == "/srv/a b/" + name
-    assert remote.pathname(name) == "/srv/a b/" + name
+    assert RemoteSpec.from_url(url).root == "/srv/a b/" + name
+    assert remote.file_path(name) == "/srv/a b/" + name
     assert quote(name, safe="/") in url
 
 
@@ -89,19 +89,19 @@ def test_literal_url_round_trip(scheme, name):
 )
 def test_bad_remote_fails_without_echoing_secrets(url):
     with pytest.raises(RemoteConfigurationError) as error:
-        RemoteSpec.parse(url)
+        RemoteSpec.from_url(url)
     assert "secret" not in str(error.value)
 
 
 @pytest.mark.parametrize("host", ["campus_alias", "a.b-c", "[::1]", "[2001:db8::1]"])
 def test_hosts_and_aliases(host):
-    assert RemoteSpec.parse(f"ssh://{host}/").host == host.strip("[]")
+    assert RemoteSpec.from_url(f"ssh://{host}/").host == host.strip("[]")
 
 
 @pytest.mark.parametrize("path", ["bad\nget /secret /tmp/leak", "a\tb", "a\rb", "a\0b"])
 def test_controls_rejected_at_all_path_boundaries(path, tmp_path):
     with pytest.raises(RemoteConfigurationError):
-        literal_path(path)
+        validate_remote_path(path)
     with pytest.raises(RemoteConfigurationError):
         batch_argument("/" + path)
     with pytest.raises(RemoteConfigurationError):
@@ -138,15 +138,15 @@ def test_profile_precedence_binding_and_isolation(monkeypatch, tmp_path):
         },
         {"transfer_timeout": 77},
     )
-    first = resolve_settings(RemoteSpec.parse("ssh://carol@campus:2222/data", "one"))
-    second = resolve_settings(RemoteSpec.parse("sftp://campus/data", "two"))
+    first = resolve_ssh_settings(RemoteSpec.from_url("ssh://carol@campus:2222/data", "one"))
+    second = resolve_ssh_settings(RemoteSpec.from_url("sftp://campus/data", "two"))
     assert (first.user, first.port, first.transfer_timeout) == ("carol", 2222, 77)
     assert (second.user, second.port) == ("bob", 2201)
     assert first.identity_file != second.identity_file
     with pytest.raises(RemoteConfigurationError, match="not bound"):
-        resolve_settings(RemoteSpec.parse("ssh://other/data", "one"))
+        resolve_ssh_settings(RemoteSpec.from_url("ssh://other/data", "one"))
     with pytest.raises(RemoteConfigurationError, match="Unresolved"):
-        resolve_settings(RemoteSpec.parse("ssh://campus/data", "missing"))
+        resolve_ssh_settings(RemoteSpec.from_url("ssh://campus/data", "missing"))
 
 
 @pytest.mark.parametrize(
@@ -164,7 +164,7 @@ def test_profile_precedence_binding_and_isolation(monkeypatch, tmp_path):
 def test_invalid_profiles_fail_preflight(monkeypatch, tmp_path, profile):
     write_auth(monkeypatch, tmp_path, {"campus": profile})
     with pytest.raises(RemoteConfigurationError):
-        OperationContext(RemoteSpec.parse("ssh://campus/data", "campus"))
+        OperationContext(RemoteSpec.from_url("ssh://campus/data", "campus"))
 
 
 def test_profile_xdg_and_removal(monkeypatch, tmp_path):
@@ -174,7 +174,7 @@ def test_profile_xdg_and_removal(monkeypatch, tmp_path):
         "version: 1\nprofiles:\n  lab:\n    hosts: [campus]\n    user: alice\n"
     )
     assert (
-        resolve_settings(RemoteSpec.parse("ssh://campus/data", "lab")).user == "alice"
+        resolve_ssh_settings(RemoteSpec.from_url("ssh://campus/data", "lab")).user == "alice"
     )
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url="ssh://campus/data", remote_auth="lab")
@@ -203,7 +203,7 @@ def test_netrc_is_preserved(monkeypatch, tmp_path):
     netrc = tmp_path / "netrc"
     netrc.write_text("machine example.test login scientist password test-value\n")
     monkeypatch.setenv("NETRC", str(netrc))
-    with OperationContext(RemoteSpec.parse("https://example.test/data")) as context:
+    with OperationContext(RemoteSpec.from_url("https://example.test/data")) as context:
         prepared = context.session().prepare_request(
             requests.Request("GET", "https://example.test/data/file")
         )
@@ -234,7 +234,7 @@ def test_http_error_redacts_exception_and_cause(monkeypatch, tmp_path):
 def test_metadata_redirect_never_requests_outside_root(monkeypatch, location):
     calls = []
     closed = []
-    with OperationContext(RemoteSpec.parse("https://example.test/data/")) as context:
+    with OperationContext(RemoteSpec.from_url("https://example.test/data/")) as context:
         response = requests.Response()
         response.status_code = 302
         response.headers["Location"] = location
@@ -254,7 +254,7 @@ def test_metadata_redirect_never_requests_outside_root(monkeypatch, location):
 
 def test_metadata_redirect_within_root_and_default_port_is_supported(monkeypatch):
     calls = []
-    with OperationContext(RemoteSpec.parse("https://example.test/data/")) as context:
+    with OperationContext(RemoteSpec.from_url("https://example.test/data/")) as context:
         first = requests.Response()
         first.status_code = 301
         first.headers["Location"] = "https://example.test:443/data/listing/"
@@ -280,7 +280,7 @@ def test_metadata_redirect_within_root_and_default_port_is_supported(monkeypatch
 
 def test_metadata_redirect_loop_is_bounded(monkeypatch):
     calls = []
-    with OperationContext(RemoteSpec.parse("https://example.test/data/")) as context:
+    with OperationContext(RemoteSpec.from_url("https://example.test/data/")) as context:
         response = requests.Response()
         response.status_code = 307
         response.headers["Location"] = "/data/"
@@ -397,7 +397,7 @@ else:
     "mode, message", [("fail", "SSH operation failed"), ("flood", "size limit")]
 )
 def test_bounded_process_errors(fake_process, mode, message):
-    with OperationContext(RemoteSpec.parse("ssh://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         transport = context.transport
         with pytest.raises(DownloadError, match=message) as error:
             transport._run(fake_process + [mode], timeout=5)
@@ -406,7 +406,7 @@ def test_bounded_process_errors(fake_process, mode, message):
 
 
 def test_process_start_failure():
-    with OperationContext(RemoteSpec.parse("ssh://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         with pytest.raises(DownloadError, match="Unable to start"):
             context.transport._run(["/nonexistent/hallmark-test"], timeout=1)
 
@@ -415,7 +415,7 @@ def test_process_start_failure():
 def test_cleanup_exited_process_group_permission_error(
     monkeypatch, reaping_in_progress
 ):
-    with OperationContext(RemoteSpec.parse("ssh://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         transport = context.transport
         process = transport._spawn([sys.executable, "-c", "pass"])
         process.wait(timeout=5)
@@ -440,7 +440,7 @@ def test_cleanup_exited_process_group_permission_error(
 
 
 def test_cleanup_live_process_permission_error_is_not_suppressed(monkeypatch):
-    with OperationContext(RemoteSpec.parse("ssh://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         transport = context.transport
         process = transport._spawn(
             [sys.executable, "-c", "import time; time.sleep(60)"]
@@ -462,7 +462,7 @@ def test_cleanup_live_process_permission_error_is_not_suppressed(monkeypatch):
 
 def test_cancel_active_process_group(fake_process, tmp_path):
     pids = tmp_path / "pids"
-    with OperationContext(RemoteSpec.parse("ssh://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         context.settings = replace(context.settings, shutdown_timeout=1)
         with ThreadPoolExecutor(1) as pool:
             future = pool.submit(
@@ -639,11 +639,11 @@ def test_http_manifest_auth_failure_is_not_optional(monkeypatch):
 )
 def test_reject_scoped_ipv6_and_invalid_unicode(url):
     with pytest.raises(RemoteConfigurationError):
-        RemoteSpec.parse(url)
+        RemoteSpec.from_url(url)
 
 
 def test_minimum_openssh_is_checked_before_connection(monkeypatch):
-    with OperationContext(RemoteSpec.parse("ssh://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         monkeypatch.setattr("hallmark.transport.ssh.shutil.which", lambda name: name)
         monkeypatch.setattr(
             context.transport, "_run", lambda *a, **kw: b"OpenSSH_9.5p1"
@@ -657,7 +657,7 @@ def test_minimum_openssh_is_checked_before_connection(monkeypatch):
 def test_short_socket_ignores_long_tempdir(monkeypatch, tmp_path):
     # Long macOS TMPDIR/worktree paths can exceed AF_UNIX limits.
     monkeypatch.setenv("TMPDIR", str(tmp_path / ("long" * 35)))
-    with OperationContext(RemoteSpec.parse("ssh://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         monkeypatch.setattr(
             context.transport, "_run", lambda *a, **kw: b"OpenSSH_9.6p1"
         )

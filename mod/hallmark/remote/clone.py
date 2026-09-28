@@ -18,8 +18,8 @@ from ..error import CloneError, DestinationExistsError
 from ..utils import as_list_of_dicts
 from ..repo.config import filename_fields, normalize_remotes, validate_tsv_filename, row_to_path
 from ..transport import OperationContext, RemoteSpec
-from ..transport.base import (RemoteObjectMissing, literal_path,
-                             thaw_backend_options)
+from ..transport.base import (RemoteObjectMissing, validate_remote_path,
+                             copy_backend_options)
 from ..repo.worktree import Worktree
 
 
@@ -33,7 +33,7 @@ def _catalog_names(config):
         if entry.get("db"):
             names.add(validate_tsv_filename(entry["db"]))
         if entry.get("file"):
-            literal_path(entry["file"])
+            validate_remote_path(entry["file"])
     normalize_remotes(config.get("remote"))
     return sorted(names)
 
@@ -49,7 +49,7 @@ def _row_path(row, formats):
     """Resolve a catalog row to one literal relative path."""
     value = row.get("path")
     if value is not None and not pd.isna(value) and str(value):
-        return literal_path(str(value)).as_posix()
+        return validate_remote_path(str(value)).as_posix()
     paths = []
     for template in formats:
         try:
@@ -149,7 +149,7 @@ def _write_inventory(repo, source, entries, fmt):
     if source.backend:
         remote["backend"] = source.backend
     if source.backend_options:
-        remote["backend_options"] = thaw_backend_options(source.backend_options)
+        remote["backend_options"] = copy_backend_options(source.backend_options)
     repo.dothm.write_yaml({"data": [data_spec], "remote": [remote]}, "config")
     repo.dothm.write_yaml({"source": source.url}, "meta")
     repo.dothm.write_tsv(frame, "data", na_rep="")
@@ -170,7 +170,7 @@ def initialize_remote(cls, path, url, *, backend=None, backend_options=None,
     if destination.exists() and not destination.is_dir():
         raise NotADirectoryError(f"Destination is not a directory: {path}")
     path_matches("validation", filter=filter, fmt=fmt)
-    source = RemoteSpec.parse(str(url), auth, backend=backend,
+    source = RemoteSpec.from_url(str(url), auth, backend=backend,
                               backend_options=backend_options)
     # Claim only the metadata directory. On failure, existing dataset files stay put.
     missing_parents = []
@@ -282,11 +282,11 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
     try:
         if is_git:
             return _clone_git(cls, url, destination, path, auth)
-        source = RemoteSpec.parse(url, auth)
+        source = RemoteSpec.from_url(url, auth)
         with OperationContext(source) as context:
             snapshot = _snapshot(context)
         if snapshot is None and not source.root.rstrip("/").endswith(".hm"):
-            nested = RemoteSpec.parse(url.rstrip("/") + "/.hm/", auth)
+            nested = RemoteSpec.from_url(url.rstrip("/") + "/.hm/", auth)
             with OperationContext(nested) as context:
                 snapshot = _snapshot(context)
         if snapshot is None:

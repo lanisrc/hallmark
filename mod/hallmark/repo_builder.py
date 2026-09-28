@@ -16,7 +16,7 @@ import parse
 from .repo import Repo
 from .transport import OperationContext, RemoteSpec
 from .transport.base import (
-    CapabilityError, DownloadError, reject_controls, thaw_backend_options)
+    CapabilityError, DownloadError, reject_control_characters, copy_backend_options)
 from .fmt_detection import (
     KNOWN_PROCESSING_STAGES,
     KNOWN_STATIC_FILE_STEMS)
@@ -55,7 +55,7 @@ KNOWN_FIELD_VALUES: dict[str, tuple[str, ...]] = {
 
 def _remote_url(base_url: str, relative_path: str) -> str:
     """Construct a remote URL, preserving literal paths and directory slashes."""
-    url = RemoteSpec.parse(base_url).file_url(relative_path)
+    url = RemoteSpec.from_url(base_url).file_url(relative_path)
     if relative_path.endswith("/") and not url.endswith("/"):
         url += "/"
     return url
@@ -535,7 +535,7 @@ def _resolve_manifest_path(filename: str, rel_dir: str) -> str:
     """
     # strip whitespace from the filename to avoid issues with leading/trailing spaces
     filename = str(filename)
-    reject_controls(filename, "Manifest path")
+    reject_control_characters(filename, "Manifest path")
 
     # remove leading "./" from the filename to normalize the path
     while filename.startswith("./"):
@@ -591,7 +591,7 @@ def _normalize_index_href(href: str, *, is_directory: bool) -> str:
         ValueError: If the href is not a valid relative path.
     """
     # use urlsplit to check for scheme, netloc, query, and fragment
-    reject_controls(str(href), "Index href")
+    reject_control_characters(str(href), "Index href")
     parsed = urlsplit(str(href))
 
     # if any components are present, raise a ValueError as the href must be relative
@@ -605,7 +605,7 @@ def _normalize_index_href(href: str, *, is_directory: bool) -> str:
 
     # use unquote to decode any percent-encoded characters in the path
     decoded_path = unquote(parsed.path)
-    reject_controls(decoded_path, "Index path")
+    reject_control_characters(decoded_path, "Index path")
     # if the path is a directory, remove any trailing slashes; otherwise, keep it as-is
     candidate = (decoded_path.rstrip("/") if is_directory else decoded_path)
     # validate the candidate path to ensure it is a valid relative path
@@ -702,7 +702,7 @@ def list_remote_files(base_url: str, *, _context=None):
                 for entry in discover(context)}
 
     if _context is None:
-        with OperationContext(RemoteSpec.parse(base_url)) as context:
+        with OperationContext(RemoteSpec.from_url(base_url)) as context:
             return inventory(context)
     return inventory(_context)
 
@@ -780,7 +780,7 @@ def build_repo(
     dataset_name = validate_path_name(dataset_name, label="dataset name")
     base_url = (dataset_url if dataset_url is not None else
                 _remote_url(_CYVERSE_CURATED_BASE, f"{dataset_name}/"))
-    source = RemoteSpec.parse(
+    source = RemoteSpec.from_url(
         base_url, dataset_auth, backend=backend, backend_options=backend_options)
     with OperationContext(source) as context:
         return _build_repo(repo_path, dataset_name, fmt_entries, config_file,
@@ -1060,17 +1060,17 @@ def _build_repo(
         if source.remote.auth is not None:
             remotes[0]["auth"] = source.remote.auth
         if source.remote.backend_options:
-            remotes[0]["backend_options"] = thaw_backend_options(
+            remotes[0]["backend_options"] = copy_backend_options(
                 source.remote.backend_options)
     # create the final remotes list by adding the base_url to each remote entry
     final_remotes = [{"url": base_url, **remote} for remote in remotes]
-    default_backend = RemoteSpec.parse(base_url, source.remote.auth).backend
+    default_backend = RemoteSpec.from_url(base_url, source.remote.auth).backend
     for remote in final_remotes:
         if remote["url"] == base_url:
             if source.remote.backend != default_backend:
                 remote.setdefault("backend", source.remote.backend)
             if source.remote.backend_options:
-                remote.setdefault("backend_options", thaw_backend_options(
+                remote.setdefault("backend_options", copy_backend_options(
                     source.remote.backend_options))
     repo.state.config["remote"] = final_remotes
 

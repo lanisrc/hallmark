@@ -28,7 +28,7 @@ def local_sftp(tmp_path, monkeypatch):
         pytest.skip("Local OpenSSH SFTP subsystem binary is unavailable")
     root = tmp_path / "source"
     root.mkdir()
-    with OperationContext(RemoteSpec.parse(f"sftp://unused{root}/")) as context:
+    with OperationContext(RemoteSpec.from_url(f"sftp://unused{root}/")) as context:
         transport = context.transport
         monkeypatch.setattr(transport, "prepare", lambda: None)
         spawn = transport._spawn
@@ -132,7 +132,7 @@ def _fake_subsystem(monkeypatch, context, script):
     (struct.pack(">IBI", 5, 2, 4), "version 3"),
 ])
 def test_bad_handshake_is_bounded_and_cleans_process(monkeypatch, payload, message):
-    with OperationContext(RemoteSpec.parse("sftp://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("sftp://unused/data")) as context:
         _fake_subsystem(
             monkeypatch, context,
             "import os; os.read(0, 9); os.write(1, " + repr(payload) + ")",
@@ -144,7 +144,7 @@ def test_bad_handshake_is_bounded_and_cleans_process(monkeypatch, payload, messa
 
 
 def test_metadata_timeout_is_per_request_and_cancellable(monkeypatch):
-    with OperationContext(RemoteSpec.parse("sftp://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("sftp://unused/data")) as context:
         _fake_subsystem(monkeypatch, context, "import time; time.sleep(30)")
         context.listing_timeout = 0.1
         with pytest.raises(DownloadError, match="time limit"):
@@ -194,7 +194,7 @@ def test_missing_type_uses_lstat_and_cannot_escape_root(monkeypatch):
             else:
                 yield "file", {"size": None, "mode": None, "mtime": None}
 
-    with OperationContext(RemoteSpec.parse("sftp://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("sftp://unused/data")) as context:
         session = Session()
         monkeypatch.setattr(
             context.transport, "_metadata", lambda: nullcontext(session),
@@ -223,7 +223,7 @@ source.read(length)
 payload = """ + repr(response) + """
 output.write(struct.pack('>I', len(payload)) + payload); output.flush()
 """
-    with OperationContext(RemoteSpec.parse("sftp://unused/data")) as context:
+    with OperationContext(RemoteSpec.from_url("sftp://unused/data")) as context:
         _fake_subsystem(monkeypatch, context, script)
         with pytest.raises(DownloadError, match=message):
             with context.transport._metadata() as session:

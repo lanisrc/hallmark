@@ -14,7 +14,7 @@ from hallmark.transport.base import (
 class Source:
     """Serve directory listings and record requests for discovery tests."""
     def __init__(self, pages, url="https://data.test/public/"):
-        self.remote = RemoteSpec.parse(url)
+        self.remote = RemoteSpec.from_url(url)
         self.pages = pages
         self.reads = []
         if self.remote.scheme in {"http", "https"}:

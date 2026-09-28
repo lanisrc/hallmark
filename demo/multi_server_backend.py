@@ -14,7 +14,7 @@ from hallmark.remote.backends import (
     DataBackend, OperationContext, RemoteConfigurationError,
     RemoteObjectMissing, RemoteSpec, register_backend,
 )
-from hallmark.transport.base import literal_path
+from hallmark.transport.base import validate_remote_path
 
 
 class MultiServerBackend(DataBackend):
@@ -32,9 +32,9 @@ class MultiServerBackend(DataBackend):
             raise RemoteConfigurationError("Multi-server options require routes")
         specs = {}
         for prefix, url in routes.items():
-            if literal_path(prefix).as_posix() != prefix or "/" in prefix:
+            if validate_remote_path(prefix).as_posix() != prefix or "/" in prefix:
                 raise RemoteConfigurationError("Route names must be one path segment")
-            spec = RemoteSpec.parse(url, backend="http")
+            spec = RemoteSpec.from_url(url, backend="http")
             if spec.scheme not in {"http", "https"}:
                 raise RemoteConfigurationError("Example routes require HTTP(S) URLs")
             specs[prefix] = spec
@@ -51,7 +51,7 @@ class MultiServerBackend(DataBackend):
             raise
 
     def _route(self, relative_path):
-        path = literal_path(relative_path).as_posix()
+        path = validate_remote_path(relative_path).as_posix()
         prefix, separator, suffix = path.partition("/")
         if not separator or prefix not in self._children:
             raise RemoteObjectMissing("No route for this logical dataset path")

@@ -144,7 +144,7 @@ def test_parallel_exact_files_and_master_cleanup(ssh_server, tmp_path, scheme):
         path.parent.mkdir(exist_ok=True)
         path.write_text(name)
     url = ssh_server["url"].replace("ssh:", scheme + ":")
-    with OperationContext(RemoteSpec.parse(url)) as context:
+    with OperationContext(RemoteSpec.from_url(url)) as context:
         transport = context.transport
         transport.prepare()
         master = transport._master
@@ -196,7 +196,7 @@ def test_host_trust_and_auth_fail_preflight(ssh_server, tmp_path, trust):
         # Both keys are ephemeral; the replacement is not authorized on the server.
         config = server["config"].read_text().replace("/client\n", "/untrusted\n")
         server["config"].write_text(config)
-    with OperationContext(RemoteSpec.parse(server["url"])) as context:
+    with OperationContext(RemoteSpec.from_url(server["url"])) as context:
         with pytest.raises(DownloadError, match="Cannot establish"):
             context.transport.prepare()
         assert not context.transport._processes
@@ -222,8 +222,8 @@ def test_simultaneous_profiles_have_separate_masters(ssh_server, monkeypatch):
         )
     )
     monkeypatch.setenv("HALLMARK_AUTH_FILE", str(auth))
-    with OperationContext(RemoteSpec.parse(server["url"], "one")) as one:
-        with OperationContext(RemoteSpec.parse(server["url"], "two")) as two:
+    with OperationContext(RemoteSpec.from_url(server["url"], "one")) as one:
+        with OperationContext(RemoteSpec.from_url(server["url"], "two")) as two:
             with ThreadPoolExecutor(2) as pool:
                 list(pool.map(lambda context: context.transport.prepare(), [one, two]))
             assert one.transport._socket != two.transport._socket
@@ -325,9 +325,9 @@ def test_real_cancel_transfer_and_preserve_other_master(ssh_server, tmp_path):
     server = ssh_server
     payload = b"x" * 128 * 1024
     (server["root"] / "large").write_bytes(payload)
-    with OperationContext(RemoteSpec.parse(server["url"])) as survivor:
+    with OperationContext(RemoteSpec.from_url(server["url"])) as survivor:
         survivor.transport.prepare()
-        with OperationContext(RemoteSpec.parse(server["url"])) as context:
+        with OperationContext(RemoteSpec.from_url(server["url"])) as context:
             context.settings = replace(
                 context.settings, shutdown_timeout=1, transfer_timeout=15
             )
@@ -365,7 +365,7 @@ def test_sftp_only_discovers_metadata_and_fetches(ssh_server, tmp_path):
     (root / "nested").mkdir()
     name = "nested/a b#?%+ü'\"[*].fits"
     (root / name).write_bytes(b"science")
-    with OperationContext(RemoteSpec.parse(ssh_server["url"])) as context:
+    with OperationContext(RemoteSpec.from_url(ssh_server["url"])) as context:
         directories = []
         entries = list(context.transport.iter_entries(on_directory=directories.append))
         assert {entry.path: entry.size for entry in entries} == {"item": 4, name: 7}
@@ -430,7 +430,7 @@ def test_sftp_only_init_plans_then_requires_payload_approval(
 @pytest.mark.parametrize("ssh_server", ["no-sftp"], indirect=True)
 def test_disabled_subsystem_fails(ssh_server, tmp_path):
     (ssh_server["root"] / "item").write_bytes(b"data")
-    with OperationContext(RemoteSpec.parse(ssh_server["url"])) as context:
+    with OperationContext(RemoteSpec.from_url(ssh_server["url"])) as context:
         with pytest.raises(DownloadError):
             context.transport.fetch("item", tmp_path / "copy")
         assert not (tmp_path / "copy").exists()
@@ -486,10 +486,10 @@ def test_ssh_listing_omits_symlinks_and_rejects_controls(ssh_server, tmp_path):
     root = ssh_server["root"]
     (root / "item").write_bytes(b"data")
     (root / "link").symlink_to(root / "item")
-    with OperationContext(RemoteSpec.parse(ssh_server["url"])) as context:
+    with OperationContext(RemoteSpec.from_url(ssh_server["url"])) as context:
         assert context.transport.list_entries() == ["item"]
     (root / "bad\nname").write_bytes(b"data")
-    with OperationContext(RemoteSpec.parse(ssh_server["url"])) as context:
+    with OperationContext(RemoteSpec.from_url(ssh_server["url"])) as context:
         with pytest.raises(DownloadError, match="control"):
             context.transport.list_entries()
 

@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from ..utils import CHECKSUM_ALGORITHMS_BY_STRENGTH, is_valid_checksum
 from ..transport.base import (
-    DownloadError, RemoteEntry, RemoteObjectMissing, literal_path,
+    DownloadError, RemoteEntry, RemoteObjectMissing, validate_remote_path,
 )
 
 
@@ -107,7 +107,7 @@ def _manifest_checksums(context, entries):
                 continue
             while filename.startswith("./"):
                 filename = filename[2:]
-            filename = literal_path(filename).as_posix()
+            filename = validate_remote_path(filename).as_posix()
             candidates = [(parent / filename).as_posix(), filename]
             if parent.name == PurePosixPath(filename).parts[0]:
                 candidates.append((parent.parent / filename).as_posix())
@@ -170,7 +170,7 @@ def discover(context, *, filter=None, fmt=None, progress=False) -> list[RemoteEn
             bar.set_postfix(files=counts["files"], matched=counts["matched"])
 
     def add(entry):
-        path = literal_path(entry.path).as_posix()
+        path = validate_remote_path(entry.path).as_posix()
         if path not in entries:
             entries[path] = entry
             counts["files"] += 1

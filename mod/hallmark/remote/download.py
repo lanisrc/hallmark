@@ -14,7 +14,7 @@ import requests
 import pandas as pd
 
 from ..transport import OperationContext, RemoteSpec
-from ..transport.base import DownloadError, literal_path
+from ..transport.base import DownloadError, validate_remote_path
 from .plan import DownloadItem, DownloadPlan
 from ..utils import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
@@ -346,7 +346,7 @@ def _safe_remote_path(value: Union[str, Path]) -> Path:
     Raises:
         DownloadError: If the path is unsafe.
     """
-    return literal_path(value)
+    return validate_remote_path(value)
 
 
 def _remote_file_url(remote_url: str, relative_path: Path) -> str:
@@ -360,7 +360,7 @@ def _remote_file_url(remote_url: str, relative_path: Path) -> str:
     Returns:
         str: URL with the relative path encoded for the transport.
     """
-    return RemoteSpec.parse(remote_url).file_url(relative_path.as_posix())
+    return RemoteSpec.from_url(remote_url).file_url(relative_path.as_posix())
 
 
 def _download_tsv_name(value) -> str:
@@ -598,11 +598,11 @@ def _download_file(
     """
     chunk_size = _require_positive_integer(chunk_size, label="chunk_size")
     _validate_checksum_spec(expected_checksum)
-    RemoteSpec.parse(url)
+    RemoteSpec.from_url(url)
     parsed = urlsplit(url)
     base = urlunsplit(parsed._replace(path=parsed.path.rsplit("/", 1)[0] + "/"))
-    remote = RemoteSpec.parse(base)
-    relative = literal_path(unquote(parsed.path.rsplit("/", 1)[-1]))
+    remote = RemoteSpec.from_url(base)
+    relative = validate_remote_path(unquote(parsed.path.rsplit("/", 1)[-1]))
     destination = Path(destination).absolute()
     # Direct callers may intentionally choose a different local filename.
     with OperationContext(remote, destination.parent) as context:
@@ -900,7 +900,7 @@ def plan_download(
     remote = remote or {}
     source = None
     if remote.get("url"):
-        source = RemoteSpec.parse(
+        source = RemoteSpec.from_url(
             remote["url"], remote.get("auth"), backend=remote.get("backend"),
             backend_options=remote.get("backend_options"))
     for item in items:
@@ -954,7 +954,7 @@ def execute_download_plan(
         return {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
     if plan.output_path.resolve() != plan.output_path:
         raise DownloadError("Download destination changed since planning")
-    remote = RemoteSpec.parse(
+    remote = RemoteSpec.from_url(
         plan.remote_url, plan.remote_auth, backend=plan.remote_backend,
         backend_options=plan.backend_options)
     return _download_selected(
@@ -1027,7 +1027,7 @@ def download_remote_data(
     # if the remote URL is not configured, raise a DownloadError to indicate the issue
     if not remote_url:
         raise DownloadError("Remote URL not configured in config.yml")
-    remote_spec = RemoteSpec.parse(
+    remote_spec = RemoteSpec.from_url(
         remote_url, remote_config.get("auth"), backend=remote_config.get("backend"),
         backend_options=remote_config.get("backend_options"))
     # If there are still no files selected for download

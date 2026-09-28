@@ -6,7 +6,7 @@ import re
 from html.parser import HTMLParser
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
-from .base import CapabilityError, DownloadError, literal_path, reject_controls
+from .base import CapabilityError, DownloadError, validate_remote_path, reject_control_characters
 
 
 class _IndexParser(HTMLParser):
@@ -75,7 +75,7 @@ def _origin(url):
 
 def _index_link(root_url, directory, href, kind):
     """Resolve a link only when it stays beneath the supplied URL root."""
-    reject_controls(href, "Index href")
+    reject_control_characters(href, "Index href")
     root = urlsplit(root_url.rstrip("/") + "/")
     current = urljoin(root.geturl(), quote(directory, safe="/"))
     resolved = urlsplit(urljoin(current, href))
@@ -86,7 +86,7 @@ def _index_link(root_url, directory, href, kind):
         return None
     root_path = unquote(root.path, errors="strict")
     path = unquote(resolved.path, errors="strict")
-    reject_controls(path, "Index path")
+    reject_control_characters(path, "Index path")
     if "\\" in path or ".." in path.split("/"):
         raise DownloadError("Remote index contains an unsafe path")
     if not path.startswith(root_path):
@@ -97,7 +97,7 @@ def _index_link(root_url, directory, href, kind):
     if any(part.lower() in {".hm", ".git"} for part in relative.split("/")):
         return None
     is_directory = kind == "directory" or resolved.path.endswith("/")
-    relative = literal_path(relative.rstrip("/")).as_posix()
+    relative = validate_remote_path(relative.rstrip("/")).as_posix()
     return relative + ("/" if is_directory else ""), is_directory
 
 

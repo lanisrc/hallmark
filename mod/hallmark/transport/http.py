@@ -9,7 +9,7 @@ import requests
 
 from ..utils import REMOTE_REQUEST_TIMEOUT
 from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
-                   RemoteObjectMissing, DataBackend, reject_controls)
+                   RemoteObjectMissing, DataBackend, reject_control_characters)
 from .index import _parse_index, _response_directory
 
 
@@ -82,10 +82,10 @@ class HttpBackend(DataBackend):
         for _ in range(11):
             self.context.check_cancelled()
             try:
-                reject_controls(url, "Metadata URL")
+                reject_control_characters(url, "Metadata URL")
                 target = urlsplit(url)
                 path = unquote(target.path, errors="strict")
-                reject_controls(path, "Metadata path")
+                reject_control_characters(path, "Metadata path")
                 within_root = (root_path == "/" or path == root_path
                                or path.startswith(root_path + "/"))
                 if (endpoint(target) != endpoint(root) or not within_root

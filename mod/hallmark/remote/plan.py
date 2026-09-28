@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
-from ..transport.base import backend_name, freeze_backend_options
+from ..transport.base import validate_backend_name, readonly_backend_options
 
 
 @dataclass(frozen=True)
@@ -91,9 +91,9 @@ class DownloadPlan:
                 self.remote_backend)):
             raise TypeError("remote fields must be strings or None")
         if self.remote_backend is not None:
-            backend_name(self.remote_backend)
+            validate_backend_name(self.remote_backend)
         object.__setattr__(self, "backend_options",
-                           freeze_backend_options(self.backend_options))
+                           readonly_backend_options(self.backend_options))
         rate = self.estimated_bytes_per_second
         if rate is not None and (
             isinstance(rate, bool) or not isinstance(rate, (int, float))

@@ -9,7 +9,7 @@ from threading import Event, Lock, local
 
 import requests
 
-from .auth import resolve_settings
+from .auth import resolve_ssh_settings
 from .base import DataBackend, RemoteEntry, RemoteSpec, TransferCancelled
 
 
@@ -31,7 +31,7 @@ class OperationContext:
         output_root=None,
     ):
         self.remote = remote
-        self.settings = resolve_settings(remote)
+        self.settings = resolve_ssh_settings(remote)
         self.output_root = Path(output_root) if output_root is not None else None
         self.cancelled = Event()
         self.on_bytes = None

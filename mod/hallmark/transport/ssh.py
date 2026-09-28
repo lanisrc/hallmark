@@ -20,8 +20,8 @@ from .base import (
     RemoteConfigurationError,
     RemoteEntry,
     DataBackend,
-    literal_path,
-    reject_controls,
+    validate_remote_path,
+    reject_control_characters,
 )
 
 
@@ -39,7 +39,7 @@ def batch_argument(path):
         RemoteConfigurationError: If the path is relative or contains controls.
     """
     text = str(path)
-    reject_controls(text, "SFTP path")
+    reject_control_characters(text, "SFTP path")
     if not text.startswith("/"):
         raise RemoteConfigurationError("SFTP operands must be absolute paths")
     # Use unquoted escapes: OpenSSH adds glob escapes itself inside quotes,
@@ -285,7 +285,7 @@ class SshBackend(DataBackend):
 
     def _fetch(self, relative_path, destination, file_limit=None):
         """Fetch one literal path within the session and transfer limits."""
-        remote = batch_argument(self.context.remote.pathname(relative_path))
+        remote = batch_argument(self.context.remote.file_path(relative_path))
         local = batch_argument(destination)
         batch = f"get {remote} {local}\n".encode("utf-8")
         if len(batch) > 8000:
@@ -331,9 +331,9 @@ class SshBackend(DataBackend):
 
     def stat(self, relative_path):
         """Read regular-file attributes without fetching the file contents."""
-        path = literal_path(relative_path).as_posix()
+        path = validate_remote_path(relative_path).as_posix()
         with self._metadata() as session:
-            attrs = session.lstat(self.context.remote.pathname(path))
+            attrs = session.lstat(self.context.remote.file_path(path))
         mode = attrs["mode"]
         if mode is None or not stat.S_ISREG(mode):
             raise DownloadError("Remote metadata must be a regular file")
@@ -357,7 +357,7 @@ class SshBackend(DataBackend):
         """
         with self._metadata() as session:
             root = session.realpath(self.context.remote.root).rstrip("/") or "/"
-            reject_controls(root, "SFTP root")
+            reject_control_characters(root, "SFTP root")
             if not root.startswith("/") or ".." in root.split("/"):
                 raise DownloadError("Invalid SFTP canonical root")
             pending = [("", root)]
@@ -389,7 +389,7 @@ class SshBackend(DataBackend):
                     if not name or "/" in name or name in names:
                         raise DownloadError("Invalid or duplicate SFTP directory name")
                     names.add(name)
-                    path = literal_path(relative + name).as_posix()
+                    path = validate_remote_path(relative + name).as_posix()
                     absolute = directory.rstrip("/") + "/" + name
                     mode = attrs["mode"]
                     if mode is None:

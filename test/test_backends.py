@@ -16,7 +16,7 @@ from hallmark.remote.discovery import discover
 from hallmark.transport import OperationContext
 from hallmark.transport.base import (
     CapabilityError, RemoteConfigurationError, RemoteEntry, RemoteSpec, Transport,
-    TransferCancelled, freeze_backend_options, thaw_backend_options,
+    TransferCancelled, readonly_backend_options, copy_backend_options,
 )
 
 
@@ -38,7 +38,7 @@ def isolated_registry(monkeypatch):
 def test_builtin_detection(url, expected, monkeypatch, tmp_path):
     monkeypatch.delenv("HALLMARK_AUTH_FILE", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    with OperationContext(RemoteSpec.parse(url)) as context:
+    with OperationContext(RemoteSpec.from_url(url)) as context:
         assert type(context.backend) is expected
         assert context.backend is context.transport
 
@@ -50,10 +50,10 @@ def test_explicit_selection_and_compatibility_aliases():
     assert Transport is DataBackend
     assert HttpTransport is HttpBackend
     assert SshTransport is SshBackend
-    with OperationContext(RemoteSpec.parse(
+    with OperationContext(RemoteSpec.from_url(
             "https://data.cyverse.org/data/", backend="http")) as context:
         assert type(context.backend) is HttpBackend
-    with OperationContext(RemoteSpec.parse(
+    with OperationContext(RemoteSpec.from_url(
             "https://lab.test/data/", backend="cyverse")) as context:
         assert type(context.backend) is CyVerseBackend
 
@@ -84,7 +84,7 @@ def test_backend_lifecycle_and_generic_discovery(tmp_path):
             events.append("close")
 
     backends.register_backend("survey", SurveyBackend)
-    remote = RemoteSpec.parse("https://lab.test/", backend="survey")
+    remote = RemoteSpec.from_url("https://lab.test/", backend="survey")
     with OperationContext(remote) as context:
         context.text_limit = 20
         context.backend.prepare()
@@ -133,7 +133,7 @@ def test_plugin_loading_is_lazy_and_cached(monkeypatch):
 
     monkeypatch.setattr(backends.metadata, "entry_points",
                         lambda: {"hallmark.backends": [Entry()]})
-    remote = RemoteSpec.parse("https://lab.test/", backend="survey")
+    remote = RemoteSpec.from_url("https://lab.test/", backend="survey")
     assert not loaded
     for _ in range(2):
         with OperationContext(remote) as context:
@@ -175,7 +175,7 @@ def test_missing_plugin_can_be_parsed_without_loading(monkeypatch):
         raise AssertionError("Parsing must not inspect installed plugins")
 
     monkeypatch.setattr(backends.metadata, "entry_points", fail)
-    remote = RemoteSpec.parse("https://lab.test/", backend="uninstalled")
+    remote = RemoteSpec.from_url("https://lab.test/", backend="uninstalled")
     monkeypatch.setattr(backends.metadata, "entry_points", lambda: {})
     with pytest.raises(RemoteConfigurationError, match="not installed or registered"):
         OperationContext(remote)
@@ -194,28 +194,28 @@ def test_plugin_load_failure_is_actionable_and_sanitized(monkeypatch):
 
 def test_options_are_copied_and_deeply_immutable():
     options = {"routes": [{"names": ["first"]}], "enabled": True}
-    remote = RemoteSpec.parse("https://lab.test/", backend_options=options)
+    remote = RemoteSpec.from_url("https://lab.test/", backend_options=options)
     options["routes"][0]["names"].append("later")
     assert remote.backend_options["routes"][0]["names"] == ("first",)
     with pytest.raises(TypeError):
         remote.backend_options["routes"][0]["names"] = ()
-    assert thaw_backend_options(remote.backend_options) == {
+    assert copy_backend_options(remote.backend_options) == {
         "routes": [{"names": ["first"]}], "enabled": True}
-    assert freeze_backend_options() == {}
-    assert thaw_backend_options() == {}
+    assert readonly_backend_options() == {}
+    assert copy_backend_options() == {}
 
 
 @pytest.mark.parametrize("options", [[], {1: "bad"}, {"object": object()}])
 def test_invalid_options_are_rejected(options):
     with pytest.raises(RemoteConfigurationError, match="Backend option"):
-        RemoteSpec.parse("https://lab.test/", backend_options=options)
+        RemoteSpec.from_url("https://lab.test/", backend_options=options)
 
 
 def test_recursive_options_are_rejected():
     options = {}
     options["cycle"] = options
     with pytest.raises(RemoteConfigurationError, match="cycles"):
-        freeze_backend_options(options)
+        readonly_backend_options(options)
 
 
 def test_base_capabilities():
@@ -241,7 +241,7 @@ def test_constructor_failure_closes_context_sessions(monkeypatch):
 
     backends.register_backend("broken", BrokenBackend)
     with pytest.raises(RuntimeError, match="setup failed"):
-        OperationContext(RemoteSpec.parse("https://lab.test/", backend="broken"))
+        OperationContext(RemoteSpec.from_url("https://lab.test/", backend="broken"))
     assert closed == [True]
 
 
@@ -257,7 +257,7 @@ def test_cancel_failure_still_closes_resources():
 
     backends.register_backend("broken", BrokenBackend)
     with pytest.raises(RuntimeError, match="cancel failed"):
-        with OperationContext(RemoteSpec.parse("https://lab.test/", backend="broken")):
+        with OperationContext(RemoteSpec.from_url("https://lab.test/", backend="broken")):
             raise ValueError("operation failed")
     assert closed == [True]
 
@@ -325,7 +325,7 @@ def test_multi_server_example_uses_shared_discovery_and_verified_downloads(tmp_p
                 assert (repo.worktree / name / "file.fits").read_bytes() == (
                     name + " payload").encode()
                 assert requests[name][-1] == "/file.fits"
-            remote = RemoteSpec.parse(plan.remote_url,
+            remote = RemoteSpec.from_url(plan.remote_url,
                                       backend=plan.remote_backend,
                                       backend_options=plan.backend_options)
             with OperationContext(remote) as context:

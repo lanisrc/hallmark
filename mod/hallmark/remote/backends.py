@@ -10,8 +10,15 @@ from threading import RLock
 
 from ..transport import OperationContext
 from ..transport.base import (
-    CapabilityError, DataBackend, DownloadError, RemoteConfigurationError,
-    RemoteEntry, RemoteObjectMissing, RemoteSpec, TransferCancelled, backend_name,
+    CapabilityError,
+    DataBackend,
+    DownloadError,
+    RemoteConfigurationError,
+    RemoteEntry,
+    RemoteObjectMissing,
+    RemoteSpec,
+    TransferCancelled,
+    validate_backend_name,
 )
 from ..transport.cyverse import CyVerseBackend
 from ..transport.http import HttpBackend
@@ -23,7 +30,7 @@ _loaded = {}
 _lock = RLock()
 
 
-def _entry_points(name):
+def _find_backend_plugins(name):
     """Find matching plugin metadata on Python 3.9 and newer versions."""
     entries = metadata.entry_points()
     if hasattr(entries, "select"):
@@ -33,7 +40,7 @@ def _entry_points(name):
     return [entry for entry in entries if entry.name == name]
 
 
-def _validate_class(backend_class):
+def _validate_backend_class(backend_class):
     if (not isinstance(backend_class, type)
             or not issubclass(backend_class, DataBackend)
             or backend_class is DataBackend):
@@ -58,19 +65,19 @@ def register_backend(name, backend_class):
     Register before opening a repository operation. Distribution entry points
     provide automatic registration in fresh Python processes and the CLI.
     """
-    name = backend_name(name)
-    _validate_class(backend_class)
+    name = validate_backend_name(name)
+    _validate_backend_class(backend_class)
     with _lock:
-        if name in _registered or name in _loaded or _entry_points(name):
+        if name in _registered or name in _loaded or _find_backend_plugins(name):
             raise RemoteConfigurationError(f"Backend {name!r} is already registered")
         _registered[name] = backend_class
 
 
 def get_backend(name):
     """Resolve a registered class, lazily importing a selected installed plugin."""
-    name = backend_name(name)
+    name = validate_backend_name(name)
     with _lock:
-        entries = _entry_points(name)
+        entries = _find_backend_plugins(name)
         if len(entries) > 1 or (entries and name in _registered):
             raise RemoteConfigurationError(f"Duplicate backend name {name!r}")
         if name in _registered:
@@ -85,7 +92,7 @@ def get_backend(name):
         except Exception:
             raise RemoteConfigurationError(
                 f"Unable to load backend {name!r}; check its installation") from None
-        _loaded[name] = _validate_class(backend_class)
+        _loaded[name] = _validate_backend_class(backend_class)
         return _loaded[name]
 
 
