@@ -15,7 +15,7 @@ import pandas as pd
 
 from .transport import OperationContext, RemoteSpec
 from .transport.base import DownloadError, literal_path
-from .download_plan import DownloadItem, DownloadPlan
+from .remote.plan import DownloadItem, DownloadPlan
 from .utils import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
     SUPPORTED_CHECKSUM_ALGORITHMS,

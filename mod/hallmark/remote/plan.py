@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
-from .transport.base import backend_name, freeze_backend_options
+from ..transport.base import backend_name, freeze_backend_options
 
 
 @dataclass(frozen=True)

@@ -8,14 +8,14 @@ configuration and creating download plans never load adapter code.
 from importlib import metadata
 from threading import RLock
 
-from .transport import OperationContext
-from .transport.base import (
+from ..transport import OperationContext
+from ..transport.base import (
     CapabilityError, DataBackend, DownloadError, RemoteConfigurationError,
     RemoteEntry, RemoteObjectMissing, RemoteSpec, TransferCancelled, backend_name,
 )
-from .transport.cyverse import CyVerseBackend
-from .transport.http import HttpBackend
-from .transport.ssh import SshBackend
+from ..transport.cyverse import CyVerseBackend
+from ..transport.http import HttpBackend
+from ..transport.ssh import SshBackend
 
 
 _registered = {"http": HttpBackend, "ssh": SshBackend, "cyverse": CyVerseBackend}

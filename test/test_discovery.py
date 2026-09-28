@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from hallmark.discovery import discover, path_matches
-from hallmark.backends import HttpBackend
+from hallmark.remote.backends import HttpBackend
 from hallmark.transport.base import (
     CapabilityError, DownloadError, RemoteEntry, RemoteSpec, TransferCancelled,
 )

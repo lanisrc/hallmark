@@ -40,7 +40,7 @@ class OperationContext:
         self._local = local()
         self._lock = Lock()
         self._sessions = []
-        from ..backends import get_backend
+        from ..remote.backends import get_backend
 
         try:
             self.transport = get_backend(remote.backend)(self)

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from hallmark.download_plan import DownloadItem, DownloadPlan
+from hallmark.remote.plan import DownloadItem, DownloadPlan
 from hallmark.downloader import (
     DownloadError,
     download_remote_data,

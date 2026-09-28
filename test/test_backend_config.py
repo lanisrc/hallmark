@@ -3,8 +3,8 @@
 import pytest
 
 from hallmark import Repo
-from hallmark import backends
-from hallmark.backends import DataBackend, RemoteEntry, register_backend
+from hallmark.remote import backends
+from hallmark.remote.backends import DataBackend, RemoteEntry, register_backend
 from hallmark.repo_builder import build_repo
 from hallmark.repo.config import normalize_remotes
 

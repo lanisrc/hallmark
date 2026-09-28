@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from contextlib import ExitStack
 from dataclasses import replace
 
-from hallmark.backends import (
+from hallmark.remote.backends import (
     DataBackend, OperationContext, RemoteConfigurationError,
     RemoteObjectMissing, RemoteSpec, register_backend,
 )

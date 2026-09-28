@@ -17,8 +17,8 @@
 
 from .repo import Repo
 from .paraframe import ParaFrame
-from .download_plan import DownloadItem, DownloadPlan
-from .backends import (
+from .remote.plan import DownloadItem, DownloadPlan
+from .remote.backends import (
     DataBackend, HttpBackend, SshBackend, CyVerseBackend, RemoteEntry,
     register_backend,
 )
