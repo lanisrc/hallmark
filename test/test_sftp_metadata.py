@@ -92,7 +92,7 @@ def test_reject_controls_without_silently_omitting_file(local_sftp):
 def test_discovery_excludes_root_repository_metadata_and_objects(local_sftp):
     context, root = local_sftp
     for metadata in (".hm", ".git", ".HM", ".GIT"):
-        (root / metadata / "objects").mkdir(parents=True)
+        (root / metadata / "objects").mkdir(parents=True, exist_ok=True)
         (root / metadata / "objects" / "payload").write_bytes(b"private")
     (root / "nested" / ".hm" / "objects").mkdir(parents=True)
     (root / "nested" / ".hm" / "objects" / "payload").write_bytes(b"private")

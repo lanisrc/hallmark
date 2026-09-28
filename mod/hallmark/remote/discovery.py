@@ -17,28 +17,25 @@ from ..transport.base import (
 )
 
 
-def _glob_matches(path, pattern):
+def _matches_wildcard_path(path, pattern):
     """Match path segments, including zero-directory matches for ``**/``."""
     parts, patterns = path.split("/"), pattern.split("/")
 
     @lru_cache(maxsize=None)
-    def match(path_index, pattern_index):
+    def match_path_parts(path_index, pattern_index):
         if pattern_index == len(patterns):
             return path_index == len(parts)
         if patterns[pattern_index] == "**":
-            return (match(path_index, pattern_index + 1)
-                    or path_index < len(parts) and match(path_index + 1, pattern_index))
+            return (
+                match_path_parts(path_index, pattern_index + 1)
+                or path_index < len(parts)
+                and match_path_parts(path_index + 1, pattern_index)
+            )
         return (path_index < len(parts)
                 and fnmatch.fnmatchcase(parts[path_index], patterns[pattern_index])
-                and match(path_index + 1, pattern_index + 1))
+                and match_path_parts(path_index + 1, pattern_index + 1))
 
-    return match(0, 0)
-
-
-@lru_cache(maxsize=128)
-def _format_parser(fmt):
-    """Compile and cache a case-sensitive filename format."""
-    return parse.compile(fmt, case_sensitive=True)
+    return match_path_parts(0, 0)
 
 
 def path_matches(path: str, filter=None, fmt: str | None = None) -> bool:
@@ -58,7 +55,7 @@ def path_matches(path: str, filter=None, fmt: str | None = None) -> bool:
         ValueError: If the filter or format is invalid.
     """
     path = str(path)
-    parser = _format_parser(fmt) if fmt is not None else None
+    parser = parse.compile(fmt, case_sensitive=True) if fmt is not None else None
     if filter is not None:
         if not isinstance(filter, (str, list, tuple)):
             raise ValueError(
@@ -66,12 +63,12 @@ def path_matches(path: str, filter=None, fmt: str | None = None) -> bool:
         patterns = [filter] if isinstance(filter, str) else list(filter)
         if not all(isinstance(pattern, str) for pattern in patterns):
             raise ValueError("Path filters must be glob strings")
-        if not any(_glob_matches(path, pattern) for pattern in patterns):
+        if not any(_matches_wildcard_path(path, pattern) for pattern in patterns):
             return False
     return parser is None or parser.parse(path) is not None
 
 
-def _manifest_algorithm(path):
+def _checksum_file_algorithm(path):
     """Identify checksum manifests by their conventional filenames."""
     name = PurePosixPath(path).name.lower()
     if re.fullmatch(r"checksums?(?:\.txt)?", name):
@@ -83,12 +80,12 @@ def _manifest_algorithm(path):
     return None
 
 
-def _manifest_checksums(context, entries):
+def _attach_published_checksums(context, entries):
     """Read published checksum metadata and attach it to discovered paths."""
     strength = {name: index for index, name in
                 enumerate(CHECKSUM_ALGORITHMS_BY_STRENGTH)}
     for path in sorted(entries):
-        algorithm = _manifest_algorithm(path)
+        algorithm = _checksum_file_algorithm(path)
         if algorithm is None:
             continue
         try:
@@ -126,7 +123,9 @@ def _manifest_checksums(context, entries):
                     previous, checksum_algorithm=algorithm, checksum=digest.lower())
 
 
-def discover(context, *, filter=None, fmt=None, progress=False) -> list[RemoteEntry]:
+def discover_remote_files(
+    context, *, filter=None, fmt=None, progress=False
+) -> list[RemoteEntry]:
     """
     Discover remote files and their published metadata recursively.
 
@@ -158,7 +157,7 @@ def discover(context, *, filter=None, fmt=None, progress=False) -> list[RemoteEn
     bar = tqdm(total=None, unit="dir", desc="Discovering", disable=not bool(progress)) \
         if not callable(progress) else None
 
-    def report(directory=None):
+    def report_progress(directory=None):
         if directory is not None:
             counts["directories"] += 1
             counts["current"] = directory or "/"
@@ -169,20 +168,20 @@ def discover(context, *, filter=None, fmt=None, progress=False) -> list[RemoteEn
         elif bar is not None:
             bar.set_postfix(files=counts["files"], matched=counts["matched"])
 
-    def add(entry):
+    def add_file_entry(entry):
         path = validate_remote_path(entry.path).as_posix()
         if path not in entries:
             entries[path] = entry
             counts["files"] += 1
             counts["matched"] += int(path_matches(path, filter=filter, fmt=fmt))
-            report()
+            report_progress()
 
     try:
         context.transport.prepare()
-        for entry in context.transport.iter_entries(on_directory=report):
+        for entry in context.transport.iter_entries(on_directory=report_progress):
             context.check_cancelled()
-            add(entry)
-        _manifest_checksums(context, entries)
+            add_file_entry(entry)
+        _attach_published_checksums(context, entries)
         return [entries[path] for path in sorted(entries)
                 if path_matches(path, filter=filter, fmt=fmt)]
     finally:

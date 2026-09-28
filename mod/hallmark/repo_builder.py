@@ -695,11 +695,11 @@ def list_remote_files(base_url: str, *, _context=None):
         DownloadError: If discovery fails or checksum manifests conflict.
         CapabilityError: If the source provides no supported listing.
     """
-    from .remote.discovery import discover
+    from .remote.discovery import discover_remote_files
 
     def inventory(context):
         return {entry.path: (entry.checksum_algorithm, entry.checksum)
-                for entry in discover(context)}
+                for entry in discover_remote_files(context)}
 
     if _context is None:
         with OperationContext(RemoteSpec.from_url(base_url)) as context:

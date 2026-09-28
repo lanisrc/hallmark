@@ -159,7 +159,7 @@ def test_interrupted_discovery_removes_incomplete_destination(
     def fail(*args, **kwargs):
         raise KeyboardInterrupt()
 
-    monkeypatch.setattr("hallmark.remote.clone.discover", fail)
+    monkeypatch.setattr("hallmark.remote.clone.discover_remote_files", fail)
     with pytest.raises(KeyboardInterrupt):
         Repo.init(tmp_path / "clone", from_url="https://example.test/data/")
     assert not (tmp_path / "clone").exists()
@@ -233,7 +233,7 @@ def test_remote_init_preserves_existing_directory_on_discovery_failure(
     def fail(*args, **kwargs):
         raise failure("interrupted")
 
-    monkeypatch.setattr("hallmark.remote.clone.discover", fail)
+    monkeypatch.setattr("hallmark.remote.clone.discover_remote_files", fail)
     with pytest.raises(failure):
         Repo.init(destination, from_url="https://example.test/data/")
     assert list(destination.iterdir()) == [destination / "keep.h5"]

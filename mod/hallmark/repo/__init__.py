@@ -170,7 +170,7 @@ class Repo:
 
         Args:
             path (Path | str): Worktree or bare ``.hm`` repository destination.
-            from_url (str, optional): Raw remote dataset to discover.
+            from_url (str, optional): Raw remote dataset to discover_remote_files.
             backend (str, optional): Registered data backend name.
             backend_options (dict, optional): Backend-specific configuration.
             auth (str, optional): Local authentication profile for data access.

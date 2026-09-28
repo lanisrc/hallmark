@@ -12,7 +12,7 @@ import pandas as pd
 import parse
 import yaml
 
-from .discovery import discover, path_matches
+from .discovery import discover_remote_files, path_matches
 from ..repo.dothm import Dothm
 from ..error import CloneError, DestinationExistsError
 from ..utils import as_list_of_dicts
@@ -195,7 +195,7 @@ def initialize_remote(cls, path, url, *, backend=None, backend_options=None,
             raise DestinationExistsError(
                 f"Hallmark repository already exists: {dothm_path}") from exc
         with OperationContext(source) as context:
-            entries = discover(context, filter=filter, fmt=fmt, progress=progress)
+            entries = discover_remote_files(context, filter=filter, fmt=fmt, progress=progress)
         repo = cls.init(destination)
         _write_inventory(repo, source, entries, fmt)
         return repo

@@ -187,7 +187,7 @@ def init(path, from_url, backend, backend_options, auth, filters, fmt,
          with_download, max_workers):
     """Initialize a hallmark repository at PATH.
 
-    Use --from URL to discover a remote dataset without downloading payloads.
+    Use --from URL to discover_remote_files a remote dataset without downloading payloads.
     If PATH ends with `.hm`, a bare repository is created.
     Otherwise, a `.hm` directory is created inside PATH.
     """

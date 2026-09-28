@@ -12,7 +12,7 @@ import pytest
 
 from hallmark import Repo, DataBackend, HttpBackend, SshBackend, CyVerseBackend
 from hallmark.remote import backends
-from hallmark.remote.discovery import discover
+from hallmark.remote.discovery import discover_remote_files
 from hallmark.transport import OperationContext
 from hallmark.transport.base import (
     CapabilityError, RemoteConfigurationError, RemoteEntry, RemoteSpec, Transport,
@@ -89,7 +89,7 @@ def test_backend_lifecycle_and_generic_discovery(tmp_path):
         context.text_limit = 20
         context.backend.prepare()
         assert context.read_text("info") == "metadata"
-        assert discover(context) == [RemoteEntry("tile.fits", size=8)]
+        assert discover_remote_files(context) == [RemoteEntry("tile.fits", size=8)]
         context.backend.fetch("tile.fits", tmp_path / "payload")
         assert (tmp_path / "payload").read_bytes() == b"contents"
     assert events == ["prepare", "prepare", "close"]
