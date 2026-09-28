@@ -49,7 +49,7 @@ class Repo:
     download_result: Optional[dict] = None
 
     @staticmethod
-    def lwpaths(path: Union[Path, str]) -> Tuple[Path, Optional[Path]]:
+    def resolve_repo_paths(path: Union[Path, str]) -> Tuple[Path, Optional[Path]]:
         '''
         Resolve repository and worktree paths.
 
@@ -62,7 +62,7 @@ class Repo:
             If ``path`` refers to a ``.hm`` directory, ``worktree_path`` is ``None``.
         '''
         path = Path(path).resolve()
-        if path.suffix == ".hm":
+        if path.name == ".hm" or path.suffix == ".hm":
             return path, None
         return path / ".hm", path
 
@@ -75,11 +75,10 @@ class Repo:
         Returns:
             none.
         '''
-        dothm_path, worktree_path = self.lwpaths(path)
+        dothm_path, worktree_path = self.resolve_repo_paths(path)
         self.dothm = Dothm(dothm_path)
         self.worktree = worktree_path and Worktree(worktree_path)
         self.state = self.dothm.load_state()
-        self.paraframe_cls = ParaFrame
         self.download_result = None
 
         common = Path(self.dothm.common_dir).resolve().parent
@@ -90,9 +89,9 @@ class Repo:
         and not dothm_objects.exists():
             dothm_objects.symlink_to(main_objects)
 
-    def _worktree_path(self, value, *, label: str = "tracked path") -> Path:
+    def _resolve_worktree_path(self, value, *, label: str = "tracked path") -> Path:
         """
-        Used commit, checkout, and _populate_checksums.
+        Used commit, checkout, and _calculate_file_checksums.
         Resolve a path relative to the repository's worktree.
         Args:
             value (str | Path): The path to resolve.
@@ -138,7 +137,7 @@ class Repo:
         # if all checks pass, return the normalized branch name
         return branch_name
 
-    def _populate_checksums(self, pf: ParaFrame) -> None:
+    def _calculate_file_checksums(self, pf: ParaFrame) -> None:
         """
         Used by add.
         Populate the "sha1" column in a ParaFrame with SHA-1 checksums of the files.
@@ -150,7 +149,7 @@ class Repo:
             return
         # Resolve full paths for all files in the ParaFrame relative to the worktree
         full_paths = [
-            self._worktree_path(path, label="matched data path")
+            self._resolve_worktree_path(path, label="matched data path")
             for path in pf["path"].astype(str)]
         # Compute SHA-1 checksums for all files in parallel using the checksum_many
         checksums = self.checksum_many(full_paths)
@@ -197,7 +196,7 @@ class Repo:
             if download and not callable(approve):
                 raise DownloadError(
                     "Downloading during init requires an approve(plan) callback")
-            if download and cls.lwpaths(path)[1] is None:
+            if download and cls.resolve_repo_paths(path)[1] is None:
                 raise DownloadError(
                     "Initialize a worktree to download; "
                     "bare catalogs need an output path")
@@ -211,7 +210,7 @@ class Repo:
         if any(value is not None for value in
                (backend, backend_options, auth, filter, fmt, approve)) or download:
             raise ValueError("Remote initialization options require from_url")
-        dothm_path, worktree_path = cls.lwpaths(path)
+        dothm_path, worktree_path = cls.resolve_repo_paths(path)
         dothm = Dothm.init(dothm_path)
         (dothm.path / "config.yml").write_text(Dothm.config_template(),
                                                encoding="utf-8")
@@ -311,7 +310,7 @@ class Repo:
         if download and not callable(approve):
             raise DownloadError(
                 "Downloading during clone requires an approve(plan) callback")
-        if download and cls.lwpaths(path)[1] is None:
+        if download and cls.resolve_repo_paths(path)[1] is None:
             raise DownloadError(
                 "Clone a worktree to download; bare catalogs need an output path")
         path_matches("validation", filter=filter, fmt=fmt)
@@ -580,7 +579,7 @@ class Repo:
         if rescanning:
             pf = filter_files_in_directory(self, pf)
         # Compute checksums for all files in the ParaFrame in parallel
-        self._populate_checksums(pf)
+        self._calculate_file_checksums(pf)
 
         manifest = build_file_table(pf, resolved_fmt)
         # if not rescanning, update the repository configuration with the new format
@@ -641,7 +640,7 @@ class Repo:
             if (current_entry not in head_entries
                  or not self.objects.contains(expected_sha1)):
                 # resolve the full path of the file in the worktree for storage
-                full_path = self._worktree_path(relative_path, label="tracked path")
+                full_path = self._resolve_worktree_path(relative_path, label="tracked path")
                 # append the full path and expected SHA1 to the list of files to store
                 files_to_store.append((full_path, expected_sha1))
 

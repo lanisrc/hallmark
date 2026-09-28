@@ -82,7 +82,7 @@ def checkout(repo, target_branch: str) -> bool:
     for rel_path, sha1 in target_entries_raw:
         # try to resolve the relative path to an absolute path in the worktree
         try:
-            target_path = repo._worktree_path(rel_path, label="checkout target")
+            target_path = repo._resolve_worktree_path(rel_path, label="checkout target")
         # if the relative path is invalid or outside worktree, raise a CheckoutError
         except ValueError as exc:
             raise CheckoutError(str(exc)) from exc
@@ -195,7 +195,7 @@ def checkout(repo, target_branch: str) -> bool:
                 key=lambda path: (len(path.parts), path.as_posix()), reverse=True)
             for relative_path in affected_paths:
                 # absolute path in the worktree for the affected relative path
-                path = repo._worktree_path(relative_path, label="checkout target")
+                path = repo._resolve_worktree_path(relative_path, label="checkout target")
                 # create a backup before replacing it with the target file
                 if path.exists():
                     backup_path = backup_root / str(len(backups))
@@ -206,7 +206,7 @@ def checkout(repo, target_branch: str) -> bool:
 
             for relative_path, staged_path in staged_files:
                 # Determine the destination path in the worktree for the staged file
-                destination = repo._worktree_path(
+                destination = repo._resolve_worktree_path(
                     relative_path, label="checkout target")
                 # Create parent directories for the destination path
                 destination.parent.mkdir(parents=True, exist_ok=True)

@@ -182,7 +182,7 @@ def init(path, from_url, backend, backend_options, auth, filters, fmt,
         options = _backend_options_file(backend_options)
         if with_download and not from_url:
             raise ValueError("--with-download requires --from")
-        if with_download and Repo.lwpaths(path)[1] is None:
+        if with_download and Repo.resolve_repo_paths(path)[1] is None:
             raise ValueError("Use a worktree destination for --with-download")
         kwargs = dict(from_url=from_url, backend=backend, backend_options=options,
                       auth=auth, filter=filters or None, fmt=fmt,
@@ -493,7 +493,7 @@ def clone(url, path, auth, filters, fmt, source_type, fetch_data, no_fetch_data,
         raise ClickException("--download conflicts with --no-fetch-data")
     if (filters or fmt is not None) and not fetch_data:
         raise ClickException("--filter and --fmt require --with-download")
-    if fetch_data and Repo.lwpaths(path)[1] is None:
+    if fetch_data and Repo.resolve_repo_paths(path)[1] is None:
         raise ClickException("Use a worktree destination for --with-download")
     if yes:
         click.echo("--yes is deprecated; downloads still require confirmation.",

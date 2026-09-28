@@ -651,7 +651,7 @@ def test_clone_cli_skips_download_when_no_remote_files(monkeypatch, tmp_path):
                            plan_download=lambda **kwargs: _download_plan(0, tmp_path))
 
     class FakeRepo:
-        lwpaths = Repo.lwpaths
+        resolve_repo_paths = Repo.resolve_repo_paths
 
         @staticmethod
         def clone(url, path, **kwargs):

@@ -163,7 +163,7 @@ def initialize_remote(cls, path, url, *, backend=None, backend_options=None,
     destination = Path(path).expanduser().absolute()
     if destination.is_symlink():
         raise DestinationExistsError(f"Destination is a symbolic link: {path}")
-    dothm_path, _ = cls.lwpaths(destination)
+    dothm_path, _ = cls.resolve_repo_paths(destination)
     if dothm_path.exists() or dothm_path.is_symlink():
         raise DestinationExistsError(
             f"Hallmark repository already exists: {dothm_path}")
@@ -227,7 +227,7 @@ def _clone_git(cls, url, destination, display_path, auth):
     """Clone a catalog's Git history without modifying its tracked metadata."""
     if auth is not None:
         raise ValueError("Git cloning uses Git/SSH authentication, not auth profiles")
-    dothm_path, worktree_path = cls.lwpaths(destination)
+    dothm_path, worktree_path = cls.resolve_repo_paths(destination)
     local = Path(url).expanduser()
     git_url = str(local / ".hm") if (local / ".hm").is_dir() else url
     try:
