@@ -417,10 +417,9 @@ def checkout(repo, target_branch):
               show_default=True)
 @click.option("--dry-run", is_flag=True,
               help="Show the download plan using only local catalog metadata.")
-@click.option("-y", "--yes", is_flag=True, hidden=True)
 @click.pass_obj
 def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
-             output, max_workers, dry_run, yes):
+             output, max_workers, dry_run):
     """
     Download selected files from a configured data remote.
 
@@ -433,9 +432,6 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
         raise ClickException("Provide file paths, --tsv, --all, --filter, or --fmt")
     if repo.worktree is None and output is None:
         raise ClickException("--output is required when downloading from a bare repo")
-    if yes:
-        click.echo("--yes is deprecated; downloads still require confirmation.",
-                   err=True)
     with _translate_cli_errors(DownloadError, ValueError):
         plan = repo.plan_download(
             output, file_paths=files, tsv_names=tsv_names, all_files=download_all,
@@ -505,6 +501,3 @@ def clone(url, path, auth, filters, fmt, source_type, no_download, max_workers):
                 click.echo("No files selected for download.")
             else:
                 _report_download_results(repo.download_result)
-
-
-
