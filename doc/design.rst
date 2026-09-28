@@ -83,10 +83,11 @@ Currently, |hallmark|_ has two built-in APIs:
 
 2.  CLI:
     python features wrapped by ``click``.
-    Each ``hallmark ...`` command loads ``State`` from a discovered
-    ``Dothm`` repository, executes the requested operation, then
-    writes staged state updates back to ``Dothm`` before exit.
-    In this mode, ``State`` is short-lived and ``Dothm`` is required.
+    Repository commands such as ``hm add`` load ``State`` from a discovered
+    ``Dothm`` repository, execute the requested operation, then
+    write staged state updates back to ``Dothm`` before exit.
+    ``State`` is short-lived. ``hm init`` and ``hm clone`` create the repository;
+    inspection commands do not write staged state.
 
 ``Worktree`` follows the same idea as
 `git worktree <https://git-scm.com/docs/git-worktree>`_:
