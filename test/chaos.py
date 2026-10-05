@@ -11,12 +11,16 @@ operation, failed or not. Problems are grouped by severity:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import errno
 import hashlib
 from io import StringIO
+import os
+import pathlib
 from pathlib import Path
 import subprocess
 
 import pandas as pd
+import pytest
 
 from hallmark import Repo
 
@@ -37,6 +41,72 @@ class Violations:
         lines = [f"corruption: {item}" for item in self.corruption]
         lines += [f"debris: {item}" for item in self.debris]
         return "\n".join(lines) or "no violations"
+
+
+def skip_if_root():
+    """Skip permission tests when running as root, which ignores modes."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores file permissions")
+
+
+def fail_nth_replace(monkeypatch, nth, *, code=errno.ENOSPC, match=lambda target: True):
+    """Make the ``nth`` matching ``Path.replace`` call raise ``OSError(code)``.
+
+    Patch the method on the class: on Python 3.9 and 3.10, pathlib calls a
+    reference to ``os.replace`` captured at import, so patching ``os`` misses it.
+
+    Returns:
+        list: Targets of the matching calls, in order, for assertions.
+    """
+    original = pathlib.Path.replace
+    calls = []
+
+    def replace(self, target):
+        if match(Path(target)):
+            calls.append(Path(target))
+            if len(calls) == nth:
+                raise OSError(code, os.strerror(code), str(target))
+        return original(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "replace", replace)
+    return calls
+
+
+class _FailingWriter:
+    """File proxy whose writes fail once ``limit`` bytes have been written."""
+
+    def __init__(self, handle, limit, code):
+        self._handle, self._limit, self._code = handle, limit, code
+        self._written = 0
+
+    def write(self, data):
+        if self._written + len(data) > self._limit:
+            raise OSError(self._code, os.strerror(self._code))
+        self._written += len(data)
+        return self._handle.write(data)
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return self._handle.__exit__(*exc)
+
+
+def fail_writes_after(monkeypatch, limit, *, code=errno.ENOSPC,
+                      match=lambda path: True):
+    """Make binary writes to matching paths fail after ``limit`` bytes."""
+    original = pathlib.Path.open
+
+    def open_(self, mode="r", *args, **kwargs):
+        handle = original(self, mode, *args, **kwargs)
+        if "w" in mode and "b" in mode and match(self):
+            return _FailingWriter(handle, limit, code)
+        return handle
+
+    monkeypatch.setattr(pathlib.Path, "open", open_)
 
 
 def _git(dothm, *args):
