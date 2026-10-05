@@ -64,6 +64,7 @@ markers = [
     "ssh_integration: disposable loopback sshd (HALLMARK_RUN_SSH_TESTS=1 required)",
     "survey: end-to-end survey workflows against loopback HTTP and SSH servers",
     "chaos: fault injection, crash consistency and seeded random operations",
+    "survey_live: tiny downloads from public archives (HALLMARK_RUN_LIVE_TESTS=1 required)",
 ]
 
 [tool.coverage.run]
