@@ -115,13 +115,13 @@ def make_telescope_tree(root, sites=("ALMA", "SMA"), years=(2024, 2025),
 
 
 def apply_dr_update(root, files, pixel=(230, 23042), seed=1):
-    """Reprocess one DESI-like file and add a pixel, updating manifests.
+    """Reprocess one redrock file and add a pixel, updating manifests.
 
     Returns:
         tuple: The changed path and the paths of the new pixel's files.
     """
     rng = random.Random(seed)
-    changed = sorted(path for path in files if path.endswith(".fits"))[0]
+    changed = sorted(path for path in files if "/redrock-" in path)[0]
     files[changed] = _fits_like(rng, len(files[changed]))
     write_file(root, changed, files[changed])
     directory = changed.rsplit("/", 1)[0]
