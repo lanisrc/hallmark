@@ -1200,6 +1200,88 @@ def test_create_branch_requires_an_existing_commit(tmp_path):
         Repo(tmp_path / "repo").create_branch("recal")
 
 
+def _repo_detached_at_first_commit(tmp_path):
+    """
+    Build a repository with two commits, left with HEAD detached at the first one.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    Returns:
+        Repo: the repository, with HEAD detached.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    data_path = repo.worktree / "a0_i0.h5"
+    data_path.write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    repo.commit("Original calibration")
+    data_path.write_text("recalibrated\n", encoding="utf-8")
+    repo.add(".")
+    repo.commit("New calibration")
+    repo.dothm.git.checkout("--detach", "HEAD~1")
+    # detaching the index repository does not restore payload files, so put the
+    # first commit's contents back to match the state hm checkout will produce
+    data_path.write_text("original\n", encoding="utf-8")
+    return Repo(tmp_path / "repo")
+
+
+def test_branches_reports_no_branch_selected_when_detached(tmp_path):
+    """
+    Test that Repo.branches() reports no current branch while HEAD is detached, and
+    names the commit instead of raising.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_detached_at_first_commit(tmp_path)
+
+    snapshot = repo.branches()
+
+    assert snapshot["current"] is None, \
+        f"Expected no current branch, got {snapshot['current']}"
+    assert snapshot["detached_at"], \
+        "Expected the detached commit to be reported."
+    assert "main" in snapshot["names"], \
+        f"Expected main to still be listed, got {snapshot['names']}"
+
+
+def test_status_reports_the_commit_when_detached(tmp_path):
+    """
+    Test that Repo.status() reports a commit rather than a branch while HEAD is
+    detached, and still returns a branch name when one is checked out.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_detached_at_first_commit(tmp_path)
+
+    snapshot = repo.status()
+
+    assert snapshot["branch"] is None, \
+        f"Expected no branch while detached, got {snapshot['branch']}"
+    assert snapshot["commit"], "Expected the current commit to be reported."
+
+    repo.checkout("main")
+    on_branch = Repo(tmp_path / "repo").status()
+    assert on_branch["branch"] == "main", \
+        f"Expected main once checked out, got {on_branch['branch']}"
+
+
+def test_commit_refuses_while_detached(tmp_path):
+    """
+    Test that Repo.commit() refuses to commit while HEAD is detached, so that work is
+    not recorded somewhere no branch points at.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_detached_at_first_commit(tmp_path)
+    (repo.worktree / "a0_i0.h5").write_text("edited\n", encoding="utf-8")
+    repo.add(".")
+    before = repo.dothm.head.commit.hexsha
+
+    with pytest.raises(RuntimeError, match="not on a branch"):
+        repo.commit("should be refused")
+
+    assert repo.dothm.head.commit.hexsha == before, \
+        "Expected no commit to be created while detached."
+
+
 def test_checkout_checks_target_objects_before_switching_branch(tmp_path):
     """
     Test that the Repo.checkout() method checks for the existence of target objects

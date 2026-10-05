@@ -477,6 +477,48 @@ def test_cli_log():
                 f"Expected log output to match git log, got: {result.output.strip()}"
 
 
+def test_cli_reports_a_detached_commit_without_crashing():
+    """
+    Test that 'status' and 'branch' describe a detached commit instead of raising, and
+    that 'commit' refuses with the instructions for saving the work on a branch.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "Original calibration"])
+            Path("a0_i0.h5").write_text("recalibrated\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "."])
+            runner.invoke(hallmark, ["commit", "-m", "New calibration"])
+            GitRepo(".hm").git.checkout("--detach", "HEAD~1")
+
+            status = runner.invoke(hallmark, ["status"])
+            assert status.exit_code == 0, \
+                f"Expected exit code 0 for status, got {status.exit_code}: " \
+                f"{status.output}"
+            assert "Not on a branch" in status.output, \
+                f"Expected a detached-commit status, got: {status.output}"
+
+            listed = runner.invoke(hallmark, ["branch"])
+            assert listed.exit_code == 0, \
+                f"Expected exit code 0 for branch, got {listed.exit_code}"
+            assert "no branch" in listed.output, \
+                f"Expected no branch to be selected, got: {listed.output}"
+            assert "* main" not in listed.output, \
+                f"Expected main not to be marked current, got: {listed.output}"
+
+            Path("a0_i0.h5").write_text("edited\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "."])
+            refused = runner.invoke(hallmark, ["commit", "-m", "should be refused"])
+
+            assert refused.exit_code != 0, \
+                f"Expected a non-zero exit code, got {refused.exit_code}"
+            assert "hm branch <name>" in refused.output, \
+                f"Expected instructions for saving the work, got: {refused.output}"
+
+
 def test_cli_branch_creates_a_branch_without_switching():
     """
     Test the hallmark CLI 'branch NAME' command. This test creates a branch and

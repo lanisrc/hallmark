@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from git.exc import GitCommandError
 
-from .branches import checkout, create_branch, add_worktree
+from .branches import (
+    checkout, create_branch, current_branch, current_commit, add_worktree)
 from ..remote.add import add_remote, is_remote_catalog
 from .dothm import Dothm
 from .state import State
@@ -502,7 +503,8 @@ class Repo:
             untracked = []
 
         return {
-            "branch": self.dothm.active_branch.name,
+            "branch": current_branch(self),
+            "commit": current_commit(self),
             "staged": {
                 "state": state_changes,
                 "added": staged_added,
@@ -604,6 +606,10 @@ class Repo:
         '''
         # Normalize the commit message to ensure it is a non-empty string
         msg = require_nonempty_string(msg, label="commit message")
+        if current_branch(self) is None:
+            raise RuntimeError(
+                "You're not on a branch. Run hm branch <name> then "
+                "hm checkout <name> to save changes.")
         # if allow_empty is False and there are no staged changes, return False
         if (not allow_empty and not self.dothm.index.diff("HEAD")):
             # return early since there are no changes to commit
@@ -677,9 +683,13 @@ class Repo:
                 - ``current`` (string): Active branch name
                 - ``names``: All branch names
         '''
-        current = self.dothm.active_branch.name
+        current = current_branch(self)
         names = sorted(head.name for head in self.dothm.heads)
-        return {"current": current, "names": names}
+        detached_at = None if current is not None else current_commit(self)
+        return {
+            "current": current,
+            "names": names,
+            "detached_at": detached_at}
 
     def create_branch(self, name: str) -> str:
         '''

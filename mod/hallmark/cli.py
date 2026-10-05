@@ -185,7 +185,10 @@ def status(repo):
         snapshot = repo.status()
     # if there is a snapshot of the current branch, display its name to the user
     if snapshot:
-        click.echo(f'On branch {snapshot["branch"]}')
+        if snapshot["branch"] is None:
+            click.echo(f'Not on a branch; at commit {snapshot["commit"]}')
+        else:
+            click.echo(f'On branch {snapshot["branch"]}')
 
     staged = snapshot["staged"]
     worktree = snapshot["worktree"]
@@ -383,6 +386,9 @@ def branch(repo, name):
     # if there is a snapshot of the branches, display them to the user
     if snapshot:
         current = snapshot["current"]
+
+    if current is None:
+        click.echo(f'* (no branch; at commit {snapshot["detached_at"]})')
 
     for name in snapshot["names"]:
         prefix = "*" if name == current else " "

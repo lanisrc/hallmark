@@ -15,6 +15,18 @@ from .history import (
 from .changes import ensure_clean_tracked_files, tracked_paths
 
 
+def current_branch(repo):
+    if repo.dothm.head.is_detached:
+        return None
+    return repo.dothm.active_branch.name
+
+
+def current_commit(repo):
+    if not repo.dothm.head.is_valid():
+        return None
+    return repo.dothm.head.commit.hexsha[:7]
+
+
 def create_branch(repo, name):
     name = repo._validate_branch_name(name)
 
@@ -137,7 +149,8 @@ def checkout(repo, target_branch):
                     "already exists as an untracked file")
 
     # Store the name of the currently active branch before switching
-    original_branch = repo.dothm.active_branch.name
+    original_branch = current_branch(repo)
+    original_commit = current_commit(repo) if original_branch is None else None
     # Get the current format string from the branch configuration
     current_fmt = branch_filename_format(repo)
     # Create a mapping of current tracked paths to their SHA1 checksums
@@ -244,8 +257,11 @@ def checkout(repo, target_branch):
 
             # try to restore the original branch if it was changed during checkout
             try:
-                if repo.dothm.active_branch.name != original_branch:
-                    repo.dothm.git.checkout(original_branch)
+                if current_branch(repo) != original_branch:
+                    if original_branch is None:
+                        repo.dothm.git.checkout("--detach", original_commit)
+                    else:
+                        repo.dothm.git.checkout(original_branch)
             # if restoring the original branch fails, record the error for reporting
             except Exception as rollback_exc:
                 rollback_errors.append(
