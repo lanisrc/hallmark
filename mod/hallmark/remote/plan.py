@@ -68,6 +68,8 @@ class DownloadPlan:
             by the caller for duration estimates.
         remote_backend (str, optional): Registered backend selected for transfer.
         backend_options (mapping): Immutable backend configuration snapshot.
+        unknown_paths (tuple[str]): Requested paths that match no catalogued
+            file. A plan with unknown paths cannot be executed.
     """
 
     items: tuple[DownloadItem, ...]
@@ -78,10 +80,14 @@ class DownloadPlan:
     estimated_bytes_per_second: Optional[float] = None
     remote_backend: Optional[str] = None
     backend_options: Mapping = field(default_factory=dict, repr=False, hash=False)
+    unknown_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Copy the selection and validate the source fields and rate."""
         object.__setattr__(self, "items", tuple(self.items))
+        object.__setattr__(self, "unknown_paths", tuple(self.unknown_paths))
+        if any(not isinstance(path, str) for path in self.unknown_paths):
+            raise TypeError("unknown_paths must contain strings")
         object.__setattr__(
             self, "output_path", Path(self.output_path).expanduser().absolute())
         if any(not isinstance(item, DownloadItem) for item in self.items):
@@ -133,8 +139,9 @@ class DownloadPlan:
         Describe the planned transfer, including unavailable estimates.
 
         Returns:
-            str: File count, size and duration estimates, source, and destination.
-            URL credentials, query parameters, and fragments are omitted.
+            str: File count, size and duration estimates, source, destination,
+            and the number of unknown paths. URL credentials, query
+            parameters, and fragments are omitted.
         """
         size = f"{self.known_bytes:,} bytes"
         if self.unknown_size_count:
@@ -147,6 +154,8 @@ class DownloadPlan:
             source = urlunsplit(parsed._replace(
                 netloc=parsed.netloc.rsplit("@", 1)[-1], query="", fragment=""))
         backend = f"\nBackend: {self.remote_backend}" if self.remote_backend else ""
+        unknown = (f"\n{len(self.unknown_paths)} path(s) not in the catalog"
+                   if self.unknown_paths else "")
         return (f"{self.file_count} file(s); {size}; estimated duration: {duration}"
                 f"\nSource: {source}{backend}"
-                f"\nDestination: {self.output_path}")
+                f"\nDestination: {self.output_path}{unknown}")

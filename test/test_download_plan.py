@@ -55,12 +55,72 @@ def test_plan_reads_path_catalog_offline_and_preserves_unknown_sizes(
 
 
 def test_explicit_paths_retain_catalog_checksums_and_metadata(catalog):
-    plan = plan_download(catalog, file_paths=["nested/a.fits", "unlisted.bin"])
+    plan = plan_download(catalog, file_paths=["nested/a.fits", "b.txt"])
     assert plan.file_count == 2
     assert plan.items[0].checksum == ("sha256", sha256(b"abcdef").hexdigest())
     assert plan.items[0].size_bytes == 6
     assert plan.items[1].checksum is None
     assert plan.items[1].size_bytes is None
+    assert plan.unknown_paths == ()
+
+
+def _folder_catalog(tmp_path):
+    """Create a catalog with nested folders and a sibling sharing a prefix."""
+    metadata = tmp_path / ".hm"
+    metadata.mkdir()
+    frame = pd.DataFrame({"path": [
+        "runs/a.h5", "runs/2024/b.h5", "runs/2024/x/c.h5", "runsx/d.h5", "top.h5"]})
+    frame.to_csv(metadata / "data.tsv", sep="\t", index=False)
+    return SimpleNamespace(
+        dothm=SimpleNamespace(path=metadata), worktree=tmp_path,
+        state=SimpleNamespace(data=frame, config={
+            "data": [{"db": "data.tsv"}],
+            "remote": {"name": "origin", "url": "https://source.test/data/"},
+        }))
+
+
+@pytest.mark.parametrize("requested, expected", [
+    (["runs"], ["runs/a.h5", "runs/2024/b.h5", "runs/2024/x/c.h5"]),
+    (["runs/2024/"], ["runs/2024/b.h5", "runs/2024/x/c.h5"]),
+    (["runs/a.h5", "top.h5"], ["runs/a.h5", "top.h5"]),
+    (["runs/2024", "runs/2024/x/c.h5"], ["runs/2024/b.h5", "runs/2024/x/c.h5"]),
+    (["."], ["runs/a.h5", "runs/2024/b.h5", "runs/2024/x/c.h5", "runsx/d.h5",
+             "top.h5"]),
+])
+def test_folders_select_every_catalogued_file_below_them(
+        tmp_path, requested, expected):
+    plan = plan_download(_folder_catalog(tmp_path), file_paths=requested)
+    assert [item.relative_path.as_posix() for item in plan.items] == expected
+    assert plan.unknown_paths == ()
+
+
+def test_filters_narrow_a_folder_selection(tmp_path):
+    plan = plan_download(_folder_catalog(tmp_path), file_paths=["runs"],
+                         filter="**/2024/*.h5")
+    assert [item.relative_path.as_posix() for item in plan.items] == [
+        "runs/2024/b.h5"]
+
+
+def test_unknown_paths_and_empty_folders_fail_before_contacting_server(
+        tmp_path, monkeypatch):
+    catalog = _folder_catalog(tmp_path)
+    plan = plan_download(catalog, file_paths=[
+        "runs/a.h5", "missing.h5", "run", "empty/", "runs/a.h5/inner"])
+    assert [item.relative_path.as_posix() for item in plan.items] == ["runs/a.h5"]
+    assert plan.unknown_paths == ("missing.h5", "run", "empty", "runs/a.h5/inner")
+    assert "4 path(s) not in the catalog" in plan.summary()
+
+    def reject(*args, **kwargs):
+        raise AssertionError("unknown paths must fail before contacting a server")
+
+    monkeypatch.setattr("hallmark.remote.download.OperationContext", reject)
+    monkeypatch.setattr("hallmark.remote.download.RemoteSpec", SimpleNamespace(
+        from_url=reject))
+    for approved in (True, False):
+        with pytest.raises(DownloadError, match="missing.h5, run, empty") as error:
+            execute_download_plan(catalog, plan, approved=approved)
+        assert "nothing was downloaded" in str(error.value)
+    assert not (tmp_path / "runs").exists()
 
 
 def test_sizes_survive_nullable_numeric_tsv_serialization(catalog):

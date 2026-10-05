@@ -109,11 +109,14 @@ Downloading remote data
 Preview the selected files using the local catalog, then confirm a download::
 
    hm download --all --dry-run
-   hm download --filter 'runs/**'
+   hm download runs
 
-Explicit paths and ``--tsv data.tsv`` also select files. Every nonempty transfer
-in the CLI requires interactive confirmation, including the default clone
-transfer. ``clone --no-download`` skips data and the prompt. Clone filters and
+Choose catalogued paths or folders, relative to the current folder, or
+``--all`` or ``--tsv data.tsv``; ``--filter`` and ``--fmt`` only narrow that
+selection, as in ``hm download --all --filter 'runs/**'``. Paths that are not
+in the catalog stop the download before the server is contacted. Every
+nonempty transfer in the CLI requires interactive confirmation, including the
+default clone transfer. ``clone --no-download`` skips data and the prompt. Clone filters and
 formats cannot be combined with this flag and leave the complete catalog unchanged.
 Declining clone's prompt keeps the catalog and exits successfully.
 A filter or filename format never authorizes a transfer.

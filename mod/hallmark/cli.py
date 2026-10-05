@@ -458,6 +458,17 @@ def checkout(repo, target_branch):
         click.echo(f'Switched to branch "{target_branch}".')
 
 
+def _echo_paths(title, paths, limit=20):
+    """Print a titled list of paths, abbreviating long lists."""
+    if not paths:
+        return
+    click.echo(title)
+    for path in paths[:limit]:
+        click.echo(f"  {path}")
+    if len(paths) > limit:
+        click.echo(f"  ... {len(paths) - limit} more")
+
+
 @hallmark.command(short_help="Download files from the configured data remote.")
 @click.argument("files", nargs=-1)
 @click.option("--tsv", "tsv_names", multiple=True,
@@ -465,9 +476,9 @@ def checkout(repo, target_branch):
 @click.option("--all", "download_all", is_flag=True,
               help="Select all cataloged files.")
 @click.option("--filter", "filters", multiple=True,
-              help="Select paths matching a glob. ** matches recursively. "
-                   "May be repeated.")
-@click.option("--fmt", help="Select paths matching a filename format.")
+              help="Keep only selected paths matching a glob. ** matches "
+                   "recursively. May be repeated.")
+@click.option("--fmt", help="Keep only selected paths matching a filename format.")
 @click.option("--remote", "remote_name",
               help="Name of the configured data remote to use.")
 @click.option("--output", type=click.Path(file_okay=False),
@@ -482,15 +493,21 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
     """
     Download selected files from a configured data remote.
 
-    FILES are relative to the current folder, which can be any folder inside
-    the repository. Preview the selection with --dry-run. Every nonempty
-    download displays its plan and asks for confirmation before transferring
-    files.
+    Choose catalogued FILES or folders, or --all; a folder selects every
+    catalogued file below it. FILES are relative to the current folder, which
+    can be any folder inside the repository. --filter and --fmt only narrow
+    that selection. Paths that are not in the catalog stop the download
+    before the server is contacted.
+
+    Preview the selection with --dry-run. Every nonempty download displays
+    its plan and asks for confirmation before transferring files.
     """
     if download_all and (files or tsv_names):
-        raise ClickException("--all cannot be combined with file paths or --tsv")
-    if not files and not tsv_names and not download_all and not filters and not fmt:
-        raise ClickException("Provide file paths, --tsv, --all, --filter, or --fmt")
+        raise click.UsageError("Give paths or --all, not both")
+    if not files and not tsv_names and not download_all:
+        raise click.UsageError(
+            "Choose files with paths or --all; --filter and --fmt only narrow "
+            "that selection")
     if repo.worktree is None and output is None:
         raise ClickException("--output is required when downloading from a bare repo")
     files = _repo_relative_paths(repo, files)
@@ -500,11 +517,15 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
             filter=filters or None, fmt=fmt, remote_name=remote_name)
         if dry_run:
             click.echo(plan.summary())
-            for item in plan.items[:20]:
-                click.echo(f"  {item.relative_path.as_posix()}")
-            if plan.file_count > 20:
-                click.echo(f"  ... {plan.file_count - 20} more file(s)")
+            _echo_paths("Files to download:", [
+                item.relative_path.as_posix() for item in plan.items])
+            _echo_paths("Not in the catalog:", plan.unknown_paths)
             return
+        if plan.unknown_paths:
+            _echo_paths("Not in the catalog:", plan.unknown_paths)
+            raise ClickException(
+                f"{len(plan.unknown_paths)} path(s) not in the catalog; "
+                "nothing was downloaded")
         _run_download(repo, plan, max_workers=max_workers)
 
 

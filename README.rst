@@ -93,6 +93,9 @@ files without downloading dataset contents or committing the catalog. CyVerse,
 ordinary browsable HTTPS directories, SSH and SFTP use the same workflow. Omit
 the filter to catalog all discoverable files beneath the supplied URL.
 
+``hm download PATH...`` selects catalogued files or folders instead of
+``--all``; ``--filter`` and ``--fmt`` only narrow a selection, and paths that
+are not in the catalog stop the download before the server is contacted.
 Every nonempty CLI transfer asks for confirmation. For separate Python
 downloads, callers can inspect
 ``repo.plan_download()`` and then execute ``repo.download(plan, approved=True)``.

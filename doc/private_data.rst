@@ -137,7 +137,8 @@ From the directory containing ``lab``, enter that repository:
    hm download runs/run_001.h5
 
 The dry run reads only the local catalog. It reports file count, known bytes,
-the number of unknown file sizes, destination and source. The CLI reports
+the number of unknown file sizes, destination and source, then lists the
+selected files and any paths that are not in the catalog. The CLI reports
 duration as unknown. Python callers can supply a transfer rate to estimate
 duration when all file sizes are known. The dry run does not test credentials,
 host trust or remote-file existence.
@@ -153,13 +154,20 @@ Choose a scope from inside ``lab``:
 
 .. code-block:: bash
 
-   hm download --filter 'runs/run_00[12].h5' --dry-run
+   hm download runs --dry-run
+   hm download --all --filter 'runs/run_00[12].h5' --dry-run
    hm download --all --output ./payload
 
-Explicit paths use their recorded catalog checksums when available, just like
-``--tsv`` and ``--all``. A path absent from the catalog can be requested, but
-its size and checksum are unknown. Files without a usable publisher checksum
-can be downloaded, but their contents cannot be checked against the catalog.
+Choose files with catalogued paths or folders, ``--tsv`` or ``--all``. Paths
+are relative to the current folder, which can be any folder inside the
+repository. A folder selects every catalogued file below it, including
+subfolders; ``.`` selects everything below the current folder. ``--filter``
+and ``--fmt`` only narrow that selection: on their own they show usage and
+download nothing. A path that matches no catalogued file, such as a typo or a
+folder without catalogued files, stops the download before the server is
+contacted; ``--dry-run`` lists such paths. Selected files use their recorded
+catalog checksums. Files without a usable publisher checksum can be
+downloaded, but their contents cannot be checked against the catalog.
 
 ``--tsv`` can be repeated and combined with explicit paths; overlapping entries
 are deduplicated. ``--all`` cannot be combined with either selection mode.
@@ -303,9 +311,11 @@ Without ``approved=True``, a nonempty transfer raises ``DownloadError`` before
 opening a connection. A plan freezes the selected files, source URL, profile
 reference, backend, backend options and destination. Later catalog or remote
 configuration changes do not redirect it. ``plan_download(filter="**/*.h5")``
-selects matching files from the catalog;
-``plan_download(output_path="subset", tsv_names=["data.tsv"])`` selects a TSV
-and destination. Planning makes no network requests. Known size totals and
+selects matching files from the catalog; ``plan_download(file_paths=["runs"])``
+selects a folder; ``plan_download(output_path="subset", tsv_names=["data.tsv"])``
+selects a TSV and destination. Planning makes no network requests. Requested
+paths that match no catalogued file are listed in ``plan.unknown_paths``;
+downloading such a plan raises ``DownloadError`` before opening a connection. Known size totals and
 unknown-size counts are available as ``known_bytes`` and
 ``unknown_size_count``. ``estimated_seconds`` stays ``None`` unless all sizes
 are known and ``estimated_bytes_per_second`` was supplied when planning.
@@ -366,7 +376,7 @@ access retains Requests' normal ``.netrc`` and environment behavior; Hallmark's
 named auth profiles apply to SSH/SFTP.
 
 From either initialized catalog, inspect and approve a selected subset using
-``hm download --filter PATTERN --dry-run`` and then the same command
+``hm download --all --filter PATTERN --dry-run`` and then the same command
 without ``--dry-run``. Python follows the same steps:
 
 .. code-block:: python

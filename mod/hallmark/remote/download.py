@@ -541,6 +541,31 @@ def _download_and_verify_file(
         raise DownloadError(f"Failed to write {destination.name}: {exc}") from None
 
 
+def _normalize_requests(file_paths: Sequence[str]) -> tuple[str, ...]:
+    """
+    Used by _select_download_items and plan_download.
+    Normalize requested catalog paths and folders, keeping their order.
+
+    A trailing "/" is optional for folders, and "." requests the whole catalog.
+
+    Returns:
+        tuple[str, ...]: Unique POSIX paths relative to the catalog root.
+    """
+    requests = []
+    for value in file_paths:
+        text = str(value)
+        request = "." if text.rstrip("/") == "." else validate_remote_path(
+            text).as_posix()
+        if request not in requests:
+            requests.append(request)
+    return tuple(requests)
+
+
+def _is_requested(path: str, request: str) -> bool:
+    """Return whether a catalog path is a requested file or lies below a folder."""
+    return request == "." or path == request or path.startswith(request + "/")
+
+
 def _select_download_items(
     repo,
     file_paths: Sequence[str] = (),
@@ -553,7 +578,9 @@ def _select_download_items(
 
     Args:
         repo: The hallmark repository object.
-        file_paths: A sequence of specific file paths to download.
+        file_paths: Catalogued files or folders to download. A folder selects
+            every catalogued file below it; paths outside the catalog select
+            nothing.
         tsv_names: A sequence of TSV names to download files from.
         all_files: If True, include all files from the repository's configuration.
 
@@ -568,7 +595,10 @@ def _select_download_items(
     # dictionary to store selected files with relative paths and optional checksums.
     selected: dict[str, tuple[Path, Optional[ChecksumSpec]]] = {}
     metadata = {}
-    explicit_paths = {validate_remote_path(path).as_posix() for path in file_paths}
+    explicit_paths = _normalize_requests(file_paths)
+
+    def requested(path: str) -> bool:
+        return any(_is_requested(path, request) for request in explicit_paths)
 
     def add_file(
             value: Union[str, Path],
@@ -609,12 +639,9 @@ def _select_download_items(
             row = dict(zip(columns, values))
             # add the resolved remote path and its checksum to the selected files
             relative_path = validate_remote_path(_resolve_remote_path(row, fmt_entries))
-            if not explicit_only or relative_path.as_posix() in explicit_paths:
+            if not explicit_only or requested(relative_path.as_posix()):
                 add_file(relative_path, _checksum_from_row(row), row)
 
-    # Add explicitly requested file paths to the selected files.
-    for file_path in file_paths:
-        add_file(file_path)
     # Organize data configuration entries by their TSV names for easier access.
     entries_by_tsv: dict[str, list[dict]] = {}
     for entry in data_config:
@@ -691,7 +718,7 @@ def _select_download_items(
                 # if a file path is specified in the entry, add it to the selected files
                 if file_path and (
                     all_files
-                    or validate_remote_path(file_path).as_posix() in explicit_paths
+                    or requested(validate_remote_path(file_path).as_posix())
                 ):
                     add_file(file_path, _checksum_from_config(entry), entry)
 
@@ -741,12 +768,16 @@ def plan_download(
 
     No network requests are made. With no explicit paths or TSVs, select
     the complete catalog before applying filters. Missing sizes remain unknown.
+    Requested paths that match no catalogued file are recorded in
+    ``unknown_paths``; such a plan cannot be executed.
 
     Args:
         repo: The hallmark repository object.
         output_path (Path | str, optional): Destination directory. Defaults
             to the worktree; required for a bare repository.
-        file_paths (sequence[str], optional): Remote-relative file paths.
+        file_paths (sequence[str], optional): Catalogued files or folders,
+            relative to the catalog root. A folder selects every catalogued
+            file below it, and "." selects the whole catalog.
         tsv_names (sequence[str], optional): Catalog TSVs to select.
         all_files (bool): Select all configured files. Cannot be combined
             with explicit paths or TSVs. Defaults to False.
@@ -782,6 +813,11 @@ def plan_download(
     items = _select_download_items(
         repo, file_paths=file_paths, tsv_names=tsv_names,
         all_files=all_files or (not file_paths and not tsv_names))
+    # A path is unknown when no catalogued file is, or lies below, that path.
+    selected_paths = [item.relative_path.as_posix() for item in items]
+    unknown_paths = tuple(
+        request for request in _normalize_requests(file_paths)
+        if not any(_is_requested(path, request) for path in selected_paths))
     if filter is not None or fmt is not None:
         from .discovery import path_matches
         items = [item for item in items if path_matches(
@@ -806,7 +842,8 @@ def plan_download(
         remote_auth=remote.get("auth"), remote_name=remote.get("name"),
         estimated_bytes_per_second=estimated_bytes_per_second,
         remote_backend=source.backend if source is not None else None,
-        backend_options=remote.get("backend_options"))
+        backend_options=remote.get("backend_options"),
+        unknown_paths=unknown_paths)
 
 
 def execute_download_plan(
@@ -834,11 +871,15 @@ def execute_download_plan(
 
     Raises:
         TypeError: If ``plan`` is not a DownloadPlan.
-        DownloadError: If approval is missing, setup fails, or the
-            destination is invalid.
+        DownloadError: If the plan has unknown paths, approval is missing,
+            setup fails, or the destination is invalid.
     """
     if not isinstance(plan, DownloadPlan):
         raise TypeError("plan must be a DownloadPlan")
+    if plan.unknown_paths:
+        raise DownloadError(
+            "Not in the catalog: " + ", ".join(plan.unknown_paths)
+            + "; nothing was downloaded")
     if plan.items and approved is not True:
         raise DownloadError("Dataset downloads require explicit approval")
     max_workers = _require_positive_integer(max_workers, label="max_workers")

@@ -158,7 +158,7 @@ Downloads are written to temporary files and checked against any
 checksums supplied with the selection before atomically replacing
 their destinations.
 The ``--tsv`` and ``--all`` options include catalog checksums. Explicit
-paths also use their recorded checksums when available.
+paths and folders must be in the catalog and use their recorded checksums.
 If a transfer or checksum check fails, the existing destination is
 preserved and the temporary file is removed.
 Files that have already downloaded successfully remain available.
