@@ -383,7 +383,20 @@ def config(repo, key, value):
     KEY is `user.name` or `user.email`. These name the author of commits
     made here. They are not shared by `hm clone`.
     """
-    if key not in _IDENTITY_KEYS or not (value or "").strip():
+    if key not in _IDENTITY_KEYS:
+        raise ClickException(_IDENTITY_USAGE)
+
+    if value is None:
+        with _translate_cli_errors(*_REPO_READ_ERRORS):
+            current = dict(zip(
+                ("user.name", "user.email"), repo.effective_identity()))[key]
+        if current is None:
+            raise ClickException(
+                f'{key} is not set. Set it with: hm config {key} "..."')
+        click.echo(current)
+        return
+
+    if not value.strip():
         raise ClickException(_IDENTITY_USAGE)
 
     with _translate_cli_errors(*_REPO_READ_ERRORS):

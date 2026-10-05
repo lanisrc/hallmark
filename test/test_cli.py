@@ -478,7 +478,59 @@ def test_cli_log():
                 f"Expected log output to match git log, got: {result.output.strip()}"
 
 
-def test_cli_config_sets_the_commit_author():
+def test_cli_config_reads_back_a_value(without_configured_identity):
+    """
+    Test that 'config KEY' with no value prints the configured value, the way
+    'git config KEY' does, and explains how to set it when there is none.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            with GitRepo(".hm").config_writer() as writer:
+                writer.remove_section("user")
+
+            missing = runner.invoke(hallmark, ["config", "user.name"])
+            assert missing.exit_code != 0, \
+                f"Expected a non-zero exit code, got {missing.exit_code}"
+            assert "user.name is not set" in missing.output, \
+                f"Expected a not-set message, got: {missing.output}"
+
+            runner.invoke(hallmark, ["config", "user.name", "Ram Adithya"])
+            result = runner.invoke(hallmark, ["config", "user.name"])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 reading the value, got {result.exit_code}"
+            assert result.output.strip() == "Ram Adithya", \
+                f"Expected the stored value printed, got: {result.output!r}"
+
+
+def test_cli_config_reads_back_an_inherited_value(without_configured_identity):
+    """
+    Test that 'config KEY' reports a value configured outside the repository, since
+    that is the author a commit here would be signed with.
+    Args:
+        without_configured_identity: fixture providing an empty home directory.
+    """
+    (without_configured_identity / ".gitconfig").write_text(
+        "[user]\n\tname = Global Person\n\temail = global@example.edu\n",
+        encoding="utf-8")
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            with GitRepo(".hm").config_writer() as writer:
+                writer.remove_section("user")
+
+            result = runner.invoke(hallmark, ["config", "user.email"])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0, got {result.exit_code}: {result.output}"
+            assert result.output.strip() == "global@example.edu", \
+                f"Expected the inherited value printed, got: {result.output!r}"
+
+
+def test_cli_config_sets_the_commit_author(without_configured_identity):
     """
     Test the hallmark CLI 'config' command. This test clears the author configured for
     a repository, sets it again through the CLI, and verifies the commit is signed
@@ -518,10 +570,11 @@ def test_cli_config_sets_the_commit_author():
 @pytest.mark.parametrize(
     "arguments", [
         ["config"],
-        ["config", "user.name"],
         ["config", "user.name", "   "],
-        ["config", "user.nickname", "Ram"]])
-def test_cli_config_shows_usage_and_changes_nothing(arguments):
+        ["config", "user.nickname", "Ram"],
+        ["config", "user.nickname"]])
+def test_cli_config_shows_usage_and_changes_nothing(
+        arguments, without_configured_identity):
     """
     Test that 'config' with a missing key, a missing or blank value, or an
     unsupported key reports how to use it and stores nothing.
