@@ -477,6 +477,56 @@ def test_cli_log():
                 f"Expected log output to match git log, got: {result.output.strip()}"
 
 
+def test_cli_branch_creates_a_branch_without_switching():
+    """
+    Test the hallmark CLI 'branch NAME' command. This test creates a branch and
+    verifies that it is listed while the repository stays on the current branch.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "Original calibration"])
+
+            result = runner.invoke(hallmark, ["branch", "recal"])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for branch NAME, got {result.exit_code}: " \
+                f"{result.output}"
+            assert 'Created branch "recal".' in result.output, \
+                f"Expected a creation message, got: {result.output}"
+
+            listed = runner.invoke(hallmark, ["branch"])
+            assert "* main" in listed.output, \
+                f"Expected to stay on main, got: {listed.output}"
+            assert "  recal" in listed.output, \
+                f"Expected recal to be listed, got: {listed.output}"
+
+
+def test_cli_branch_reports_a_duplicate_name_cleanly():
+    """
+    Test that 'branch NAME' reports an existing branch name as a clean error rather
+    than replacing the branch.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "Original calibration"])
+            runner.invoke(hallmark, ["branch", "recal"])
+
+            result = runner.invoke(hallmark, ["branch", "recal"])
+
+            assert result.exit_code != 0, \
+                f"Expected a non-zero exit code, got {result.exit_code}"
+            assert "branch already exists" in result.output, \
+                f"Expected a duplicate-name error, got: {result.output}"
+
+
 def test_cli_branch_lists_local_branches_and_marks_current():
     """
     Test the hallmark CLI 'branch' command. This test initializes a hallmark repository,

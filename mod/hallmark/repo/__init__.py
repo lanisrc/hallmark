@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from git.exc import GitCommandError
 
-from .branches import checkout, add_worktree
+from .branches import checkout, create_branch, add_worktree
 from ..remote.add import add_remote, is_remote_catalog
 from .dothm import Dothm
 from .state import State
@@ -680,6 +680,20 @@ class Repo:
         current = self.dothm.active_branch.name
         names = sorted(head.name for head in self.dothm.heads)
         return {"current": current, "names": names}
+
+    def create_branch(self, name: str) -> str:
+        '''
+        Create a branch at the current commit without switching to it.
+
+        Args:
+            name (string): Name for the new branch.
+        Returns:
+            string: The created branch name.
+        Raises:
+            ValueError: If the repository has no commits, the name is
+                invalid, or a branch of that name already exists.
+        '''
+        return create_branch(self, name)
 
     def checkout(self, target_branch: str) -> bool:
         '''

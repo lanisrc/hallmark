@@ -363,10 +363,20 @@ def log(repo):
         click.echo(history)
 
 
-@hallmark.command(short_help="List hallmark branches.")
+@hallmark.command(short_help="List or create hallmark branches.")
+@click.argument("name", required=False)
 @click.pass_obj
-def branch(repo):
-    """List local hallmark branches."""
+def branch(repo, name):
+    """List local hallmark branches, or create NAME at the current commit.
+
+    Creating a branch does not switch to it; use `hm checkout NAME` for that.
+    """
+    if name is not None:
+        with _translate_cli_errors(*_REPO_READ_ERRORS):
+            created = repo.create_branch(name)
+        click.echo(f'Created branch "{created}".')
+        return
+
     # use the _translate_cli_errors context manager to handle specific exceptions
     with _translate_cli_errors(*_REPO_READ_ERRORS):
         snapshot = repo.branches()

@@ -15,6 +15,20 @@ from .history import (
 from .changes import ensure_clean_tracked_files, tracked_paths
 
 
+def create_branch(repo, name):
+    name = repo._validate_branch_name(name)
+
+    if not repo.dothm.head.is_valid():
+        raise ValueError(
+            "cannot create a branch before the first commit")
+
+    if name in {head.name for head in repo.dothm.heads}:
+        raise ValueError(f'branch already exists: "{name}"')
+
+    repo.dothm.create_head(name)
+    return name
+
+
 def checkout(repo, target_branch):
     # Validate and normalize the target branch name
     target_branch = repo._validate_branch_name(target_branch)

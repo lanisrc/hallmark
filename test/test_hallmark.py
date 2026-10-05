@@ -1111,6 +1111,95 @@ def test_checkout_rejects_invalid_branch_names(tmp_path, branch_name):
         repo.checkout(branch_name)
 
 
+def test_create_branch_points_at_current_commit_without_switching(tmp_path):
+    """
+    Test that Repo.create_branch() creates a branch at the current commit and leaves
+    the repository on the branch it was already on.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "a0_i0.h5").write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    repo.commit("Original calibration")
+
+    created = repo.create_branch("recal")
+
+    assert created == "recal", f"Expected the created name back, got {created}"
+    snapshot = repo.branches()
+    assert snapshot["current"] == "main", \
+        f"Expected to stay on main, got {snapshot['current']}"
+    assert "recal" in snapshot["names"], \
+        f"Expected recal to be listed, got {snapshot['names']}"
+    assert repo.dothm.heads["recal"].commit == repo.dothm.heads["main"].commit, \
+        "Expected the new branch to point at the current commit."
+
+
+def test_create_branch_rejects_a_name_that_is_already_taken(tmp_path):
+    """
+    Test that Repo.create_branch() refuses an existing branch name and leaves the
+    original branch pointing where it was.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "a0_i0.h5").write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    repo.commit("Original calibration")
+    repo.create_branch("recal")
+    original_commit = repo.dothm.heads["recal"].commit
+
+    with pytest.raises(ValueError, match="branch already exists"):
+        repo.create_branch("recal")
+
+    assert repo.dothm.heads["recal"].commit == original_commit, \
+        "Expected the existing branch to be left untouched."
+
+
+@pytest.mark.parametrize(
+    "branch_name", [
+        "",
+        "   ",
+        "-f",
+        "../escape",
+        "bad name",
+        "bad..name",
+        "branch~1"])
+def test_create_branch_rejects_invalid_branch_names(tmp_path, branch_name):
+    """
+    Test that Repo.create_branch() raises a ValueError for invalid branch names and
+    creates nothing.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+        branch_name: A parameterized invalid branch name to test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "a0_i0.h5").write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    repo.commit("Original calibration")
+    before = {head.name for head in repo.dothm.heads}
+
+    with pytest.raises(ValueError, match="branch name"):
+        repo.create_branch(branch_name)
+
+    assert {head.name for head in repo.dothm.heads} == before, \
+        "Expected no branch to be created for an invalid name."
+
+
+def test_create_branch_requires_an_existing_commit(tmp_path):
+    """
+    Test that Repo.create_branch() refuses to create a branch while the current branch
+    is unborn, since there is no commit for the new branch to point at.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    repo.dothm.git.checkout("--orphan", "fresh")
+
+    with pytest.raises(ValueError, match="before the first commit"):
+        Repo(tmp_path / "repo").create_branch("recal")
+
+
 def test_checkout_checks_target_objects_before_switching_branch(tmp_path):
     """
     Test that the Repo.checkout() method checks for the existence of target objects
