@@ -14,6 +14,7 @@
 
 """Hallmark CLI entrypoint and command wiring."""
 
+import os
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -25,7 +26,8 @@ from git.exc import GitError
 from . import Repo
 from .remote.download import DownloadError
 from .remote.discovery import path_matches
-from .error import CheckoutError, CloneError
+from .error import CheckoutError, CloneError, DothmError
+from .utils import use_working_directory
 
 
 # use a context manager to translate application errors into clean Click errors
@@ -138,9 +140,58 @@ def hallmark(ctx):
     if ctx.invoked_subcommand in [None, "init", "clone"]:
         # return early without attempting to open a repository
         return
-    # attempt to open the hallmark repository in the current directory
+    # open the repository containing the current folder, searching its parents
     with _translate_cli_errors(GitError, prefix="Failed to open hallmark repository"):
-        ctx.obj = Repo(".")
+        with _translate_cli_errors(DothmError):
+            ctx.obj = Repo.find(Path.cwd())
+
+
+def _repo_relative_paths(repo, paths):
+    """
+    Convert paths given relative to the current folder into repository paths.
+
+    Bare repositories have no worktree, so their paths are already relative to
+    the catalog root and are returned unchanged.
+
+    Args:
+        repo: The hallmark repository object.
+        paths (sequence[str]): Paths as typed by the user.
+
+    Returns:
+        tuple[str, ...]: POSIX paths relative to the worktree; "." names the
+        whole worktree.
+
+    Raises:
+        ClickException: If a path is outside the worktree or inside ``.hm``.
+    """
+    if repo.worktree is None:
+        return tuple(paths)
+    worktree = Path(repo.worktree)
+    converted = []
+    for value in paths:
+        # Normalize lexically: catalog paths are literal and need not exist yet.
+        absolute = Path(os.path.normpath(Path.cwd() / value))
+        try:
+            relative = absolute.relative_to(worktree)
+        except ValueError:
+            raise ClickException(
+                f'"{value}" is outside the repository worktree "{worktree}"') from None
+        if relative.parts and relative.parts[0].lower() == ".hm":
+            raise ClickException(f'"{value}" is inside .hm, not a data path')
+        converted.append(relative.as_posix())
+    return tuple(converted)
+
+
+def _names_worktree_root(repo, value):
+    """Return whether an add input is "." or another path to the worktree root."""
+    if repo.worktree is None:
+        return False
+    if value == ".":
+        return True
+    try:
+        return (Path.cwd() / value).resolve() == Path(repo.worktree).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _load_backend_options(path):
@@ -258,7 +309,9 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
 
     `hm add [--regex] FORMAT` uses the branch format string workflow.
     `hm add "."` rebuilds the manifest from current files that match
-    the branch `fmt` in `config.yml`.
+    the branch `fmt` in `config.yml`, across the whole repository from any
+    folder inside it. Any other path to the worktree root, such as `..` from
+    a subfolder, does the same.
     Explicit path inputs such as shell-expanded `*` are not supported yet
     with the parameter-based manifest format.
     """
@@ -276,6 +329,11 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
             remote = "://" in inputs[0]
             if remote or any(value is not None for value in remote_options.values()):
                 pf = repo.add(inputs[0], encoding, progress=True, **remote_options)
+            elif _names_worktree_root(repo, inputs[0]):
+                # Like ".", a path naming the worktree root stages the whole
+                # repository from any folder inside it.
+                with use_working_directory(repo.worktree):
+                    pf = repo.add(".", encoding)
             else:
                 pf = repo.add(inputs[0], encoding)
         # oterhwise, use the add_paths method for multiple inputs
@@ -423,8 +481,10 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
     """
     Download selected files from a configured data remote.
 
-    Preview the selection with --dry-run. Every nonempty download displays
-    its plan and asks for confirmation before transferring files.
+    FILES are relative to the current folder, which can be any folder inside
+    the repository. Preview the selection with --dry-run. Every nonempty
+    download displays its plan and asks for confirmation before transferring
+    files.
     """
     if download_all and (files or tsv_names):
         raise ClickException("--all cannot be combined with file paths or --tsv")
@@ -432,6 +492,7 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
         raise ClickException("Provide file paths, --tsv, --all, --filter, or --fmt")
     if repo.worktree is None and output is None:
         raise ClickException("--output is required when downloading from a bare repo")
+    files = _repo_relative_paths(repo, files)
     with _translate_cli_errors(DownloadError, ValueError):
         plan = repo.plan_download(
             output, file_paths=files, tsv_names=tsv_names, all_files=download_all,

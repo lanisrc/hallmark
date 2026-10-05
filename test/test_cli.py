@@ -42,7 +42,7 @@ files = [f"a{a}_i{i}.h5"
 
 def _install_repo(monkeypatch, worktree=Path("worktree")):
     """
-    Install a fake hallmark repository for testing, monkeypatching the Repo class
+    Install a fake hallmark repository for testing, monkeypatching Repo.find
     to return a SimpleNamespace with the given worktree.
     Args:
         monkeypatch: pytest fixture for monkeypatching functions and attributes.
@@ -55,7 +55,7 @@ def _install_repo(monkeypatch, worktree=Path("worktree")):
         worktree=worktree,
         plan_download=lambda output=None, **kwargs: _download_plan(
             0, output or worktree or "downloads"))
-    monkeypatch.setattr(cli_module, "Repo", lambda path: repo)
+    monkeypatch.setattr(cli_module, "Repo", SimpleNamespace(find=lambda start: repo))
     return repo
 
 
@@ -102,10 +102,10 @@ def test_group_reports_repository_open_error(monkeypatch):
     Raises:
         GitError: Simulated error to test error handling in the CLI.
     """
-    def fail_repo(path):
+    def fail_repo(start):
         """ Raise a GitError to simulate a failure to open a hallmark repository."""
         raise GitError("not a hallmark repository")
-    monkeypatch.setattr(cli_module, "Repo", fail_repo)
+    monkeypatch.setattr(cli_module, "Repo", SimpleNamespace(find=fail_repo))
     result = CliRunner().invoke(hallmark, ["info"])
 
     assert result.exit_code != 0, f"Expected non-zero exit code, got {result.exit_code}"
@@ -783,8 +783,10 @@ def test_download_cli_reports_empty_selection(monkeypatch):
     assert "Download these files?" not in result.output
 
 
-def test_download_cli_passes_selection_and_options_to_downloader(monkeypatch):
-    repo = _install_repo(monkeypatch)
+def test_download_cli_passes_selection_and_options_to_downloader(
+        monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    repo = _install_repo(monkeypatch, worktree=tmp_path)
     plan = _download_plan(1)
     captured = {}
 
@@ -987,3 +989,96 @@ def test_add_then_download_requires_confirmation(monkeypatch, tmp_path, answer):
     assert Repo(destination).state.data["path"].tolist() == ["a.fits"]
     assert (destination / "a.fits").exists() == (answer == "y\n")
     assert (result.exit_code == 0) == (answer == "y\n")
+
+
+### repository discovery tests ###
+
+def test_cli_commands_find_the_repository_from_a_subfolder(monkeypatch, tmp_path):
+    repo = _local_cli_catalog(tmp_path / "project")
+    nested = repo.worktree / "sub" / "dir"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    runner = CliRunner()
+
+    result = runner.invoke(hallmark, ["info"])
+    assert result.exit_code == 0, result.output
+    assert f'dot-hallmark repo: "{repo.dothm.path}"' in result.output
+    assert f'hallmark worktree: "{repo.worktree}"' in result.output
+
+    result = runner.invoke(hallmark, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "On branch main" in result.output
+
+    result = runner.invoke(hallmark, ["download", "--all", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert f"Destination: {repo.worktree}" in result.output
+    assert "tiny.fits" in result.output
+    assert not (nested / ".hm").exists()
+
+
+def test_cli_reports_missing_repository(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(hallmark, ["status"])
+    assert result.exit_code == 1
+    assert "Not a Hallmark repository (or any parent folder)" in result.output
+    assert not (tmp_path / ".hm").exists()
+
+
+def test_cli_download_paths_are_relative_to_the_current_folder(monkeypatch, tmp_path):
+    repo = _local_cli_catalog(tmp_path / "project")
+    (repo.worktree / "sub").mkdir()
+    monkeypatch.chdir(repo.worktree / "sub")
+    result = CliRunner().invoke(hallmark, ["download", "../tiny.fits", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "1 file(s)" in result.output
+    assert "  tiny.fits" in result.output
+
+
+@pytest.mark.parametrize("path, message", [
+    ("../../outside.fits", "outside the repository"),
+    ("../.hm/config.yml", "inside .hm"),
+])
+def test_cli_download_rejects_paths_outside_the_worktree(
+        monkeypatch, tmp_path, path, message):
+    repo = _local_cli_catalog(tmp_path / "project")
+    (repo.worktree / "sub").mkdir()
+    monkeypatch.chdir(repo.worktree / "sub")
+
+    def reject_plan(*args, **kwargs):
+        raise AssertionError("invalid paths must be rejected before planning")
+
+    monkeypatch.setattr(Repo, "plan_download", reject_plan)
+    result = CliRunner().invoke(hallmark, ["download", path, "--dry-run"])
+    assert result.exit_code != 0
+    assert message in result.output
+
+
+@pytest.mark.parametrize("folder, argument", [
+    ("A", "."), ("A", ".."), ("A", "../"), (".", "./"), ("A", "<root>"),
+    ("A/deeper", "../.."),
+])
+def test_cli_add_dot_from_a_subfolder_stages_the_whole_repository(
+        monkeypatch, tmp_path, folder, argument):
+    repo = Repo.init(tmp_path / "project")
+    for group in ("A", "B"):
+        (repo.worktree / group).mkdir()
+        for run in (1, 2):
+            (repo.worktree / group / f"run{run}.txt").write_text(f"{group}{run}")
+    repo.add("{group}/run{run:d}.txt")
+    repo.commit("Record both folders")
+    changed = repo.worktree / "A" / "run1.txt"
+    changed.write_text("A1 fixed")
+    (repo.worktree / folder).mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(repo.worktree / folder)
+    if argument == "<root>":
+        argument = str(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["add", argument])
+    assert result.exit_code == 0, result.output
+    reopened = Repo(repo.worktree)
+    assert reopened.state.config["data"][0]["fmt"] == "{group}/run{run:d}.txt"
+    data = reopened.state.data
+    rows = {(row["group"], row["run"]): row["sha1"]
+            for row in data.to_dict(orient="records")}
+    assert sorted(rows) == [("A", "1"), ("A", "2"), ("B", "1"), ("B", "2")]
+    assert rows[("A", "1")] == Repo.checksum(changed)
+    assert rows[("B", "2")] == Repo.checksum(repo.worktree / "B" / "run2.txt")

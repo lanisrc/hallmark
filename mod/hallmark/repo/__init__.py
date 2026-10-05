@@ -31,7 +31,7 @@ from ..paraframe import ParaFrame
 from .manifest import build_file_table, file_versions_by_path, iter_manifest_entries
 from .history import (
     load_head_state)
-from ..error import DestinationExistsError
+from ..error import DestinationExistsError, DothmError
 from ..utils import (
     FILE_IO_CHUNK_SIZE,
     use_working_directory,
@@ -79,6 +79,56 @@ class Repo:
         if path.name == ".hm" or path.suffix == ".hm":
             return path, None
         return path / ".hm", path
+
+    @staticmethod
+    def find_root(start: Union[Path, str] = ".") -> Optional[Path]:
+        """
+        Locate the repository containing a folder without opening it.
+
+        Args:
+            start (Path | str): Folder to search from. Parent folders are
+                searched in turn.
+
+        Returns:
+            Path | None: The worktree, or the bare ``.hm`` repository, of the
+            nearest enclosing repository; None if there is none.
+        """
+        start = Path(start).expanduser().resolve()
+        for folder in (start, *start.parents):
+            # A bare repository is itself the ".hm" folder, as in Repo(path).
+            if folder.name == ".hm" or (
+                    folder.suffix == ".hm" and (folder / ".git").exists()):
+                return folder
+            # Stop at a damaged ".hm" too, so opening it can explain the damage.
+            if (folder / ".hm").exists() or (folder / ".hm").is_symlink():
+                return folder
+        return None
+
+    @classmethod
+    def find(cls, start: Union[Path, str] = ".") -> "Repo":
+        """
+        Open the repository containing a folder, searching parent folders.
+
+        ``Repo(path)`` opens exactly ``path``; ``find`` lets commands run from
+        any folder inside a worktree.
+
+        Args:
+            start (Path | str): Folder to search from. Defaults to the current
+                folder.
+
+        Returns:
+            Repo: The nearest enclosing repository.
+
+        Raises:
+            DothmError: If neither the folder nor any parent contains ``.hm``.
+        """
+        root = cls.find_root(start)
+        if root is None:
+            raise DothmError(
+                f'Not a Hallmark repository (or any parent folder): '
+                f'"{Path(start).expanduser().resolve()}"; '
+                "run hm init or hm clone")
+        return cls(root)
 
     def __init__(self, path: Union[Path, str]) -> None:
         '''

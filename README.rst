@@ -85,11 +85,12 @@ Create a repository, stage a remote catalog, then commit it::
     hm download --all --dry-run
     hm download --all
 
-``hm`` is the CLI command; ``hallmark`` remains an alias. Initialization creates the empty
-local repository. Remote ``add`` discovers files without downloading dataset
-contents or committing the catalog. CyVerse, ordinary browsable HTTPS
-directories, SSH and SFTP use the same workflow. Omit the filter to catalog
-all discoverable files beneath the supplied URL.
+``hm`` is the CLI command; ``hallmark`` remains an alias. Commands work from any
+folder inside a repository; ``hm`` finds ``.hm`` in parent folders.
+Initialization creates the empty local repository. Remote ``add`` discovers
+files without downloading dataset contents or committing the catalog. CyVerse,
+ordinary browsable HTTPS directories, SSH and SFTP use the same workflow. Omit
+the filter to catalog all discoverable files beneath the supplied URL.
 
 Every nonempty CLI transfer asks for confirmation. For separate Python
 downloads, callers can inspect
