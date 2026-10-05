@@ -15,7 +15,7 @@
 
 import os
 import requests
-import importlib
+import importlib.metadata
 import pytest
 import pandas as pd
 from pathlib        import Path
@@ -29,6 +29,10 @@ from hallmark.cli import hallmark
 from hallmark.remote.download import DownloadError
 from hallmark.remote.plan import DownloadItem, DownloadPlan
 from hallmark.utils import use_working_directory
+
+_CLICK_RUNNER_SIGNALS_EOF = tuple(
+    int(part) for part in importlib.metadata.version("click").split(".")[:2]
+) >= (8, 2)
 
 cli_module = importlib.import_module("hallmark.cli")
 
@@ -915,6 +919,10 @@ def test_cli_downloads_only_approved_selected_payload(
     assert "1 file(s); 4 bytes" in result.output
     assert "Download these files? [y/N]" in result.output
     assert "Source: https://example.test/data/" in result.output
+    # Click 8.1 (the newest for Python 3.9) reads exhausted CliRunner input
+    # as an empty line instead of end of input, so "" acts like "\n" there.
+    if answer == "" and not _CLICK_RUNNER_SIGNALS_EOF:
+        answer = "\n"
     if answer == "y\n":
         assert result.exit_code == 0, result.output
         assert requests_made == ["https://example.test/data/tiny.fits"]
