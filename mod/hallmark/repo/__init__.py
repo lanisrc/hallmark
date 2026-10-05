@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
-from git.exc import GitCommandError
+from git.exc import GitCommandError, InvalidGitRepositoryError, NoSuchPathError
 
 from .branches import checkout, add_worktree
 from ..remote.add import add_remote, is_remote_catalog
@@ -140,18 +140,29 @@ class Repo:
             none.
         '''
         dothm_path, worktree_path = self.resolve_repo_paths(path)
-        self.dothm = Dothm(dothm_path)
+        # Opening only reads: a damaged repository is explained, not repaired.
+        try:
+            self.dothm = Dothm(dothm_path)
+        except InvalidGitRepositoryError as exc:
+            raise DothmError(
+                f'Repository at "{dothm_path}" is damaged: it is not a Git '
+                "worktree; nothing was changed") from exc
+        except NoSuchPathError as exc:
+            # A missing .hm keeps the GitPython error; a dangling link is damage.
+            if not Path(dothm_path).is_symlink():
+                raise
+            raise DothmError(
+                f'Repository at "{dothm_path}" is damaged: it links to a folder '
+                "that does not exist; nothing was changed") from exc
         self.worktree = worktree_path and Worktree(worktree_path)
-        self.state = self.dothm.load_state()
+        try:
+            self.state = self.dothm.load_state()
+        except DothmError as exc:
+            raise DothmError(f"{exc}; nothing was changed") from exc
         self.download_result = None
 
-        common = Path(self.dothm.common_dir).resolve().parent
-        self.objects = Objects(common)
-        dothm_objects = Path(dothm_path) / "objects"
-        main_objects = common / "objects"
-        if dothm_objects.resolve() != main_objects.resolve() \
-        and not dothm_objects.exists():
-            dothm_objects.symlink_to(main_objects)
+        # Linked worktrees share the object store of the main ".hm".
+        self.objects = Objects(Path(self.dothm.common_dir).resolve().parent)
 
     def _resolve_worktree_path(self, value, *, label: str = "tracked path") -> Path:
         """

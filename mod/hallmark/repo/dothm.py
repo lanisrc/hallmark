@@ -29,6 +29,9 @@ from ..utils import (
     replace_file_on_success, load_yaml_file, validate_path_name)
 from .state import State
 
+# Files that make up the state database of every ``.hm`` repository.
+STATE_FILES = ("config.yml", "meta.yml", "data.tsv")
+
 
 class _HallmarkYamlDumper(yaml.Dumper):
     """
@@ -196,10 +199,36 @@ remote:
         return Dothm(path)
 
     def load_state(self) -> State:
+        """
+        Read the state database files.
+
+        Returns:
+            State: The repository configuration, metadata and catalog.
+
+        Raises:
+            DothmError: If a state file is missing or cannot be read. The
+                files are only read, never repaired.
+        """
+        missing = [name for name in STATE_FILES if not (self.path / name).is_file()]
+        if missing:
+            raise DothmError(
+                f'Repository at "{self.path}" is damaged: missing '
+                + ", ".join(missing))
+
+        def read(name, reader):
+            try:
+                return reader(Path(name).stem)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                # ValueError covers pandas parser and Unicode decoding errors.
+                detail = " ".join(str(exc).split())
+                raise DothmError(
+                    f'Repository at "{self.path}" is damaged: cannot read '
+                    f"{name} ({detail})") from exc
+
         return State(
-            config = self.read_yaml("config"),
-            meta = self.read_yaml("meta"),
-            data = self.read_tsv("data"))
+            config = read("config.yml", self.read_yaml),
+            meta = read("meta.yml", self.read_yaml),
+            data = read("data.tsv", self.read_tsv))
 
     def save_state(self, state: State) -> None:
         self.write_yaml(state.config, "config")

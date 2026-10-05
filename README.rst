@@ -86,7 +86,8 @@ Create a repository, stage a remote catalog, then commit it::
     hm download --all
 
 ``hm`` is the CLI command; ``hallmark`` remains an alias. Commands work from any
-folder inside a repository; ``hm`` finds ``.hm`` in parent folders.
+folder inside a repository; ``hm`` finds ``.hm`` in parent folders. If ``.hm``
+is damaged or missing files, commands explain the problem and change nothing.
 Initialization creates the empty local repository. Remote ``add`` discovers
 files without downloading dataset contents or committing the catalog. CyVerse,
 ordinary browsable HTTPS directories, SSH and SFTP use the same workflow. Omit

@@ -366,6 +366,9 @@ def add_worktree(repo, target_branch):
 
         # iterate over the target state data and restore files from the object store
         try:
+            # Point the new ".hm" at the shared object store for tools that read
+            # objects through a repository path, such as a clone of this worktree.
+            (target_dothm / "objects").symlink_to(repo.objects.root)
             for _, row in target_state.data.iterrows():
                 rel_path = row_to_path(row, target_fmt)
                 # resolve relative path to an absolute path in the target worktree
