@@ -366,6 +366,32 @@ def log(repo):
         click.echo(history)
 
 
+_IDENTITY_KEYS = {"user.name": "name", "user.email": "email"}
+
+_IDENTITY_USAGE = (
+    'Usage: hm config user.name "Your Name"'
+    ' or hm config user.email "you@example.com"')
+
+
+@hallmark.command(short_help="Set the commit author for this repository.")
+@click.argument("key", required=False)
+@click.argument("value", required=False)
+@click.pass_obj
+def config(repo, key, value):
+    """Save KEY as VALUE for this repository only.
+
+    KEY is `user.name` or `user.email`. These name the author of commits
+    made here. They are not shared by `hm clone`.
+    """
+    if key not in _IDENTITY_KEYS or not (value or "").strip():
+        raise ClickException(_IDENTITY_USAGE)
+
+    with _translate_cli_errors(*_REPO_READ_ERRORS):
+        repo.set_identity(**{_IDENTITY_KEYS[key]: value.strip()})
+
+    click.echo(f"Set {key} for this repository.")
+
+
 @hallmark.command(short_help="List or create hallmark branches.")
 @click.argument("name", required=False)
 @click.pass_obj

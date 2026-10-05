@@ -610,6 +610,10 @@ class Repo:
             raise RuntimeError(
                 "You're not on a branch. Run hm branch <name> then "
                 "hm checkout <name> to save changes.")
+        if not all(self.dothm.identity()):
+            raise RuntimeError(
+                'Set your name and email first: hm config user.name "..." '
+                'and hm config user.email "..."')
         # if allow_empty is False and there are no staged changes, return False
         if (not allow_empty and not self.dothm.index.diff("HEAD")):
             # return early since there are no changes to commit
@@ -690,6 +694,30 @@ class Repo:
             "current": current,
             "names": names,
             "detached_at": detached_at}
+
+    def set_identity(
+        self,
+        name: Optional[str] = None,
+        email: Optional[str] = None,
+    ) -> None:
+        '''
+        Save the commit author name and email for this repository only.
+
+        Args:
+            name (string | None): Author name to store, if given.
+            email (string | None): Author email to store, if given.
+        '''
+        self.dothm.set_identity(name=name, email=email)
+
+    def identity(self) -> Tuple[Optional[str], Optional[str]]:
+        '''
+        Return the commit author name and email set for this repository.
+
+        Returns:
+            tuple[string | None, string | None]: The stored name and email,
+            each ``None`` when it has not been set for this repository.
+        '''
+        return self.dothm.identity()
 
     def create_branch(self, name: str) -> str:
         '''

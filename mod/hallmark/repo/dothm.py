@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from configparser import NoOptionError, NoSectionError
 from functools import cached_property
 from pathlib import Path
 from typing import Optional, Union
@@ -194,6 +195,28 @@ remote:
         except GitCommandError as exc:
             raise DothmError(f'Failed to link "{path}": {exc}')
         return Dothm(path)
+
+    def set_identity(
+        self,
+        name: Optional[str] = None,
+        email: Optional[str] = None,
+    ) -> None:
+        with self.config_writer() as writer:
+            if name is not None:
+                writer.set_value("user", "name", name)
+            if email is not None:
+                writer.set_value("user", "email", email)
+
+    def identity(self) -> tuple[Optional[str], Optional[str]]:
+        reader = self.config_reader("repository")
+        values = []
+        for key in ("name", "email"):
+            try:
+                value = str(reader.get_value("user", key)).strip()
+            except (NoSectionError, NoOptionError):
+                value = ""
+            values.append(value or None)
+        return values[0], values[1]
 
     def load_state(self) -> State:
         return State(

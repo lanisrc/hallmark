@@ -1209,6 +1209,110 @@ def test_create_branch_requires_an_existing_commit(tmp_path):
         Repo(tmp_path / "repo").create_branch("recal")
 
 
+def _repo_without_identity(tmp_path):
+    """
+    Build a repository with staged changes and no commit author configured, undoing
+    the identity the test fixture sets on every new repository.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    Returns:
+        Repo: the repository, with a staged change and no identity.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    with repo.dothm.config_writer() as writer:
+        writer.remove_section("user")
+    (repo.worktree / "a0_i0.h5").write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    return Repo(tmp_path / "repo")
+
+
+def test_set_identity_stores_the_author_for_this_repository_only(tmp_path):
+    """
+    Test that set_identity records the author in the repository's own git config, so
+    that commits made there are attributed to it.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_without_identity(tmp_path)
+
+    repo.set_identity("Ram Adithya", "ram@example.edu")
+
+    assert repo.identity() == ("Ram Adithya", "ram@example.edu"), \
+        f"Expected the stored identity back, got {repo.identity()}"
+    repo.commit("First dataset")
+    author = repo.dothm.head.commit.author
+    assert (author.name, author.email) == ("Ram Adithya", "ram@example.edu"), \
+        f"Expected the commit to be signed with it, got {author}"
+
+
+def test_commit_requires_both_a_name_and_an_email(tmp_path):
+    """
+    Test that committing is refused until both the author name and email are set for
+    the repository, and that no commit is created meanwhile.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_without_identity(tmp_path)
+    before = repo.dothm.head.commit.hexsha
+
+    with pytest.raises(RuntimeError, match="Set your name and email first"):
+        repo.commit("First dataset")
+
+    repo.set_identity(name="Ram Adithya")
+    with pytest.raises(RuntimeError, match="Set your name and email first"):
+        repo.commit("First dataset")
+
+    assert repo.dothm.head.commit.hexsha == before, \
+        "Expected no commit to be created without a complete identity."
+
+    repo.set_identity(email="ram@example.edu")
+    assert repo.commit("First dataset") is True, \
+        "Expected the commit to succeed once both values are set."
+
+
+def test_identity_ignores_values_configured_outside_the_repository(
+        tmp_path, monkeypatch):
+    """
+    Test that an identity configured globally does not satisfy the requirement, since
+    hm config stores the author for one repository only.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+        monkeypatch: pytest fixture for temporarily modifying environment variables.
+    """
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text(
+        "[user]\n\tname = Global Person\n\temail = global@example.edu\n",
+        encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    repo = _repo_without_identity(tmp_path)
+
+    assert repo.identity() == (None, None), \
+        f"Expected the global identity to be ignored, got {repo.identity()}"
+    with pytest.raises(RuntimeError, match="Set your name and email first"):
+        repo.commit("First dataset")
+
+
+def test_clone_does_not_copy_the_authors_identity(tmp_path):
+    """
+    Test that cloning a repository does not carry the original author's name and email
+    across, so commits in the copy are not misattributed.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    source = Repo.init(tmp_path / "source")
+    source.set_identity("Ram Adithya", "ram@example.edu")
+    (source.worktree / "a0_i0.h5").write_text("original\n", encoding="utf-8")
+    source.add("a{a}_i{i}.h5")
+    source.commit("First dataset")
+
+    clone = Repo.clone(str(source.dothm.path), tmp_path / "copy", download=False)
+
+    assert clone.identity() == (None, None), \
+        f"Expected the clone to have no identity, got {clone.identity()}"
+    with pytest.raises(RuntimeError, match="Set your name and email first"):
+        clone.commit("Should be refused")
+
+
 def _repo_with_two_commits(tmp_path):
     """
     Build a repository with two commits on main, left checked out on main.

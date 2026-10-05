@@ -478,6 +478,73 @@ def test_cli_log():
                 f"Expected log output to match git log, got: {result.output.strip()}"
 
 
+def test_cli_config_sets_the_commit_author():
+    """
+    Test the hallmark CLI 'config' command. This test clears the author configured for
+    a repository, sets it again through the CLI, and verifies the commit is signed
+    with it.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            with GitRepo(".hm").config_writer() as writer:
+                writer.remove_section("user")
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+
+            refused = runner.invoke(hallmark, ["commit", "-m", "First dataset"])
+            assert refused.exit_code != 0, \
+                f"Expected a non-zero exit code, got {refused.exit_code}"
+            assert "Set your name and email first" in refused.output, \
+                f"Expected an identity error, got: {refused.output}"
+
+            runner.invoke(hallmark, ["config", "user.name", "Ram Adithya"])
+            result = runner.invoke(
+                hallmark, ["config", "user.email", "ram@example.edu"])
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for config, got {result.exit_code}: " \
+                f"{result.output}"
+
+            committed = runner.invoke(hallmark, ["commit", "-m", "First dataset"])
+            assert committed.exit_code == 0, \
+                f"Expected the commit to succeed, got: {committed.output}"
+            author = GitRepo(".hm").head.commit.author
+            assert (author.name, author.email) \
+                == ("Ram Adithya", "ram@example.edu"), \
+                f"Expected the commit to be signed with the identity, got {author}"
+
+
+@pytest.mark.parametrize(
+    "arguments", [
+        ["config"],
+        ["config", "user.name"],
+        ["config", "user.name", "   "],
+        ["config", "user.nickname", "Ram"]])
+def test_cli_config_shows_usage_and_changes_nothing(arguments):
+    """
+    Test that 'config' with a missing key, a missing or blank value, or an
+    unsupported key reports how to use it and stores nothing.
+    Args:
+        arguments: a parameterized argument list that should be rejected.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            with GitRepo(".hm").config_writer() as writer:
+                writer.remove_section("user")
+
+            result = runner.invoke(hallmark, arguments)
+
+            assert result.exit_code != 0, \
+                f"Expected a non-zero exit code, got {result.exit_code}"
+            assert "Usage: hm config user.name" in result.output, \
+                f"Expected usage guidance, got: {result.output}"
+            assert Repo(".").identity() == (None, None), \
+                f"Expected nothing stored, got {Repo('.').identity()}"
+
+
 def test_cli_checkout_rejects_an_unknown_target():
     """
     Test that 'checkout' no longer creates a branch from an unrecognized name, and

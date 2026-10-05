@@ -3,8 +3,28 @@ from pathlib import Path
 import pytest
 
 from hallmark import ParaFrame, Repo
+from hallmark.repo.dothm import Dothm
 from hallmark.remote.download import _select_remote_config, execute_download_plan
 from hallmark.remote.plan import DownloadItem, DownloadPlan
+
+
+@pytest.fixture(autouse=True)
+def configure_commit_identity(monkeypatch):
+    """
+    Give every repository created during a test a commit author, the way a developer
+    machine or CI runner would. Tests that exercise the missing-identity behaviour
+    create their repositories outside this patch or clear the values themselves.
+    Args:
+        monkeypatch: pytest fixture for temporarily modifying attributes.
+    """
+    original_init = Dothm.init
+
+    def init_with_identity(*args, **kwargs):
+        dothm = original_init(*args, **kwargs)
+        dothm.set_identity("Hallmark Tests", "tests@example.invalid")
+        return dothm
+
+    monkeypatch.setattr(Dothm, "init", init_with_identity)
 
 
 Standard_files = [
@@ -44,6 +64,7 @@ def hallmark_test_suite_dictionary(tmp_path_factory):
 
     # Initialize repo in dedicated folder
     repo = Repo.init(repo_path)
+    repo.set_identity("Hallmark Tests", "tests@example.invalid")
 
     # Actually write out listed files in the temporary directory
     _write_text_files(repo_path, Standard_files)
