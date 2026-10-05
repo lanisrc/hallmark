@@ -66,8 +66,12 @@ Suppose the export contains ``runs/run_001.h5``, ``runs/run_002.h5`` and
 
 This creates ``./lab/.hm`` and catalogs only the matching run files. The URL
 is the exact discovery root. A filename format selects paths and extracts
-parameters; it does not approve a download. A glob filter can select paths
-without defining parameters:
+parameters; it does not approve a download. Each branch has one filename
+format: adding the bare URL again rescans with the saved format, and a new
+format is refused, before the server is contacted, if any catalogued file does
+not fit it. There is no option to force it; a broader format that fits every
+catalogued file replaces the old one. A glob filter can select paths without
+defining parameters:
 
 .. code-block:: bash
 

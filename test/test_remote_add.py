@@ -367,3 +367,72 @@ def test_failed_remote_scan_is_explained_and_keeps_previous_catalog(
         "Cannot establish connection to https://example.test")
     assert _state_bytes(repo) == before
     assert repo.state.data.path.tolist() == ["M87_001.fits", "M87_002.fits"]
+
+
+def test_new_pattern_that_drops_catalogued_files_is_refused_offline(
+        tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    root = "https://example.test/data/"
+    repo.add(root + "{src}_{day:03d}.fits")
+    repo.commit("Record fits files")
+    remote_listing[1].clear()
+    before = _state_bytes(repo)
+    with pytest.raises(ValueError) as error:
+        repo.add(root + "run{run:d}.fits")
+    message = str(error.value)
+    assert "M87_001.fits" in message and "M87_002.fits" in message
+    assert "no force option" in message
+    assert remote_listing[1] == []
+    assert _state_bytes(repo) == before
+    assert repo.state.config["data"] == [{"db": "data.tsv",
+                                         "fmt": "{src}_{day:03d}.fits"}]
+
+
+def test_broader_pattern_is_accepted_and_kept_rows_keep_their_information(
+        tmp_path, remote_listing):
+    pages, _ = remote_listing
+    digest = "a" * 64
+    pages[""] += '<a href="SHA256SUMS">SHA256SUMS</a>'
+    pages["SHA256SUMS"] = f"{digest}  M87_001.fits\n"
+    repo = Repo.init(tmp_path / "data")
+    root = "https://example.test/data/"
+    repo.add(root + "M87_{day:03d}.fits", filter="*001*")
+    repo.commit("Record the first file")
+    # The first file disappears from the server before the broader scan.
+    pages[""] = pages[""].replace(
+        '<a href="M87_001.fits">M87_001.fits</a>', "")
+    repo.add(root + "{src}_{day:03d}.fits")
+    assert repo.state.config["data"] == [{"db": "data.tsv",
+                                         "fmt": "{src}_{day:03d}.fits"}]
+    rows = repo.state.data.set_index("path")
+    assert rows.index.tolist() == ["M87_001.fits", "M87_002.fits"]
+    assert rows.loc["M87_001.fits", "checksum"] == digest
+    assert rows.loc["M87_001.fits", "checksum_algorithm"] == "sha256"
+    assert rows.loc["M87_001.fits", "src"] == "M87"
+    assert rows.loc["M87_002.fits", "src"] == "M87"
+    assert rows["day"].tolist() == ["1", "2"]
+
+
+def test_bare_url_reuses_the_saved_pattern(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    root = "https://example.test/data/"
+    repo.add(root + "{src}_{day:03d}.fits")
+    repo.commit("Record fits files")
+    repo.add(root)
+    assert repo.state.config["data"] == [{"db": "data.tsv",
+                                         "fmt": "{src}_{day:03d}.fits"}]
+    assert repo.state.data.path.tolist() == ["M87_001.fits", "M87_002.fits"]
+    assert repo.dothm.index.diff("HEAD") == []
+
+
+def test_pattern_refusal_lists_only_a_few_files():
+    import pandas as pd
+    from hallmark.repo.config import check_pattern_keeps_catalogue
+    from hallmark.repo.state import State
+
+    state = State(data=pd.DataFrame({"path": [f"f{i}.txt" for i in range(5)]}))
+    with pytest.raises(ValueError, match=r"5 catalogued file\(s\) "
+                       r"\(f0.txt, f1.txt, f2.txt and 2 more\)"):
+        check_pattern_keeps_catalogue(state, "{name}.fits")
+    check_pattern_keeps_catalogue(state, "{name}.txt")
+    check_pattern_keeps_catalogue(state, None)
