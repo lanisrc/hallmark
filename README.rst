@@ -3,6 +3,10 @@
 
     Reproducibility is the |hallmark|_ of the scientific method.
 
+..  image:: https://codecov.io/gh/lanisrc/hallmark/graph/badge.svg?branch=main
+    :target: https://codecov.io/gh/lanisrc/hallmark
+    :alt: Coverage
+
 Modern science has become so complex that many science projects rely
 on multiple software packages to work in unison, resulting in networks of
 data products along the analyses.
