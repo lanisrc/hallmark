@@ -67,7 +67,53 @@ jobs:
     - name: Test with pytest
       env:
         HALLMARK_RUN_SSH_TESTS: "1"
-      run: python -m pytest --timeout=600 -ra --durations=15
+        COVERAGE_FILE: .coverage.${{ runner.os }}-py${{ matrix.python-version }}
+      run: python -m pytest --cov --cov-report= --timeout=600 -ra --durations=15
+    - name: Upload coverage data
+      uses: actions/upload-artifact@v7
+      with:
+        name: coverage-${{ runner.os }}-py${{ matrix.python-version }}
+        path: .coverage.${{ runner.os }}-py${{ matrix.python-version }}
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 7
+
+  # Combines coverage from every test job. Some branches only run on one
+  # Python version or operating system, so no single job sees the total.
+  coverage:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@v7
+      with:
+        python-version: "3.13"
+    - name: Install coverage
+      run: python -m pip install coverage
+    - uses: actions/download-artifact@v8
+      with:
+        pattern: coverage-*
+        merge-multiple: true
+    - name: Combine and report coverage
+      run: |
+        coverage combine
+        coverage report
+        coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+        coverage xml
+        coverage html
+    - name: Upload the combined report
+      uses: actions/upload-artifact@v7
+      with:
+        name: coverage-report
+        path: |
+          coverage.xml
+          htmlcov/
+    # The floor lives here rather than in pyproject.toml because pytest-cov
+    # would apply it to each partial run.
+    - name: Enforce the coverage floor
+      run: coverage report --fail-under=90
 
   distribution-and-docs:
     runs-on: ubuntu-24.04
