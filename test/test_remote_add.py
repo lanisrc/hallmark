@@ -223,3 +223,109 @@ def test_removed_cli_interfaces_fail_clearly(monkeypatch, tmp_path, arguments):
     assert result.exit_code != 0
     assert "No such" in result.output
     assert Repo(repo.worktree).state.data.empty
+
+
+def _state_bytes(repo):
+    return {name: (repo.dothm.path / name).read_bytes()
+            for name in ("config.yml", "meta.yml", "data.tsv", ".git/index")}
+
+
+@pytest.mark.parametrize("url, message", [
+    ("https://user:secret@example.test/data/{a}.h5", "credentials"),
+    ("https://secret@example.test/data/{a}.h5", "credentials"),
+    ("http://secret@example.test/data/", "credentials"),
+    ("sftp://user:secret@example.test/data/", "credentials"),
+    ("https://example.test/data/{a}.h5?sig=secret", "query or fragment"),
+    ("https://example.test/data/?secret", "query or fragment"),
+    ("https://example.test/data/{a}.h5#secret", "query or fragment"),
+])
+def test_remote_add_rejects_secrets_in_urls_before_network(
+        tmp_path, remote_listing, url, message):
+    repo = Repo.init(tmp_path / "data")
+    before = _state_bytes(repo)
+    with pytest.raises(ValueError, match=message) as error:
+        repo.add(url)
+    assert "secret" not in str(error.value)
+    assert remote_listing[1] == []
+    assert _state_bytes(repo) == before
+
+
+def test_remote_pattern_keeps_ssh_usernames():
+    from hallmark.remote.add import split_remote_pattern
+
+    assert split_remote_pattern("ssh://researcher@campus/srv/data/{run}.h5") == (
+        "ssh://researcher@campus/srv/data/", "{run}.h5")
+
+
+@pytest.mark.parametrize("url", [
+    "https://user:secret@example.test/data/", "https://secret@example.test/data/",
+    "https://example.test/data/?token=secret",
+])
+def test_set_config_rejects_secrets_in_remote_urls(tmp_path, url):
+    repo = Repo.init(tmp_path / "data")
+    before = _state_bytes(repo)
+    with pytest.raises(ValueError) as error:
+        repo.set_config(remote_url=url)
+    assert "secret" not in str(error.value)
+    assert _state_bytes(repo) == before
+    assert Repo(repo.worktree).state.config == repo.state.config
+
+
+@pytest.mark.parametrize("arguments", [
+    ["add", "https://user:hunter2@archive.test/ER2/{a}.h5"],
+    ["add", "https://hunter2@archive.test/ER2/"],
+    ["set-config", "--remote-url", "https://archive.test/ER2/?sig=hunter2"],
+])
+def test_cli_rejects_url_secrets_without_echoing_them(
+        tmp_path, monkeypatch, remote_listing, arguments):
+    repo = Repo.init(tmp_path / "repo")
+    monkeypatch.chdir(repo.worktree)
+    before = _state_bytes(repo)
+    result = CliRunner().invoke(hallmark, arguments)
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert "hunter2" not in result.output
+    assert remote_listing[1] == []
+    assert _state_bytes(repo) == before
+
+
+@pytest.mark.parametrize("url", [
+    "http://user:SECRET@git.example.test/src.git",
+    "https://SECRET@git.example.test/src.git",
+    "ssh://git:SECRET@git.example.test/src.git",
+    "https://SECRET@catalogs.example.test/published/",
+])
+def test_clone_rejects_credentials_before_creating_anything(
+        tmp_path, monkeypatch, url):
+    def reject(*args, **kwargs):
+        raise AssertionError("a source with credentials must not be contacted")
+
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", reject)
+    monkeypatch.setattr(OperationContext, "read_text", reject)
+    target = tmp_path / "copy"
+    with pytest.raises(ValueError, match="credentials") as error:
+        Repo.clone(url, target, download=False)
+    assert "SECRET" not in str(error.value)
+    assert not target.exists()
+    result = CliRunner().invoke(hallmark, [
+        "clone", url, str(target), "--no-download"])
+    assert result.exit_code != 0
+    assert "credentials" in result.output
+    assert "SECRET" not in result.output
+    assert not target.exists()
+
+
+def test_clone_keeps_ssh_usernames(tmp_path, monkeypatch):
+    from hallmark.error import CloneError
+
+    calls = []
+
+    def stop(url, *args, **kwargs):
+        calls.append(url)
+        raise CloneError("stop after the URL check")
+
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", stop)
+    url = "ssh://git@git.example.test/team/src.git"
+    with pytest.raises(CloneError, match="stop after the URL check"):
+        Repo.clone(url, tmp_path / "copy", download=False)
+    assert calls == [url]

@@ -8,7 +8,7 @@ from .discovery import discover_remote_files, path_matches
 from ..utils import as_list_of_dicts
 from ..repo.config import normalize_remotes, validate_tsv_filename
 from ..transport import OperationContext, RemoteSpec
-from ..transport.base import copy_backend_options
+from ..transport.base import copy_backend_options, reject_url_secrets
 
 
 def is_remote_catalog(state):
@@ -19,6 +19,7 @@ def split_remote_pattern(value, fmt=None):
     parts = urlsplit(value)
     if parts.scheme not in {"https", "http", "ssh", "sftp"}:
         raise ValueError("Remote add requires an HTTP(S), SSH or SFTP URL")
+    reject_url_secrets(value)
     path = parts.path
     if "{" in path:
         if fmt is not None:

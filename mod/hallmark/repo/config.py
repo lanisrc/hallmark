@@ -21,6 +21,7 @@ from ..transport.base import (
     validate_backend_name,
     validate_profile_name,
     reject_control_characters,
+    reject_url_secrets,
     copy_backend_options,
 )
 
@@ -399,6 +400,7 @@ def set_config(
         if isinstance(remote_url, str):
             reject_control_characters(remote_url, "Remote URL")
         remote_url = require_nonempty_string(remote_url, label="remote_url")
+        reject_url_secrets(remote_url)
     if remote_auth not in (None, ""):
         validate_profile_name(remote_auth)
 
