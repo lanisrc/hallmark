@@ -101,8 +101,8 @@ Stage and commit a remote catalog without downloading dataset files::
 Use ``hm clone SOURCE [PATH]`` for an existing Hallmark Git repository
 or published HTTP/SFTP snapshot. ``PATH`` defaults to a new folder named after
 the source; it must be new or empty and outside any Hallmark repository,
-including the source. Git clones retain the full catalog and its
-history; snapshots start new local history. Use ``--source-type git`` or
+including the source. Git clones retain the full catalog, its history and
+every branch; snapshots start new local history. Use ``--source-type git`` or
 ``--source-type catalog`` to override automatic detection.
 
 Downloading remote data

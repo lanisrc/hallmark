@@ -195,11 +195,12 @@ def test_clone_download_failure_keeps_catalog_and_valid_files(
         with pytest.raises(DownloadError) as error:
             Repo.clone(str(source.dothm.path), target)
         message = str(error.value)
-    assert 'Failed to download 1 file(s)' in message
+    assert f'Clone incomplete: catalogue at "{target / ".hm"}"' in message
+    assert '1 file(s) failed' in message
     assert 'Checksum mismatch' in message
     assert 'item1.txt' in message
-    assert f'Catalog kept at "{target / ".hm"}"' in message
-    assert 'Successfully downloaded files were kept.' in message
+    assert 'Successfully downloaded files were kept' in message
+    assert f'run hm download --all in "{target}" to retry' in message
     assert Repo(target).dothm.head.commit.hexsha == source.dothm.head.commit.hexsha
     assert not (target / 'item1.txt').exists()
     assert (target / 'item2.txt').read_bytes() == b'science'
@@ -489,3 +490,77 @@ def test_clone_refuses_option_like_branch_names(tmp_path, monkeypatch, name, hos
     assert result.exit_code == 1
     assert f"Source branch {name!r} has an invalid name" in result.output
     assert list(work.iterdir()) == []
+
+
+def _commit_on_branch(source, branch, files, message):
+    """Commit raw .hm files on a new branch, then return to main."""
+    source.dothm.git.checkout("-b", branch)
+    for name, text in files.items():
+        if text is None:
+            source.dothm.index.remove([name], working_tree=True)
+        else:
+            (source.dothm.path / name).write_text(text)
+            source.dothm.index.add([name])
+    source.dothm.index.commit(message)
+    source.dothm.git.checkout("main")
+
+
+def test_clone_copies_every_branch_pointer(tmp_path, monkeypatch):
+    source = _remote_catalog_source(tmp_path / "source")
+    for branch, name in (("experiment", "item2.txt"), ("notes", "notes.txt")):
+        source.dothm.git.checkout("-b", branch)
+        _catalog_remote_files(source, [(name, b"x")], f"Catalog {name}")
+        source.dothm.git.checkout("main")
+    repo = Repo.clone(str(source.dothm.path), tmp_path / "copy", download=False)
+    assert {head.name: head.commit.hexsha for head in repo.dothm.heads} == {
+        head.name: head.commit.hexsha for head in source.dothm.heads}
+    assert repo.dothm.active_branch.name == "main"
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["branch"])
+    assert result.output.split() == ["experiment", "*", "main", "notes"]
+    assert repo.checkout("experiment")
+    assert repo.state.data["path"].tolist() == ["item2.txt"]
+
+
+def test_clone_starts_on_the_source_selected_branch(tmp_path):
+    source = _remote_catalog_source(tmp_path / "source")
+    source.dothm.git.checkout("-b", "experiment")
+    _catalog_remote_files(source, [("item2.txt", b"x")], "Catalog item2")
+    repo = Repo.clone(str(source.dothm.path), tmp_path / "copy", download=False)
+    assert repo.dothm.active_branch.name == "experiment"
+    assert repo.state.data["path"].tolist() == ["item2.txt"]
+    assert {head.name for head in repo.dothm.heads} == {"main", "experiment"}
+
+
+@pytest.mark.parametrize("files, message", [
+    ({"data.tsv": "path\n../escape.txt\n"}, "safe relative path"),
+    ({"data.tsv": "path\tchecksum_algorithm\tchecksum\na.txt\tsha256\txyz\n"},
+     "Invalid sha256 checksum"),
+    ({"data.tsv": "path\tchecksum_algorithm\tchecksum\na.txt\tcrc\tabcd\n"},
+     "Unsupported checksum algorithm"),
+    ({"config.yml": "data: [\n"}, "config.yml"),
+    ({"meta.yml": "- not a mapping\n"}, "meta.yml"),
+    ({"meta.yml": None}, "meta.yml"),
+])
+def test_clone_refuses_an_invalid_catalog_on_another_branch(
+        tmp_path, files, message):
+    source = _remote_catalog_source(tmp_path / "source")
+    _commit_on_branch(source, "broken", files, "Break the catalog")
+    target = tmp_path / "copy"
+    with pytest.raises(CloneError, match="broken") as error:
+        Repo.clone(str(source.dothm.path), target, download=False)
+    assert message in str(error.value)
+    assert not target.exists()
+
+
+def test_incomplete_clone_suggests_retrying_the_same_selection(
+        clone_source, tmp_path):
+    source, calls, server = clone_source
+    server.add_file('item1.txt', b'invalid')
+    target = tmp_path / 'copy'
+    with pytest.raises(DownloadError) as error:
+        Repo.clone(str(source.dothm.path), target, filter='item*.txt',
+                   fmt='item{n:d}.txt')
+    assert ("run hm download --all --filter 'item*.txt' --fmt 'item{n:d}.txt' "
+            f'in "{target}" to retry') in str(error.value)
+    assert (target / '.hm/data.tsv').is_file()

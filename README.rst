@@ -109,7 +109,7 @@ published HTTP/SFTP catalog snapshot. ``PATH`` defaults to a new folder named
 after the source and must otherwise be new or empty, outside any Hallmark
 repository. Catalogs can live on GitHub or another
 server while their data remotes point elsewhere. Git clones preserve the full
-catalog and its history. Clone displays a data download plan and asks for
+catalog, its history and every branch, after checking each branch's catalog. Clone displays a data download plan and asks for
 confirmation by default; declining keeps the catalog. Use ``hm clone CATALOG
 PATH --no-download`` for catalog only. Filters narrow the download and cannot
 accompany ``--no-download``. Python ``Repo.clone`` downloads without prompting

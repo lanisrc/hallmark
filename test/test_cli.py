@@ -642,8 +642,11 @@ def test_clone_reports_download_error_cleanly(monkeypatch, tmp_path):
         "clone", str(source.dothm.path), str(tmp_path / "target")],
         input="y\n")
     assert result.exit_code != 0
-    assert "Error: Remote download failed" in result.output
+    assert "Error: Clone incomplete: catalogue at" in result.output
+    assert "Remote download failed" in result.output
+    assert "run hm download --all in" in result.output
     assert "Download these files? [y/N]" in result.output
+    assert (tmp_path / "target" / ".hm" / "data.tsv").is_file()
 
 
 def test_clone_cli_skips_download_when_no_remote_files(monkeypatch, tmp_path):

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import shlex
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -253,21 +254,37 @@ class Repo:
 
     def _download_cloned_files(self, *, approve, max_workers, progress,
                                  filter=None, fmt=None):
-        """Run an approved transfer after catalog creation has completed."""
+        """
+        Run an approved transfer after catalog creation has completed.
+
+        Raises:
+            DownloadError: If the download cannot run or a file fails. The
+                message reports the clone as incomplete and how to retry.
+        """
         from ..remote.download import DownloadError
 
-        plan = self.plan_download(filter=filter, fmt=fmt)
-        if plan.file_count and approve is not None and not approve(plan):
-            return
-        self.download_result = self.download(
-            plan, approved=True, max_workers=max_workers, progress=progress)
+        patterns = [filter] if isinstance(filter, str) else list(filter or [])
+        command = ["hm download --all",
+                   *(f"--filter {shlex.quote(pattern)}" for pattern in patterns)]
+        if fmt is not None:
+            command.append(f"--fmt {shlex.quote(fmt)}")
+        retry = f'run {" ".join(command)} in "{self.worktree}" to retry'
+        incomplete = f'Clone incomplete: catalogue at "{self.dothm.path}"'
+        try:
+            plan = self.plan_download(filter=filter, fmt=fmt)
+            if plan.file_count and approve is not None and not approve(plan):
+                return
+            self.download_result = self.download(
+                plan, approved=True, max_workers=max_workers, progress=progress)
+        except DownloadError as exc:
+            raise DownloadError(
+                f"{incomplete}; the download failed: {exc}; {retry}") from exc
         if self.download_result["failed"]:
             details = "\n".join(self.download_result["errors"][:5])
             raise DownloadError(
-                f"Failed to download {self.download_result['failed']} "
-                f"file(s):\n{details}\n"
-                f'Catalog kept at "{self.dothm.path}". '
-                "Successfully downloaded files were kept.")
+                f"{incomplete}; {self.download_result['failed']} file(s) "
+                f"failed:\n{details}\n"
+                f"Successfully downloaded files were kept; {retry}.")
 
     @classmethod
     def clone(

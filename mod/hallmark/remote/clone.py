@@ -15,7 +15,8 @@ from git.exc import GitCommandError, GitError
 
 from ..repo.dothm import Dothm
 from ..error import CloneError, DestinationExistsError
-from ..utils import as_list_of_dicts
+from ..utils import as_list_of_dicts, load_yaml
+from .download import _checksum_from_row, _validate_expected_checksum
 from ..repo.config import (
     filename_fields,
     normalize_remotes,
@@ -23,9 +24,10 @@ from ..repo.config import (
     row_to_path,
 )
 from ..transport import OperationContext, RemoteSpec
-from ..transport.base import RemoteObjectMissing, validate_remote_path
+from ..transport.base import (
+    DownloadError, RemoteObjectMissing, reject_url_credentials,
+    validate_remote_path)
 from ..repo.worktree import Worktree
-from ..transport.base import reject_url_credentials
 from ..repo.branches import validate_branch_name
 
 
@@ -67,14 +69,30 @@ def _resolve_catalog_path(row, formats):
     return paths[0]
 
 
-def _validate_snapshot(files, config):
-    """Validate catalog tables and paths before writing the snapshot."""
+def _validate_catalog(files, config):
+    """
+    Validate a catalog's tables before it is written or kept.
+
+    Every row must resolve to one safe relative path, and its checksum, if
+    any, must use a supported algorithm and a well-formed digest.
+
+    Args:
+        files (dict[str, str]): Text of ``data.tsv`` and the other TSVs
+            named by ``config``.
+        config (dict): Parsed ``config.yml``.
+
+    Raises:
+        CloneError: If a table is missing, unreadable or invalid.
+        ValueError: If a path or table name is unsafe.
+    """
     for name in _catalog_filenames(config):
+        if name not in files:
+            raise CloneError(f"Catalog table is missing: {name}")
         try:
             frame = pd.read_csv(StringIO(files[name]), sep="\t", dtype=str,
                                 keep_default_na=False)
         except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
-            raise CloneError(f"Invalid published catalog table: {name}") from exc
+            raise CloneError(f"Invalid catalog table: {name}") from exc
         formats = _catalog_formats(config, name)
         has_fields = False
         for fmt in formats:
@@ -83,9 +101,61 @@ def _validate_snapshot(files, config):
                 has_fields = True
                 break
         if not ({"path", "sha1"} & set(frame.columns) or has_fields):
-            raise CloneError(f"Unrecognized published catalog columns: {name}")
+            raise CloneError(f"Unrecognized catalog columns: {name}")
         for _, row in frame.iterrows():
-            _resolve_catalog_path(row, formats)
+            path = _resolve_catalog_path(row, formats)
+            try:
+                _validate_expected_checksum(_checksum_from_row(row))
+            except DownloadError as exc:
+                raise CloneError(f"{name}: {path}: {exc}") from exc
+
+
+def _validate_branch(git, branch):
+    """
+    Validate the committed catalog of one branch of a cloned repository.
+
+    Raises:
+        CloneError: If a state file is missing or the catalog is invalid.
+    """
+    def read(name):
+        try:
+            return git.show("--end-of-options", f"{branch}:{name}")
+        except GitCommandError:
+            raise CloneError(
+                f"Branch '{branch}' is missing {name}") from None
+
+    try:
+        config = load_yaml(read("config.yml"))
+        texts = {"meta.yml": read("meta.yml"), "data.tsv": read("data.tsv")}
+        load_yaml(texts["meta.yml"])
+    except (ValueError, yaml.YAMLError) as exc:
+        detail = " ".join(str(exc).split())
+        raise CloneError(
+            f"Branch '{branch}' has an invalid config.yml or meta.yml: "
+            f"{detail}") from exc
+    try:
+        for name in _catalog_filenames(config):
+            texts.setdefault(name, read(name))
+        _validate_catalog(texts, config)
+    except (CloneError, ValueError) as exc:
+        raise CloneError(
+            f"Branch '{branch}' has an invalid catalog: {exc}") from exc
+
+
+def _copy_branch_pointers(dothm):
+    """
+    Create a local branch for every branch copied from the source.
+
+    Returns:
+        list[str]: Names of all local branches.
+    """
+    local = {head.name for head in dothm.heads}
+    for remote in dothm.remotes:
+        for ref in remote.refs:
+            if ref.remote_head != "HEAD" and ref.remote_head not in local:
+                dothm.git.branch("--track", "--", ref.remote_head, ref.name)
+                local.add(ref.remote_head)
+    return sorted(local)
 
 
 def _read_catalog_snapshot(context):
@@ -122,7 +192,7 @@ def _read_catalog_snapshot(context):
     for name in _catalog_filenames(config):
         if name not in files:
             files[name] = context.read_text(name)
-    _validate_snapshot(files, config)
+    _validate_catalog(files, config)
     return files
 
 
@@ -364,10 +434,13 @@ def _clone_git(cls, url, destination, display_path, auth):
             "then hm add URL.") from exc
     # Sources on a Git host can only be inspected once copied; the caller
     # removes the copy if a check fails.
-    branches = [(ref.remote_head, ref.name) for remote in dothm.remotes
-                for ref in remote.refs if ref.remote_head != "HEAD"]
-    _refuse_invalid_branch_names(dothm.git, [name for name, _ in branches])
-    _refuse_local_file_branches(dothm.git, branches)
+    _refuse_invalid_branch_names(dothm.git, [
+        ref.remote_head for remote in dothm.remotes
+        for ref in remote.refs if ref.remote_head != "HEAD"])
+    branches = _copy_branch_pointers(dothm)
+    _refuse_local_file_branches(dothm.git, [(name, name) for name in branches])
+    for name in branches:
+        _validate_branch(dothm.git, name)
     if worktree_path:
         Worktree.init(worktree_path)
     return cls(destination)

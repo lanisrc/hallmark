@@ -224,8 +224,12 @@ reports it and creates nothing, even with ``--no-download``. A local source is
 checked before anything is copied; a Git host or snapshot is checked after its
 metadata is read, and the partial copy is removed.
 
-Git endpoints preserve the complete catalog and history. Published HTTP/SFTP
-snapshots start new local history. A snapshot URL may name the metadata
+Git endpoints preserve the complete catalog and history, with a local branch
+for every branch of the source; the copy starts on the branch the source has
+selected. Before finishing, clone checks every branch's committed catalog:
+readable ``config.yml``, ``meta.yml`` and tables, safe relative paths and
+well-formed checksums. An invalid catalog stops the clone and removes the
+copy. Published HTTP/SFTP snapshots start new local history. A snapshot URL may name the metadata
 directory itself or its parent containing ``.hm``. Use ``--source-type git``
 to require Git or ``--source-type catalog`` to require a snapshot. Automatic
 selection treats local paths, SCP-style addresses, Git/file/SSH URLs and URLs
@@ -246,6 +250,10 @@ confirmation; Enter or ``n`` keeps the catalog and exits successfully:
 Use ``--no-download`` for catalog only, without a prompt. It cannot be combined
 with ``--filter`` or ``--fmt`` and is required for bare destinations. An empty
 selection prints ``No files selected for download.`` without prompting.
+If the download cannot run or a file fails, clone reports the copy as
+incomplete. It keeps the catalog and the files that downloaded, and names the
+``hm download --all`` command, with the same filters, that retries; files
+already downloaded are skipped.
 Git authentication and data authentication are independent; catalog-only cloning
 does not require credentials for its data.
 
