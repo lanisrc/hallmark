@@ -104,8 +104,10 @@ Optional authentication profiles remain local and can be selected with
 The obsolete ``build`` and remote initialization interfaces have been removed.
 Use ``init``, ``add`` and ``commit`` for new remote catalogs.
 
-Use ``hm clone CATALOG PATH`` for an existing Git-hosted ``.hm`` or a
-published HTTP/SFTP catalog snapshot. Catalogs can live on GitHub or another
+Use ``hm clone CATALOG [PATH]`` for an existing Git-hosted ``.hm`` or a
+published HTTP/SFTP catalog snapshot. ``PATH`` defaults to a new folder named
+after the source and must otherwise be new or empty, outside any Hallmark
+repository. Catalogs can live on GitHub or another
 server while their data remotes point elsewhere. Git clones preserve the full
 catalog and its history. Clone displays a data download plan and asks for
 confirmation by default; declining keeps the catalog. Use ``hm clone CATALOG

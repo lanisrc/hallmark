@@ -287,7 +287,7 @@ class Repo:
     def clone(
         cls,
         url: str,
-        path: Union[Path, str],
+        path: Optional[Union[Path, str]] = None,
         *,
         auth: Optional[str] = None,
         filter=None,
@@ -308,7 +308,10 @@ class Repo:
 
         Args:
             url (str): Existing Git catalog or published snapshot location.
-            path (Path | str): New worktree or bare ``.hm`` repository path.
+            path (Path | str, optional): New or empty worktree folder, or bare
+                ``.hm`` repository path, outside any repository and the local
+                source. Defaults to a folder in the current folder named after
+                the source.
             auth (str, optional): Local profile for snapshot metadata access.
                 Git sources use Git's authentication configuration instead.
             filter (str | list[str], optional): Download selection globs.
@@ -331,16 +334,21 @@ class Repo:
             when a download was attempted, including an empty selection.
 
         Raises:
-            DestinationExistsError: If the destination already exists.
-            CloneError: If a requested catalog is missing or invalid.
+            DestinationExistsError: If the destination exists and is not an
+                empty folder.
+            CloneError: If the destination is nested in a repository or
+                overlaps the source, or a requested catalog is missing or
+                invalid.
             ValueError: If source options are invalid or conflict.
             DownloadError: If metadata access or downloading fails, or a download
                 is requested for a bare destination.
         """
-        from ..remote.clone import clone_catalog
+        from ..remote.clone import clone_catalog, default_clone_destination
         from ..remote.discovery import path_matches
         from ..remote.download import DownloadError, _require_positive_integer
 
+        if path is None:
+            path = default_clone_destination(url)
         _require_positive_integer(max_workers, label="max_workers")
         if (filter is not None or fmt is not None) and not download:
             raise ValueError("clone filter and fmt require download=True; "

@@ -210,6 +210,15 @@ HTTP/SFTP directory containing its metadata. For example, copy this catalog:
 
    hm clone ./.hm ../lab-copy
 
+Without a destination, ``hm clone`` creates a folder in the current folder
+named after the source: ``lab`` for ``./lab/.hm`` or
+``https://github.com/example/lab.git``. A destination must be a new or empty
+folder outside every Hallmark repository, including the source, because
+repositories cannot be nested; these checks happen before the source is read.
+A failed clone removes only what it created: the destination folder if it was
+new, or the ``.hm`` it added to an existing empty folder. It never follows a
+symbolic link while cleaning up.
+
 Git endpoints preserve the complete catalog and history. Published HTTP/SFTP
 snapshots start new local history. A snapshot URL may name the metadata
 directory itself or its parent containing ``.hm``. Use ``--source-type git``

@@ -398,3 +398,30 @@ def test_snapshot_download_uses_independent_payload_server(
     assert all(url.startswith(catalog_url) for url in metadata_server[1])
     assert (repo.worktree / "a.fits").read_bytes() == b"fits"
     assert repo.download_result["succeeded"] == 1
+
+
+@pytest.mark.parametrize("name", ["empty", "empty.hm"])
+def test_snapshot_clone_into_existing_empty_folder(tmp_path, metadata_server, name):
+    pages, _ = metadata_server
+    root = "https://example.test/published/"
+    pages[root + "config.yml"] = "data:\n- db: data.tsv\n"
+    pages[root + "meta.yml"] = "{}\n"
+    pages[root + "data.tsv"] = "path\na.h5\n"
+    target = tmp_path / name
+    target.mkdir()
+    repo = Repo.clone(root, target, download=False)
+    assert repo.state.data["path"].tolist() == ["a.h5"]
+    assert repo.dothm.path == (target if name.endswith(".hm") else target / ".hm")
+
+
+def test_failed_snapshot_clone_keeps_existing_folder_empty(tmp_path, metadata_server):
+    pages, _ = metadata_server
+    root = "https://example.test/published/"
+    pages[root + "config.yml"] = "data:\n- db: data.tsv\n"
+    pages[root + "meta.yml"] = "{}\n"
+    pages[root + "data.tsv"] = "path\n../escape\n"
+    target = tmp_path / "empty"
+    target.mkdir()
+    with pytest.raises((CloneError, ValueError)):
+        Repo.clone(root, target, download=False)
+    assert target.is_dir() and list(target.iterdir()) == []

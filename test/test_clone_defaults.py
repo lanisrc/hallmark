@@ -1,13 +1,32 @@
 from hashlib import sha1
+from pathlib import Path
 
+import pandas as pd
 import pytest
 import requests
 from click.testing import CliRunner
 
 from hallmark import Repo
 from hallmark.cli import hallmark
+from hallmark.error import CloneError, DestinationExistsError
+from hallmark.remote.clone import default_clone_destination
 from hallmark.transport.base import DownloadError
 from mock_server import MockServer
+
+
+def _remote_catalog_source(path, files=(("item1.txt", b"science"),)):
+    """Create a committed catalog of files that stay on a mock HTTP server."""
+    repo = Repo.init(path)
+    repo.state.config = {
+        "data": [{"db": "data.tsv"}],
+        "remote": {"name": "origin", "url": "https://clone.test/data/"}}
+    repo.state.data = pd.DataFrame([
+        {"path": name, "checksum_algorithm": "sha1",
+         "checksum": sha1(content).hexdigest(), "size_bytes": len(content)}
+        for name, content in files])
+    repo.dothm.save_state(repo.state)
+    repo.dothm.index.commit("Catalogued remote data")
+    return repo
 
 
 @pytest.fixture
@@ -186,3 +205,167 @@ def test_clone_download_failure_keeps_catalog_and_valid_files(
     assert (target / 'item2.txt').read_bytes() == b'science'
     assert sorted(calls) == [
         'https://clone.test/data/item1.txt', 'https://clone.test/data/item2.txt']
+
+
+@pytest.mark.parametrize("source, expected", [
+    ("https://github.com/team/eht-data.git", "eht-data"),
+    ("git@github.com:team/eht-data.git", "eht-data"),
+    ("ssh://git.example.test/srv/eht-data.git/", "eht-data"),
+    ("/data/eht-data/.hm", "eht-data"),
+    ("/data/eht-data/.hm/", "eht-data"),
+    ("/data/eht-data", "eht-data"),
+    ("../catalog.hm", "catalog"),
+    ("https://catalogs.example.org/lab/", "lab"),
+    ("https://catalogs.example.org/published/.hm/", "published"),
+    ("file:///data/eht%20data/.hm", "eht data"),
+])
+def test_default_destination_is_named_after_the_source(source, expected):
+    assert default_clone_destination(source) == Path(expected)
+
+
+@pytest.mark.parametrize("source", ["https://example.test/", "/", ".hm", ".."])
+def test_unnamed_source_requires_a_directory(source):
+    with pytest.raises(CloneError, match="DIRECTORY"):
+        default_clone_destination(source)
+
+
+def test_cli_clone_defaults_to_a_folder_named_after_the_source(
+        tmp_path, monkeypatch):
+    source = _remote_catalog_source(tmp_path / "eht-data")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    result = CliRunner().invoke(hallmark, [
+        "clone", str(source.dothm.path), "--no-download"])
+    assert result.exit_code == 0, result.output
+    assert 'Successfully cloned to "eht-data"' in result.output
+    assert Repo(work / "eht-data").dothm.head.commit.hexsha == \
+        source.dothm.head.commit.hexsha
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    python = Repo.clone(str(source.worktree), download=False)
+    assert python.worktree == other / "eht-data"
+
+
+@pytest.mark.parametrize("cli", [False, True])
+def test_clone_into_an_existing_empty_folder(tmp_path, cli):
+    source = _remote_catalog_source(tmp_path / "source")
+    target = tmp_path / "empty"
+    target.mkdir()
+    if cli:
+        result = CliRunner().invoke(hallmark, [
+            "clone", str(source.dothm.path), str(target), "--no-download"])
+        assert result.exit_code == 0, result.output
+    else:
+        Repo.clone(str(source.dothm.path), target, download=False)
+    assert Repo(target).dothm.head.commit.hexsha == source.dothm.head.commit.hexsha
+
+
+def test_failed_clone_empties_an_existing_folder_but_keeps_it(tmp_path):
+    source = _remote_catalog_source(tmp_path / "source")
+    (source.dothm.path / "meta.yml").unlink()
+    source.dothm.index.remove(["meta.yml"])
+    source.dothm.index.commit("Remove required metadata")
+    target = tmp_path / "empty"
+    target.mkdir()
+    with pytest.raises(CloneError, match="missing required file"):
+        Repo.clone(str(source.dothm.path), target, download=False)
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+
+
+def test_failed_clone_keeps_files_added_to_an_existing_folder(
+        tmp_path, monkeypatch):
+    from hallmark.remote.clone import Dothm
+
+    source = _remote_catalog_source(tmp_path / "source")
+    target = tmp_path / "empty"
+    target.mkdir()
+    original = Dothm.clone
+
+    def clone_then_fail(url, destination, **kwargs):
+        original(url, destination, **kwargs)
+        # Someone saves a file in the folder while the clone runs.
+        (target / "notes.txt").write_text("keep me")
+        raise CloneError("simulated failure")
+
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", clone_then_fail)
+    with pytest.raises(CloneError, match="simulated failure"):
+        Repo.clone(str(source.dothm.path), target, download=False)
+    assert sorted(path.name for path in target.iterdir()) == ["notes.txt"]
+    assert (target / "notes.txt").read_text() == "keep me"
+
+
+def test_failed_clone_empties_an_existing_bare_folder(tmp_path):
+    source = _remote_catalog_source(tmp_path / "source")
+    (source.dothm.path / "meta.yml").unlink()
+    source.dothm.index.remove(["meta.yml"])
+    source.dothm.index.commit("Remove required metadata")
+    target = tmp_path / "copy.hm"
+    target.mkdir()
+    with pytest.raises(CloneError, match="missing required file"):
+        Repo.clone(str(source.dothm.path), target, download=False)
+    assert target.is_dir() and list(target.iterdir()) == []
+
+
+def test_failed_clone_never_follows_a_swapped_in_link(tmp_path, monkeypatch):
+    from hallmark.remote.clone import Dothm
+
+    source = _remote_catalog_source(tmp_path / "source")
+    target = tmp_path / "copy.hm"
+    target.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep.txt").write_text("keep me")
+    original = Dothm.clone
+
+    def clone_then_swap(url, destination, **kwargs):
+        original(url, destination, **kwargs)
+        target.rename(tmp_path / "moved.hm")
+        target.symlink_to(elsewhere, target_is_directory=True)
+        raise CloneError("simulated failure")
+
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", clone_then_swap)
+    with pytest.raises(CloneError, match="simulated failure"):
+        Repo.clone(str(source.dothm.path), target, download=False)
+    assert target.is_symlink()
+    assert (elsewhere / "keep.txt").read_text() == "keep me"
+
+
+def test_clone_refuses_a_destination_inside_a_repository(tmp_path, monkeypatch):
+    source = _remote_catalog_source(tmp_path / "source")
+    other = Repo.init(tmp_path / "other")
+    (other.worktree / "sub").mkdir()
+    monkeypatch.chdir(other.worktree / "sub")
+    for arguments in (["clone", str(source.dothm.path), "--no-download"],
+                      ["clone", str(source.dothm.path), "nested/copy"]):
+        result = CliRunner().invoke(hallmark, arguments)
+        assert result.exit_code == 1
+        assert "inside the Hallmark repository" in result.output
+        assert str(other.worktree) in result.output
+    assert sorted(path.name for path in (other.worktree / "sub").iterdir()) == []
+
+
+@pytest.mark.parametrize("relative", ["source/copy", "source/.hm/copy"])
+def test_clone_refuses_to_overlap_a_local_source(tmp_path, relative):
+    source = _remote_catalog_source(tmp_path / "source")
+    with pytest.raises(CloneError, match="overlaps the source|inside the Hallmark"):
+        Repo.clone(str(source.dothm.path), tmp_path / relative, download=False)
+    assert not (tmp_path / relative).exists()
+
+
+def test_clone_refuses_a_nonempty_folder_or_symlink(tmp_path):
+    source = _remote_catalog_source(tmp_path / "source")
+    full = tmp_path / "full"
+    full.mkdir()
+    (full / "keep.txt").write_text("keep")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(empty, target_is_directory=True)
+    for target in (full, alias):
+        with pytest.raises(DestinationExistsError):
+            Repo.clone(str(source.dothm.path), target, download=False)
+    assert (full / "keep.txt").read_text() == "keep"
+    assert list(empty.iterdir()) == []

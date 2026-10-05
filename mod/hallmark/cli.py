@@ -25,6 +25,7 @@ from git.exc import GitError
 
 from . import Repo
 from .remote.download import DownloadError
+from .remote.clone import default_clone_destination
 from .remote.discovery import path_matches
 from .error import CheckoutError, CloneError, DothmError
 from .utils import use_working_directory
@@ -556,7 +557,7 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
 
 @hallmark.command(short_help="Clone an existing Hallmark catalog.")
 @click.argument("url")
-@click.argument("path")
+@click.argument("path", required=False)
 @click.option("--auth", help="Optional local SSH authentication profile.")
 @click.option("--filter", "filters", multiple=True,
               help="Select paths matching a glob. ** matches recursively. "
@@ -575,6 +576,8 @@ def clone(url, path, auth, filters, fmt, source_type, no_download, max_workers):
     """
     Clone an existing Git catalog or published catalog snapshot at PATH.
 
+    PATH defaults to a new folder named after the source. It must be new or
+    an empty folder, outside any Hallmark repository and the source.
     By default, copy the catalog then ask before downloading dataset files.
     Declining keeps the catalog and exits successfully. --no-download skips data
     and the prompt; bare destinations require it. --filter and --fmt narrow the
@@ -583,6 +586,11 @@ def clone(url, path, auth, filters, fmt, source_type, no_download, max_workers):
     """
     if (filters or fmt is not None) and no_download:
         raise ClickException("--filter and --fmt cannot be used with --no-download")
+    if path is None:
+        try:
+            path = str(default_clone_destination(url))
+        except CloneError as exc:
+            raise click.UsageError(str(exc)) from exc
     if not no_download and Repo.resolve_repo_paths(path)[1] is None:
         raise ClickException("Bare clones require --no-download")
 
