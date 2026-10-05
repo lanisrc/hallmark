@@ -1,4 +1,5 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
+# Lints, tests every supported Python version on Linux and macOS, and checks
+# the built distributions and documentation.
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
 
 name: CI
@@ -6,74 +7,89 @@ name: CI
 on:
   push:
     branches: [ "main", "dev" ]
+  # Pull requests into any branch, including stacked feature branches.
   pull_request:
-    branches: [ "main", "dev" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@v7
+      with:
+        python-version: "3.13"
+    - name: Install ruff
+      run: python -m pip install ruff
+    - name: Lint with ruff
+      run: ruff check .
 
-    runs-on: ubuntu-latest
+  # Every job runs the whole suite, including the loopback OpenSSH tests, so
+  # each Python version and both operating systems exercise every module.
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10","3.11","3.12","3.13","3.14"]
-
+        # Pinned because Python 3.9 builds may not exist for newer images.
+        os: [ubuntu-24.04]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+        - os: macos-latest
+          python-version: "3.9"
+        - os: macos-latest
+          python-version: "3.14"
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
+      uses: actions/setup-python@v7
       with:
         python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
+    - name: Install the OpenSSH server
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends openssh-server
+    - name: Install Hallmark and test tools
       run: |
         python -m pip install --upgrade pip
-        python -m pip install ruff pytest
-        python -m pip install -e .
-    - name: Lint with ruff
-      run: |
-        ruff check --select E,F --exclude ./demo
+        python -m pip install -e . --group dev
     - name: Test with pytest
-      run: |
-        pytest
+      env:
+        HALLMARK_RUN_SSH_TESTS: "1"
+      run: python -m pytest --timeout=600 -ra --durations=15
 
   distribution-and-docs:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
-    - uses: actions/setup-python@v5
+        persist-credentials: false
+    - uses: actions/setup-python@v7
       with:
-        python-version: "3.12"
-    - name: Build source and wheel distributions
+        python-version: "3.13"
+    - name: Build and check source and wheel distributions
       run: |
-        python -m pip install build
+        python -m pip install build twine
         python -m build
+        python -m twine check --strict dist/*
     - name: Install the wheel and documentation tools
       run: python -m pip install dist/*.whl sphinx
-    - name: Check the installed CLI
-      run: hm --help
+    - name: Check both installed commands
+      run: |
+        hm --help
+        hallmark --help
       working-directory: ${{ runner.temp }}
     - name: Build documentation with warnings as errors
       run: python -m sphinx -b html -W --keep-going doc "${{ runner.temp }}/hallmark-docs"
-
-  ssh-transport:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v3
-      with:
-        python-version: "3.9"
-    - name: Install Linux SSH server
-      if: runner.os == 'Linux'
-      run: sudo apt-get update && sudo apt-get install -y openssh-server
-    - name: Install Hallmark and tests
-      run: python -m pip install -e . pytest
-    - name: Exercise disposable OpenSSH server and client
-      env:
-        HALLMARK_RUN_SSH_TESTS: "1"
-      run: python -m pytest test/test_ssh_integration.py test/test_transport.py -q

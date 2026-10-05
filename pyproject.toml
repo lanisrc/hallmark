@@ -50,10 +50,11 @@ where = ["mod"]
 
 [tool.ruff]
 target-version = "py39"
+# Excluded at the top level so the shell cells in demo notebooks are not parsed.
+extend-exclude = ["doc", "demo"]
 
 [tool.ruff.lint]
 select = ["E", "F"]
-exclude = ["doc", "demo"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
