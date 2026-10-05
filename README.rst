@@ -135,8 +135,8 @@ version, operating system, and a minimal example without credentials or private 
 
 From a development checkout, install the validation tools and run::
 
-    python -m pip install -e . pytest ruff sphinx
-    python -m pytest
+    python -m pip install -e . --group dev --group lint --group doc
+    python -m pytest --cov
     ruff check --select E,F mod test
     python -m sphinx -b html -W doc doc/_build
 
