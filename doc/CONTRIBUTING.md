@@ -30,6 +30,14 @@
 * If the implementation is as clear as (or clearer than) the goal, implement the solution first. Then write tests to ensure the solution covers edge cases and realistic user scenarios. The tests may reveal places where the implementation needs to be fixed, expanded, or simplified.
 * Run `pytest --cov` to see which lines the tests miss, or `pytest --cov --cov-report=html` for a browsable report in `htmlcov/`. CI runs the whole suite, including the loopback SSH tests, on every supported Python version, combines coverage from every job, and fails if the total drops below the floor set in `.github/workflows/ci.yml`. Codecov comments on each pull request with the coverage of its changed lines; those comments are informational.
 
+## Fault Injection and Survey Workflow Tests
+
+
+* `pytest -m survey` runs end-to-end workflows from `doc/usecase.rst` against scaled-down DESI-like and EHT-like releases on a loopback HTTP server, and over a loopback SSH server when `HALLMARK_RUN_SSH_TESTS=1`. These tests refuse any request that would leave the machine.
+* `pytest -m chaos` injects network faults, full disks, I/O errors and process kills, and runs seeded random operation sequences (the "monkey") against repository invariants. Set `HALLMARK_CHAOS_SEED` (comma-separated) and `HALLMARK_CHAOS_STEPS` to explore further; a failing monkey prints the command that reproduces it.
+* `HALLMARK_RUN_LIVE_TESTS=1 pytest -m survey_live` downloads a few megabytes from DESI DR1 and the EHT release on CyVerse. CI runs it, and the chaos tests with many more steps, every night.
+* When these tests expose a bug, reduce it to a small deterministic test marked `xfail(strict=True)` with the reason and issue, and fix it on its own branch. Strict expected failures fail CI once the bug is fixed, so the fix must remove the marker.
+
 ## Data Management
 
 

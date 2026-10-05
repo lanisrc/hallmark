@@ -1,0 +1,113 @@
+# Runs the chaos tests with many more random operations and fresh seeds,
+# and downloads a few small files from public survey archives.
+
+name: Nightly
+
+on:
+  schedule:
+  - cron: "23 6 * * *"
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: Random operations per seed
+        default: "2000"
+      seeds:
+        description: Comma-separated seeds (blank derives them from the run)
+        default: ""
+  # Scheduled and manual runs only start from the default branch, so pull
+  # requests that change these tests or this workflow run it too.
+  pull_request:
+    paths:
+    - .github/workflows/nightly.yml
+    - test/chaos.py
+    - test/chaos_child.py
+    - test/http_server.py
+    - test/survey.py
+    - test/test_chaos_*.py
+    - test/test_survey*.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chaos:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: ubuntu-24.04
+          python-version: "3.9"
+          lane: 1
+        - os: ubuntu-24.04
+          python-version: "3.14"
+          lane: 2
+        - os: macos-latest
+          python-version: "3.14"
+          lane: 3
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@v7
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install the OpenSSH server
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends openssh-server
+    - name: Install Hallmark and test tools
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install -e . --group dev
+    # Inputs reach the shell through the environment, never inline.
+    - name: Choose seeds and steps
+      env:
+        INPUT_SEEDS: ${{ inputs.seeds }}
+        INPUT_STEPS: ${{ inputs.steps }}
+        RUN_ID: ${{ github.run_id }}
+        LANE: ${{ matrix.lane }}
+        EVENT: ${{ github.event_name }}
+      run: |
+        seeds="${INPUT_SEEDS:-${RUN_ID}${LANE}1,${RUN_ID}${LANE}2,${RUN_ID}${LANE}3}"
+        if [ "$EVENT" = pull_request ]; then default_steps=300; else default_steps=2000; fi
+        steps="${INPUT_STEPS:-$default_steps}"
+        [[ "$seeds" =~ ^[0-9,]+$ && "$steps" =~ ^[0-9]+$ ]] || { echo "Invalid seeds or steps"; exit 1; }
+        echo "HALLMARK_CHAOS_SEED=$seeds" >> "$GITHUB_ENV"
+        echo "HALLMARK_CHAOS_STEPS=$steps" >> "$GITHUB_ENV"
+        echo "Chaos seeds: \`$seeds\`, steps per seed: $steps" >> "$GITHUB_STEP_SUMMARY"
+    - name: Run the chaos tests
+      env:
+        HALLMARK_RUN_SSH_TESTS: "1"
+      run: python -m pytest -m chaos -ra --timeout=1800 --basetemp="$RUNNER_TEMP/pytest"
+    - name: Keep failed repositories for inspection
+      if: failure()
+      uses: actions/upload-artifact@v7
+      with:
+        name: chaos-${{ runner.os }}-py${{ matrix.python-version }}
+        path: ${{ runner.temp }}/pytest
+        include-hidden-files: true
+        retention-days: 14
+
+  survey-live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@v7
+      with:
+        python-version: "3.13"
+    - name: Install Hallmark and test tools
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install -e . --group dev
+    - name: Download small files from public survey archives
+      env:
+        HALLMARK_RUN_LIVE_TESTS: "1"
+      run: python -m pytest -m survey_live -ra --timeout=600
