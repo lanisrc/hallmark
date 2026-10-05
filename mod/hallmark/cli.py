@@ -305,7 +305,8 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     """Add files to the hallmark index.
 
     A remote URL or URL pattern stages a catalog without downloading files
-    or committing. Use --fmt and --filter to select remote paths.
+    or committing. Use --fmt and --filter to select remote paths. A scan that
+    fails or matches no files keeps the previously staged catalog.
 
     `hm add [--regex] FORMAT` uses the branch format string workflow.
     `hm add "."` rebuilds the manifest from current files that match

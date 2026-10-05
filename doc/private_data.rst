@@ -83,6 +83,11 @@ directories needed to find matching files. Discovery shows an indeterminate
 progress bar with counts of completed directories and discovered files.
 The percentage and completion time remain unknown until a total is available.
 
+A scan stages its catalog only after it completes. If the connection or access
+fails, or no file matches the URL, filter and filename format, ``add`` explains
+the problem, exits with an error and keeps the previously staged catalog
+unchanged; it never stages a partial result.
+
 Both URL schemes use structured SFTP directory enumeration and file transfers.
 SFTP-only accounts work for discovery as well as downloading. No
 ``--allow-remote-commands`` or ``--remote-hash`` option is needed. Discovery

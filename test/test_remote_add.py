@@ -59,8 +59,10 @@ def test_remote_add_merges_paths_and_leaves_unmatched_rows(tmp_path, remote_list
     repo.commit("Second selection")
     repo.add(root, filter="*002.fits")
     assert repo.dothm.index.diff("HEAD") == []
-    repo.add(root, filter="absent*")
+    with pytest.raises(ValueError, match="No remote files matched"):
+        repo.add(root, filter="absent*")
     assert repo.dothm.index.diff("HEAD") == []
+    assert repo.state.data.path.tolist() == ["M87_001.fits", "M87_002.fits"]
 
 
 def test_remote_catalog_clone_and_branches_keep_payloads_separate(
@@ -329,3 +331,39 @@ def test_clone_keeps_ssh_usernames(tmp_path, monkeypatch):
     with pytest.raises(CloneError, match="stop after the URL check"):
         Repo.clone(url, tmp_path / "copy", download=False)
     assert calls == [url]
+
+
+def test_cli_remote_add_matching_nothing_keeps_previous_catalog(
+        tmp_path, monkeypatch, remote_listing):
+    repo = Repo.init(tmp_path / "repo")
+    repo.add("https://example.test/data/", filter="*.fits")
+    monkeypatch.chdir(repo.worktree)
+    before = _state_bytes(repo)
+    result = CliRunner().invoke(hallmark, [
+        "add", "https://example.test/data/", "--filter", "absent*"])
+    assert result.exit_code == 1
+    assert "No remote files matched" in result.output
+    assert "absent*" in result.output
+    assert "previous catalogue kept" in result.output
+    assert _state_bytes(repo) == before
+
+
+def test_failed_remote_scan_is_explained_and_keeps_previous_catalog(
+        tmp_path, monkeypatch, remote_listing):
+    from hallmark.transport.base import DownloadError
+
+    repo = Repo.init(tmp_path / "repo")
+    repo.add("https://example.test/data/", filter="*.fits")
+    before = _state_bytes(repo)
+
+    def refuse(*args, **kwargs):
+        raise DownloadError("Cannot establish connection to https://example.test")
+
+    monkeypatch.setattr("hallmark.remote.add.discover_remote_files", refuse)
+    with pytest.raises(DownloadError) as error:
+        repo.add("https://example.test/data/")
+    assert str(error.value) == (
+        "Remote scan failed (previous catalogue kept): "
+        "Cannot establish connection to https://example.test")
+    assert _state_bytes(repo) == before
+    assert repo.state.data.path.tolist() == ["M87_001.fits", "M87_002.fits"]
