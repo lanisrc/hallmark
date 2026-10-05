@@ -17,13 +17,14 @@
 
 from .repo import Repo
 from .paraframe import ParaFrame
-from .remote.plan import DownloadItem, DownloadPlan
+from .remote.plan import DownloadConflict, DownloadItem, DownloadPlan
 from .remote.backends import (
     DataBackend, HttpBackend, SshBackend, CyVerseBackend, RemoteEntry,
     register_backend,
 )
 
 __all__ = [
-    "Repo", "ParaFrame", "DownloadItem", "DownloadPlan", "DataBackend",
-    "HttpBackend", "SshBackend", "CyVerseBackend", "RemoteEntry", "register_backend",
+    "Repo", "ParaFrame", "DownloadConflict", "DownloadItem", "DownloadPlan",
+    "DataBackend", "HttpBackend", "SshBackend", "CyVerseBackend", "RemoteEntry",
+    "register_backend",
 ]

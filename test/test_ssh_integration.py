@@ -175,6 +175,8 @@ def test_explicit_endpoint_and_missing_file(ssh_server, tmp_path):
     output.write_bytes(b"keep")
     result = download_selection(repo, repo.worktree, [(Path('missing'), None)])
     assert result["failed"] == 1
+    # The transfer itself fails; the existing-file guard is never reached.
+    assert "appeared after" not in result["errors"][0]
     assert output.read_bytes() == b"keep"
     assert not list(Path(repo.worktree).glob("*.part"))
 
@@ -403,6 +405,8 @@ def test_permission_denied_preserves_existing_file(ssh_server, tmp_path):
     try:
         result = download_selection(repo, repo.worktree, [(Path('private'), None)])
         assert result["failed"] == 1
+        # The transfer itself fails; the existing-file guard is never reached.
+        assert "appeared after" not in result["errors"][0]
         assert destination.read_bytes() == b"original"
         assert not list(Path(repo.worktree).glob("*.part"))
     finally:
@@ -444,12 +448,14 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
             for transport in transports:
                 transport.context.cancel()
     assert result["failed"] == 1
+    # The transfer itself fails; the existing-file guard is never reached.
+    assert "appeared after" not in result["errors"][0]
     assert destination.read_bytes() == b"original"
     assert not list(Path(repo.worktree).glob("*.part"))
     assert not transports[0]._processes
 
 
-def test_add_commit_download_clone_workflow(ssh_server, tmp_path):
+def test_add_commit_download_clone_workflow(ssh_server, tmp_path, monkeypatch):
     root = ssh_server["root"]
     (root / "nested").mkdir()
     (root / "nested/item_1.dat").write_bytes(b"science")
@@ -467,6 +473,17 @@ def test_add_commit_download_clone_workflow(ssh_server, tmp_path):
     assert (repo.worktree / "nested/item_1.dat").read_bytes() == b"science"
     assert not (repo.worktree / "bad_2.dat").exists()
     assert not list(repo.worktree.rglob("*.part"))
+    downloaded = (repo.worktree / "nested/item_1.dat").stat()
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
+    # The verified file is skipped; only the failed one is tried again.
+    assert "1 file(s) already downloaded; skipped" in result.output
+    assert "Failed to download 1 file(s)" in result.output
+    assert "bad_2.dat" in result.output
+    assert (repo.worktree / "nested/item_1.dat").stat().st_mtime_ns == \
+        downloaded.st_mtime_ns
+    assert (repo.worktree / "nested/item_1.dat").stat().st_ino == downloaded.st_ino
+    monkeypatch.chdir(tmp_path)
     clone = Repo.clone(str(repo.dothm.path), tmp_path / "python-clone", download=False)
     assert clone.dothm.head.commit.hexsha == repo.dothm.head.commit.hexsha
     assert not (clone.worktree / "nested").exists()

@@ -173,9 +173,23 @@ downloaded, but their contents cannot be checked against the catalog.
 are deduplicated. ``--all`` cannot be combined with either selection mode.
 Relative output paths are relative to the current directory. Without
 ``--output``, downloads go to the repository worktree; bare ``.hm`` repositories
-require an explicit output directory. Repeating a download transfers the
-selection again and replaces destinations only after successful transfer and
-any recorded checksum verification.
+require an explicit output directory.
+
+Existing files are never replaced. Before contacting the server, a download
+checks each selected file that already exists at its destination, first by
+its recorded size and then by its catalog checksum. A file with its catalog
+checksum is reported as already downloaded and skipped, so repeating a
+download, for example after a failed transfer, fetches only what is missing.
+When the catalog has no checksum for a file, as for SSH exports without a
+checksum manifest, a file with the recorded size is reported as present (size
+matches, not verified) and also skipped. A file with a different size or
+contents, a file the catalog records neither a checksum nor a size for, or a
+folder in its place is a conflict: the download stops and transfers nothing.
+Delete conflicting files first to replace them; there is no overwrite option.
+``--dry-run`` lists files to download, skipped and unverified files, conflicts
+and unknown paths. Checksums from manifests that do not name their algorithm,
+such as ``checksums.txt``, are used when the digest length identifies MD5,
+SHA-1, SHA-256 or SHA-512.
 
 After committing the catalog, use ``download`` to review and approve a transfer.
 Declining keeps the catalog available; an empty selection needs no approval:
@@ -455,10 +469,12 @@ catalog hosting independent of data hosting.
 Download behavior and troubleshooting
 -------------------------------------
 
-Files are downloaded to temporary paths and published atomically after transfer
-and any recorded checksum verification. A failed transfer preserves an existing
-destination and removes its temporary file. Successful files remain available
-when another file fails; a multi-file download is not a single transaction.
+Unfinished downloads are kept in temporary ``.part`` files beside their
+destinations and moved into place only after the transfer and any recorded
+checksum verification succeed. A failed transfer removes its temporary file.
+A destination that appears while the download runs is not replaced; that file
+fails instead. Successful files remain available when another file fails; a
+multi-file download is not a single transaction.
 The CLI exits nonzero on transfer failures. Cancellation stops the active
 operation and closes the SSH connections and processes it started.
 
@@ -481,6 +497,9 @@ operation and closes the SSH connections and processes it started.
    * - Checksum mismatch
      - Check whether the export changed since catalog creation. Reconcile the
        catalog and source against a trusted version before retrying.
+   * - Existing files conflict with the catalog
+     - Compare the listed files with the catalog. Delete or move them, then
+       download again; Hallmark never overwrites existing files.
    * - Transfer timeout or session limit
      - Adjust the local per-file time budget or lower concurrency to match
        the server's capacity.

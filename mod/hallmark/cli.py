@@ -119,7 +119,9 @@ def _run_download(repo, plan, *, max_workers):
     """
     click.echo(plan.summary())
     if not plan.file_count:
-        click.echo("No files selected for download.")
+        click.echo("All selected files are already downloaded."
+                   if plan.skipped or plan.unverified
+                   else "No files selected for download.")
         return
     click.confirm("Download these files?", default=False, abort=True)
     results = repo.download(plan, approved=True, max_workers=max_workers,
@@ -469,6 +471,24 @@ def _echo_paths(title, paths, limit=20):
         click.echo(f"  ... {len(paths) - limit} more")
 
 
+def _report_plan_problems(plan):
+    """
+    List unknown paths and conflicting files that prevent a download.
+
+    Returns:
+        list[str]: Short descriptions of the problems; empty if there are none.
+    """
+    _echo_paths("Existing files that conflict with the catalog:", [
+        f"{conflict.item.relative_path.as_posix()} ({conflict.reason})"
+        for conflict in plan.conflicts])
+    if plan.conflicts:
+        click.echo("Delete conflicting files first to replace them.")
+    _echo_paths("Not in the catalog:", plan.unknown_paths)
+    return [f"{count} {text}" for count, text in (
+        (len(plan.conflicts), "existing file(s) conflict with the catalog"),
+        (len(plan.unknown_paths), "path(s) not in the catalog")) if count]
+
+
 @hallmark.command(short_help="Download files from the configured data remote.")
 @click.argument("files", nargs=-1)
 @click.option("--tsv", "tsv_names", multiple=True,
@@ -496,8 +516,11 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
     Choose catalogued FILES or folders, or --all; a folder selects every
     catalogued file below it. FILES are relative to the current folder, which
     can be any folder inside the repository. --filter and --fmt only narrow
-    that selection. Paths that are not in the catalog stop the download
-    before the server is contacted.
+    that selection. Files already downloaded with their catalog checksum, or
+    with the catalog size when it records no checksum, are skipped. Paths
+    that are not in the catalog, and existing files that differ from it or
+    cannot be checked, stop the download before the server is contacted;
+    delete conflicting files first to replace them.
 
     Preview the selection with --dry-run. Every nonempty download displays
     its plan and asks for confirmation before transferring files.
@@ -519,13 +542,15 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
             click.echo(plan.summary())
             _echo_paths("Files to download:", [
                 item.relative_path.as_posix() for item in plan.items])
-            _echo_paths("Not in the catalog:", plan.unknown_paths)
+            _echo_paths("Already downloaded (skipped):", [
+                item.relative_path.as_posix() for item in plan.skipped])
+            _echo_paths("Present (size matches, not verified):", [
+                item.relative_path.as_posix() for item in plan.unverified])
+            _report_plan_problems(plan)
             return
-        if plan.unknown_paths:
-            _echo_paths("Not in the catalog:", plan.unknown_paths)
-            raise ClickException(
-                f"{len(plan.unknown_paths)} path(s) not in the catalog; "
-                "nothing was downloaded")
+        problems = _report_plan_problems(plan)
+        if problems:
+            raise ClickException("; ".join(problems) + "; nothing was downloaded")
         _run_download(repo, plan, max_workers=max_workers)
 
 

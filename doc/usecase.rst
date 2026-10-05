@@ -155,13 +155,16 @@ The ``--remote`` option selects one data server; |hallmark|_ does not
 automatically try another server if the download fails.
 
 Downloads are written to temporary files and checked against any
-checksums supplied with the selection before atomically replacing
-their destinations.
+checksums supplied with the selection before they are moved into place.
 The ``--tsv`` and ``--all`` options include catalog checksums. Explicit
 paths and folders must be in the catalog and use their recorded checksums.
-If a transfer or checksum check fails, the existing destination is
-preserved and the temporary file is removed.
+If a transfer or checksum check fails, the temporary file is removed.
 Files that have already downloaded successfully remain available.
+Existing files are never replaced: files that already match their
+catalog checksum, or their recorded size when the catalog has no checksum,
+are skipped, and a file with different or uncheckable contents stops the
+download before anything is transferred. Delete conflicting files first to
+replace them.
 
 SSH access and file paths
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

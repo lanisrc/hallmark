@@ -1144,3 +1144,134 @@ def test_cli_unknown_paths_stop_before_prompt_or_server(monkeypatch, tmp_path):
     assert "1 path(s) not in the catalog; nothing was downloaded" in result.output
     assert "Download these files?" not in result.output
     assert not (repo.worktree / "runs").exists()
+
+
+def _checked_cli_catalog(path):
+    """Create a remote catalog whose files have published SHA-256 checksums."""
+    from hashlib import sha256
+
+    repo = Repo.init(path)
+    repo.state.config = {
+        "data": [{"db": "data.tsv"}],
+        "remote": {"name": "origin", "url": "https://example.test/data/"}}
+    repo.state.data = pd.DataFrame([
+        {"path": name, "checksum_algorithm": "sha256",
+         "checksum": sha256(content).hexdigest(), "size_bytes": len(content)}
+        for name, content in [("a.fits", b"aaaa"), ("b.fits", b"bbbb"),
+                              ("c.fits", b"cccc")]])
+    repo.dothm.save_state(repo.state)
+    repo.dothm.index.commit("Catalog checked remote files")
+    return repo
+
+
+def test_cli_dry_run_reports_skipped_conflicting_and_unknown_files(
+        monkeypatch, tmp_path):
+    repo = _checked_cli_catalog(tmp_path / "project")
+    (repo.worktree / "a.fits").write_bytes(b"aaaa")
+    (repo.worktree / "b.fits").write_bytes(b"xxxx")
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["download", ".", "missing.fits",
+                                           "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "Files to download:\n  c.fits\n" in result.output
+    assert "Already downloaded (skipped):\n  a.fits\n" in result.output
+    assert "b.fits (different contents)" in result.output
+    assert "Delete conflicting files first to replace them" in result.output
+    assert "Not in the catalog:\n  missing.fits\n" in result.output
+    assert (repo.worktree / "b.fits").read_bytes() == b"xxxx"
+
+
+def test_cli_conflict_downloads_nothing_and_never_prompts(monkeypatch, tmp_path):
+    repo = _checked_cli_catalog(tmp_path / "project")
+    (repo.worktree / "b.fits").write_bytes(b"xxxx")
+    monkeypatch.chdir(repo.worktree)
+
+    def reject(*args, **kwargs):
+        raise AssertionError("a conflict must not contact the server")
+
+    monkeypatch.setattr(requests, "Session", reject)
+    result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
+    assert result.exit_code == 1
+    assert "b.fits (different contents)" in result.output
+    assert "Delete conflicting files first to replace them" in result.output
+    assert "nothing was downloaded" in result.output
+    assert "Download these files?" not in result.output
+    assert not (repo.worktree / "a.fits").exists()
+    assert (repo.worktree / "b.fits").read_bytes() == b"xxxx"
+
+
+def test_cli_second_download_skips_verified_files(monkeypatch, tmp_path):
+    from mock_server import MockServer
+
+    repo = _checked_cli_catalog(tmp_path / "project")
+    server = MockServer("https://example.test/data/")
+    for name in ("a.fits", "b.fits", "c.fits"):
+        server.add_file(name, name[0].encode() * 4)
+    requested = []
+    original_get = server.get
+
+    def get(url, **kwargs):
+        requested.append(url)
+        return original_get(url, **kwargs)
+
+    server.get = get
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    monkeypatch.chdir(repo.worktree)
+    runner = CliRunner()
+    result = runner.invoke(hallmark, ["download", "a.fits"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert requested == ["https://example.test/data/a.fits"]
+    result = runner.invoke(hallmark, ["download", "--all"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "1 file(s) already downloaded; skipped" in result.output
+    assert sorted(requested[1:]) == ["https://example.test/data/b.fits",
+                                     "https://example.test/data/c.fits"]
+    result = runner.invoke(hallmark, ["download", "--all"])
+    assert result.exit_code == 0, result.output
+    assert "All selected files are already downloaded." in result.output
+    assert "Download these files?" not in result.output
+    assert len(requested) == 3
+
+
+def test_cli_retry_after_a_failed_clone_downloads_only_missing_files(
+        monkeypatch, tmp_path):
+    from mock_server import MockServer
+
+    source = Repo.init(tmp_path / "source")
+    source.state.config = {
+        "data": [{"db": "data.tsv"}],
+        "remote": {"name": "origin", "url": "https://example.test/data/"}}
+    # Like an SSH export without a checksum manifest: only sizes are known.
+    source.state.data = pd.DataFrame([{"path": "a.fits", "size_bytes": 1},
+                                      {"path": "b.fits", "size_bytes": 1}])
+    source.dothm.save_state(source.state)
+    source.dothm.index.commit("Catalog files without checksums")
+    server = MockServer("https://example.test/data/")
+    server.add_file("a.fits", b"A")
+    server.add_file("b.fits", b"B")
+    requested, failing = [], {"b.fits"}
+    original_get = server.get
+
+    def get(url, **kwargs):
+        requested.append(url)
+        if any(url.endswith(name) for name in failing):
+            raise requests.ConnectionError("transient network failure")
+        return original_get(url, **kwargs)
+
+    server.get = get
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    target = tmp_path / "copy"
+    result = CliRunner().invoke(hallmark, [
+        "clone", str(source.dothm.path), str(target)], input="y\n")
+    assert result.exit_code != 0
+    assert (target / "a.fits").read_bytes() == b"A"
+    failing.clear()
+    requested.clear()
+    monkeypatch.chdir(target)
+    result = CliRunner().invoke(hallmark, ["download", "--all", "--dry-run"])
+    assert "Present (size matches, not verified):\n  a.fits\n" in result.output
+    result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "1 file(s) present (size matches, not verified); skipped" in result.output
+    assert requested == ["https://example.test/data/b.fits"]
+    assert (target / "b.fits").read_bytes() == b"B"

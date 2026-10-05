@@ -333,3 +333,161 @@ def test_missing_plugin_can_be_planned_but_not_executed(catalog):
     with pytest.raises(DownloadError, match="missing-survey-plugin"):
         execute_download_plan(catalog, plan, approved=True)
     assert not (catalog.worktree / "nested/a.fits").exists()
+
+
+def _reject_server(monkeypatch):
+    def reject(*args, **kwargs):
+        raise AssertionError("this download must not contact a server")
+
+    monkeypatch.setattr("hallmark.remote.download.OperationContext", reject)
+    monkeypatch.setattr("requests.sessions.Session.request", reject)
+
+
+def test_verified_existing_files_are_skipped_without_a_transfer(
+        catalog, monkeypatch):
+    (catalog.worktree / "nested").mkdir()
+    existing = catalog.worktree / "nested/a.fits"
+    existing.write_bytes(b"abcdef")
+    _reject_server(monkeypatch)
+    plan = plan_download(catalog, file_paths=["nested"])
+    assert plan.items == ()
+    assert [item.relative_path.as_posix() for item in plan.skipped] == [
+        "nested/a.fits"]
+    assert plan.conflicts == ()
+    assert "1 file(s) already downloaded; skipped" in plan.summary()
+    assert execute_download_plan(catalog, plan) == {
+        "succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
+    assert existing.read_bytes() == b"abcdef"
+
+
+@pytest.mark.parametrize("make_existing, reason", [
+    (lambda path: path.write_bytes(b"ABCDEF"), "different contents"),
+    (lambda path: path.write_bytes(b"changed"), "7 bytes, but the catalog records 6"),
+    (lambda path: path.mkdir(), "not a regular file"),
+])
+def test_conflicting_existing_file_stops_the_whole_download(
+        catalog, monkeypatch, make_existing, reason):
+    (catalog.worktree / "nested").mkdir()
+    existing = catalog.worktree / "nested/a.fits"
+    make_existing(existing)
+    plan = plan_download(catalog, file_paths=["nested/a.fits", "empty.fits"])
+    assert [item.relative_path.as_posix() for item in plan.items] == ["empty.fits"]
+    assert [(conflict.item.relative_path.as_posix(), conflict.reason)
+            for conflict in plan.conflicts] == [("nested/a.fits", reason)]
+    assert "1 existing file(s) conflict with the catalog" in plan.summary()
+    _reject_server(monkeypatch)
+    with pytest.raises(DownloadError) as error:
+        execute_download_plan(catalog, plan, approved=True)
+    assert "nested/a.fits" in str(error.value)
+    assert "nothing was downloaded" in str(error.value)
+    assert "Delete conflicting files first to replace them" in str(error.value)
+    assert not (catalog.worktree / "empty.fits").exists()
+
+
+def test_existing_file_without_catalog_checksum_is_a_conflict(catalog):
+    (catalog.worktree / "b.txt").write_bytes(b"cannot be verified")
+    plan = plan_download(catalog, file_paths=["b.txt"])
+    assert plan.items == ()
+    assert plan.conflicts[0].item.relative_path == Path("b.txt")
+    assert plan.conflicts[0].reason == "no catalog checksum or size to verify it"
+
+
+def test_unverifiable_file_with_the_catalog_size_is_skipped(catalog, monkeypatch):
+    present = catalog.worktree / "empty.fits"
+    present.write_bytes(b"")
+    plan = plan_download(catalog, file_paths=["empty.fits", "b.txt"])
+    assert [item.relative_path.as_posix() for item in plan.unverified] == [
+        "empty.fits"]
+    assert [item.relative_path.as_posix() for item in plan.items] == ["b.txt"]
+    assert plan.skipped == () and plan.conflicts == ()
+    assert "1 file(s) present (size matches, not verified); skipped" in plan.summary()
+    present.write_bytes(b"grown")
+    plan = plan_download(catalog, file_paths=["empty.fits"])
+    assert [(conflict.item.relative_path.as_posix(), conflict.reason)
+            for conflict in plan.conflicts] == [
+        ("empty.fits", "5 bytes, but the catalog records 0")]
+
+
+def test_wrong_size_is_a_conflict_without_reading_the_file(catalog, monkeypatch):
+    (catalog.worktree / "nested").mkdir()
+    (catalog.worktree / "nested/a.fits").write_bytes(b"x" * 10)
+
+    def reject(*args, **kwargs):
+        raise AssertionError("a file of the wrong size must not be hashed")
+
+    monkeypatch.setattr("hallmark.remote.download.calculate_file_checksum", reject)
+    plan = plan_download(catalog, file_paths=["nested/a.fits"])
+    assert plan.conflicts[0].reason == "10 bytes, but the catalog records 6"
+
+
+@pytest.mark.parametrize("digest, content, expected", [
+    (sha256(b"abcdef").hexdigest(), b"abcdef", "skipped"),
+    (sha256(b"abcdef").hexdigest(), b"ABCDEF", "different contents"),
+    ("a" * 36, b"abcdef", "unverified"),
+])
+def test_unknown_checksum_algorithm_is_inferred_from_the_digest_length(
+        tmp_path, digest, content, expected):
+    catalog = _folder_catalog(tmp_path)
+    frame = pd.DataFrame([{"path": "run.h5", "checksum_algorithm": "unknown",
+                           "checksum": digest, "size_bytes": "6"}])
+    frame.to_csv(catalog.dothm.path / "data.tsv", sep="\t", index=False)
+    (tmp_path / "run.h5").write_bytes(content)
+    plan = plan_download(catalog, file_paths=["run.h5"])
+    if expected == "skipped":
+        assert plan.skipped[0].checksum == ("sha256", digest)
+    elif expected == "unverified":
+        assert plan.unverified[0].checksum is None
+    else:
+        assert plan.conflicts[0].reason == expected
+
+
+def test_existing_files_are_hashed_with_a_bounded_pool(catalog, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    workers = []
+
+    def pool(max_workers=None):
+        workers.append(max_workers)
+        return ThreadPoolExecutor(max_workers=max_workers)
+
+    monkeypatch.setattr("hallmark.remote.download.ThreadPoolExecutor", pool)
+    monkeypatch.setattr("hallmark.remote.download.os.cpu_count", lambda: 64)
+    (catalog.worktree / "empty.fits").write_bytes(b"")
+    plan_download(catalog, file_paths=["empty.fits"])
+    assert workers == [8]
+
+
+def test_file_appearing_after_planning_is_never_replaced(catalog, monkeypatch):
+    plan = plan_download(catalog, file_paths=["nested/a.fits"])
+    assert plan.file_count == 1
+    late = catalog.worktree / "nested/a.fits"
+
+    class Context:
+        def __init__(self, remote, output_root):
+            self.output_root = output_root
+            self.transport = self
+            self.on_bytes = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def prepare(self):
+            pass
+
+        def check_cancelled(self):
+            pass
+
+        def fetch(self, relative_path, destination, **kwargs):
+            destination.write_bytes(b"abcdef")
+            # Another program creates the file while the transfer runs.
+            late.write_bytes(b"written meanwhile")
+
+    monkeypatch.setattr("hallmark.remote.download.OperationContext", Context)
+    result = execute_download_plan(catalog, plan, approved=True)
+    assert result["succeeded"] == 0 and result["failed"] == 1
+    assert "appeared after the download was planned" in result["errors"][0]
+    assert late.read_bytes() == b"written meanwhile"
+    assert not list(late.parent.glob("*.part"))

@@ -114,8 +114,8 @@ as missing objects.
 
 Discovery reads listings and published metadata only. It must not download
 payloads to infer checksums. The shared downloader owns approval, destination
-path validation, checksum verification, atomic replacement and worker
-concurrency. Backends map logical paths to server paths or API requests and
+path validation, checksum verification, skipping or refusing existing files,
+moving finished files into place and worker concurrency. Backends map logical paths to server paths or API requests and
 write only to the temporary destination they are given.
 
 An instance can serve concurrent ``fetch`` calls. Protect shared mutable

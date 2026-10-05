@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -13,9 +14,10 @@ import pandas as pd
 
 from ..transport import OperationContext, RemoteSpec
 from ..transport.base import DownloadError, validate_remote_path
-from .plan import DownloadItem, DownloadPlan
+from .plan import DownloadConflict, DownloadItem, DownloadPlan
 from ..utils import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
+    CHECKSUM_LENGTHS,
     SUPPORTED_CHECKSUM_ALGORITHMS,
     as_list_of_dicts,
     replace_file_on_success,
@@ -34,6 +36,9 @@ TSV_READ_CHUNK_SIZE = 10_000
 ChecksumSpec = Union[str, tuple[str, str]]
 # The size of chunks to read from a file when downloading or computing checksums.
 DOWNLOAD_CHUNK_SIZE = 8192
+# Supported checksum algorithms by the length of their hexadecimal digests.
+ALGORITHMS_BY_DIGEST_LENGTH = {
+    length: algorithm for algorithm, length in CHECKSUM_LENGTHS.items()}
 
 def _repository_config(repo) -> dict:
     """
@@ -152,7 +157,13 @@ def _parse_checksum(value, algorithm=None) -> Optional[ChecksumSpec]:
     algorithm_text = _clean_checksum(algorithm)
     # If the algorithm is None, return None to indicate no valid algorithm is available
     if algorithm_text is None:
-        return None
+        if str(algorithm).strip().lower() != "unknown":
+            return None
+        # Manifests such as checksums.txt do not name their algorithm; the
+        # length of a well-formed digest identifies the supported one it is.
+        algorithm_text = ALGORITHMS_BY_DIGEST_LENGTH.get(len(checksum))
+        if algorithm_text is None or not is_valid_checksum(algorithm_text, checksum):
+            return None
     # Normalize the algorithm to lowercase and check if it is supported
     algorithm_text = algorithm_text.lower()
     if algorithm_text not in SUPPORTED_CHECKSUM_ALGORITHMS:
@@ -504,7 +515,7 @@ def _download_and_verify_file(
     context, relative_path, destination, expected_checksum, chunk_size
 ):
     """
-    Download and verify a file before replacing its destination.
+    Download and verify a file, then move it to its absent destination.
 
     Args:
         context (OperationContext): Transport and destination for this download.
@@ -518,7 +529,8 @@ def _download_and_verify_file(
         int: Number of downloaded bytes.
 
     Raises:
-        DownloadError: If the transfer, checksum, or destination is invalid.
+        DownloadError: If the transfer, checksum, or destination is invalid,
+            or the destination exists.
     """
     validated_checksum = _validate_expected_checksum(expected_checksum)
     try:
@@ -535,6 +547,12 @@ def _download_and_verify_file(
             # Another process can still change the path after this check.
             resolve_path_in_root(context.output_root, relative_path,
                                    label="download destination")
+            # Planning skips or refuses existing files, so a file here appeared
+            # later; never replace it. The same race as above remains.
+            if destination.exists() or destination.is_symlink():
+                raise DownloadError(
+                    f"Refusing to replace {destination.name}: it appeared after "
+                    "the download was planned; delete it first to replace it")
             context.check_cancelled()
         return size
     except (OSError, ValueError) as exc:
@@ -738,6 +756,73 @@ def _select_download_items(
             for path, checksum in selected.values()]
 
 
+def _existing_file_status(item: DownloadItem, path: Path):
+    """
+    Used by _sort_existing_destinations.
+    Compare an existing destination with its catalog size and checksum.
+
+    The size is compared first, so a file of the wrong size is never read.
+
+    Returns:
+        tuple[str, str | None]: ``("verified", None)`` when the checksum
+        matches; ``("unverified", None)`` when the catalog has no usable
+        checksum but records the same size; otherwise ``("conflict", reason)``.
+    """
+    if path.is_symlink() or not path.is_file():
+        return "conflict", "not a regular file"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return "conflict", "cannot be read"
+    if item.size_bytes is not None and size != item.size_bytes:
+        return "conflict", (f"{size:,} bytes, but the catalog records "
+                            f"{item.size_bytes:,}")
+    try:
+        expected = _validate_expected_checksum(item.checksum)
+    except DownloadError:
+        expected = None
+    if expected is None:
+        if item.size_bytes is None:
+            return "conflict", "no catalog checksum or size to verify it"
+        return "unverified", None
+    algorithm, digest = expected
+    try:
+        actual = calculate_file_checksum(path, algorithm=algorithm)
+    except OSError:
+        return "conflict", "cannot be read"
+    if actual.lower() != digest:
+        return "conflict", "different contents"
+    return "verified", None
+
+
+def _sort_existing_destinations(items, destinations):
+    """
+    Used by plan_download.
+    Separate files to transfer from those whose destinations already exist.
+
+    Existing files are checked in parallel with their catalog size and
+    checksum algorithm, using a small pool because hashing reads whole files.
+
+    Returns:
+        tuple: Items to transfer, items already downloaded and verified,
+        items present with the catalog size but no checksum, and conflicts.
+    """
+    existing = [(item, path) for item, path in zip(items, destinations)
+                if path.exists() or path.is_symlink()]
+    if not existing:
+        return list(items), [], [], []
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as executor:
+        statuses = list(executor.map(
+            lambda pair: _existing_file_status(*pair), existing))
+    present = {item.relative_path for item, _ in existing}
+    by_status = {"verified": [], "unverified": [], "conflict": []}
+    for (item, _), (status, reason) in zip(existing, statuses):
+        by_status[status].append(
+            DownloadConflict(item, reason) if status == "conflict" else item)
+    return ([item for item in items if item.relative_path not in present],
+            by_status["verified"], by_status["unverified"], by_status["conflict"])
+
+
 def _parse_file_size(value) -> Optional[int]:
     """Read a recorded size without treating missing or malformed sizes as zero."""
     if value is None or isinstance(value, bool) or pd.isna(value):
@@ -769,7 +854,12 @@ def plan_download(
     No network requests are made. With no explicit paths or TSVs, select
     the complete catalog before applying filters. Missing sizes remain unknown.
     Requested paths that match no catalogued file are recorded in
-    ``unknown_paths``; such a plan cannot be executed.
+    ``unknown_paths``. Existing destinations are compared with the catalog:
+    files with their catalog checksum are ``skipped``; files without a usable
+    catalog checksum but with the recorded size are ``unverified`` and also
+    not transferred; files that differ, cannot be checked at all or are not
+    regular files are ``conflicts``. A plan with unknown paths or conflicts
+    cannot be executed.
 
     Args:
         repo: The hallmark repository object.
@@ -831,19 +921,23 @@ def plan_download(
         source = RemoteSpec.from_url(
             remote["url"], remote.get("auth"), backend=remote.get("backend"),
             backend_options=remote.get("backend_options"))
+    destinations = []
     for item in items:
         try:
-            resolve_path_in_root(output_root, item.relative_path,
-                                   label="download destination")
+            destinations.append(resolve_path_in_root(
+                output_root, item.relative_path, label="download destination"))
         except ValueError as exc:
             raise DownloadError(str(exc)) from exc
+    items, skipped, unverified, conflicts = _sort_existing_destinations(
+        items, destinations)
     return DownloadPlan(
         tuple(items), remote.get("url"), output_root,
         remote_auth=remote.get("auth"), remote_name=remote.get("name"),
         estimated_bytes_per_second=estimated_bytes_per_second,
         remote_backend=source.backend if source is not None else None,
         backend_options=remote.get("backend_options"),
-        unknown_paths=unknown_paths)
+        unknown_paths=unknown_paths, skipped=tuple(skipped),
+        unverified=tuple(unverified), conflicts=tuple(conflicts))
 
 
 def execute_download_plan(
@@ -871,8 +965,8 @@ def execute_download_plan(
 
     Raises:
         TypeError: If ``plan`` is not a DownloadPlan.
-        DownloadError: If the plan has unknown paths, approval is missing,
-            setup fails, or the destination is invalid.
+        DownloadError: If the plan has unknown paths or conflicts, approval
+            is missing, setup fails, or the destination is invalid.
     """
     if not isinstance(plan, DownloadPlan):
         raise TypeError("plan must be a DownloadPlan")
@@ -880,6 +974,13 @@ def execute_download_plan(
         raise DownloadError(
             "Not in the catalog: " + ", ".join(plan.unknown_paths)
             + "; nothing was downloaded")
+    if plan.conflicts:
+        raise DownloadError(
+            "Existing files conflict with the catalog: " + ", ".join(
+                f"{conflict.item.relative_path.as_posix()} ({conflict.reason})"
+                for conflict in plan.conflicts)
+            + "; nothing was downloaded. "
+            "Delete conflicting files first to replace them")
     if plan.items and approved is not True:
         raise DownloadError("Dataset downloads require explicit approval")
     max_workers = _require_positive_integer(max_workers, label="max_workers")

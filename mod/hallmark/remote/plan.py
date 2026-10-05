@@ -51,15 +51,33 @@ class DownloadItem:
 
 
 @dataclass(frozen=True)
+class DownloadConflict:
+    """
+    A selected file whose destination exists and cannot be kept as it is.
+
+    Attributes:
+        item (DownloadItem): The catalogued file.
+        reason (str): Why the existing destination conflicts, for example
+            ``"different contents"``.
+    """
+
+    item: DownloadItem
+    reason: str
+
+
+@dataclass(frozen=True)
 class DownloadPlan:
     """
     An immutable selection of files, source, and destination for a download.
 
     Creating a plan does not approve a transfer. Sizes come from the catalog;
     a duration estimate requires every file size and a supplied transfer rate.
+    Existing destinations are never replaced: files already downloaded are
+    skipped, and any conflict stops the whole download.
 
     Attributes:
-        items (tuple[DownloadItem]): Selected files and their metadata.
+        items (tuple[DownloadItem]): Selected files to transfer, with their
+            metadata.
         remote_url (str, optional): Data source URL; may be None for an empty plan.
         output_path (Path): Absolute destination directory.
         remote_auth (str, optional): Local SSH profile name.
@@ -70,6 +88,14 @@ class DownloadPlan:
         backend_options (mapping): Immutable backend configuration snapshot.
         unknown_paths (tuple[str]): Requested paths that match no catalogued
             file. A plan with unknown paths cannot be executed.
+        skipped (tuple[DownloadItem]): Selected files already present with
+            their catalog checksum; they are not transferred.
+        unverified (tuple[DownloadItem]): Selected files already present with
+            their catalog size but without a catalog checksum to verify them;
+            they are not transferred.
+        conflicts (tuple[DownloadConflict]): Selected files whose existing
+            destinations differ from the catalog or cannot be verified. A plan
+            with conflicts cannot be executed.
     """
 
     items: tuple[DownloadItem, ...]
@@ -81,13 +107,24 @@ class DownloadPlan:
     remote_backend: Optional[str] = None
     backend_options: Mapping = field(default_factory=dict, repr=False, hash=False)
     unknown_paths: tuple[str, ...] = ()
+    skipped: tuple[DownloadItem, ...] = ()
+    conflicts: tuple[DownloadConflict, ...] = ()
+    unverified: tuple[DownloadItem, ...] = ()
 
     def __post_init__(self) -> None:
         """Copy the selection and validate the source fields and rate."""
-        object.__setattr__(self, "items", tuple(self.items))
-        object.__setattr__(self, "unknown_paths", tuple(self.unknown_paths))
+        for name in ("items", "unknown_paths", "skipped", "conflicts",
+                     "unverified"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
         if any(not isinstance(path, str) for path in self.unknown_paths):
             raise TypeError("unknown_paths must contain strings")
+        for name in ("skipped", "unverified"):
+            if any(not isinstance(item, DownloadItem)
+                   for item in getattr(self, name)):
+                raise TypeError(f"{name} must contain DownloadItem values")
+        if any(not isinstance(conflict, DownloadConflict)
+               for conflict in self.conflicts):
+            raise TypeError("conflicts must contain DownloadConflict values")
         object.__setattr__(
             self, "output_path", Path(self.output_path).expanduser().absolute())
         if any(not isinstance(item, DownloadItem) for item in self.items):
@@ -140,8 +177,9 @@ class DownloadPlan:
 
         Returns:
             str: File count, size and duration estimates, source, destination,
-            and the number of unknown paths. URL credentials, query
-            parameters, and fragments are omitted.
+            and the numbers of skipped and unverified files, conflicts and
+            unknown paths.
+            URL credentials, query parameters, and fragments are omitted.
         """
         size = f"{self.known_bytes:,} bytes"
         if self.unknown_size_count:
@@ -154,8 +192,13 @@ class DownloadPlan:
             source = urlunsplit(parsed._replace(
                 netloc=parsed.netloc.rsplit("@", 1)[-1], query="", fragment=""))
         backend = f"\nBackend: {self.remote_backend}" if self.remote_backend else ""
-        unknown = (f"\n{len(self.unknown_paths)} path(s) not in the catalog"
-                   if self.unknown_paths else "")
+        notes = "".join(f"\n{count} {text}" for count, text in (
+            (len(self.skipped), "file(s) already downloaded; skipped"),
+            (len(self.unverified),
+             "file(s) present (size matches, not verified); skipped"),
+            (len(self.conflicts), "existing file(s) conflict with the catalog"),
+            (len(self.unknown_paths), "path(s) not in the catalog"),
+        ) if count)
         return (f"{self.file_count} file(s); {size}; estimated duration: {duration}"
                 f"\nSource: {source}{backend}"
-                f"\nDestination: {self.output_path}{unknown}")
+                f"\nDestination: {self.output_path}{notes}")
