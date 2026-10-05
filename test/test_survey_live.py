@@ -15,6 +15,7 @@ import pytest
 import requests
 
 from hallmark import Repo
+from hallmark.transport.base import DownloadError
 
 pytestmark = [
     pytest.mark.survey_live,
@@ -54,13 +55,27 @@ def archive_available():
     return check
 
 
+def _archive_failure(error):
+    """Whether an error means the archive timed out or failed on its side."""
+    return any(sign in str(error)
+               for sign in ("ReadTimeout", "ConnectTimeout", "HTTP 5"))
+
+
+def _scan(repo, url, **options):
+    """Catalog ``url``, skipping when the archive times out or errors."""
+    try:
+        return repo.add(url, **options)
+    except DownloadError as exc:
+        if _archive_failure(exc):
+            pytest.skip(f"The archive failed during the scan: {exc}")
+        raise
+
+
 def _download(repo, plan):
     """Download a plan, skipping when the archive times out or errors."""
     result = repo.download(plan, approved=True)
     errors = " ".join(map(str, result["errors"]))
-    if result["failed"] and all(
-            "ReadTimeout" in str(error) or "ConnectTimeout" in str(error)
-            or "HTTP 5" in str(error) for error in result["errors"]):
+    if result["failed"] and all(map(_archive_failure, result["errors"])):
         pytest.skip(f"The archive failed during the download: {errors}")
     return result
 
@@ -84,8 +99,8 @@ def _approve_small(plan, expected_files, sizes_listed=True):
 def test_desi_dr1_files_match_published_checksums(tmp_path, archive_available):
     archive_available(DESI)
     repo = Repo.init(tmp_path / "desi")
-    repo.add(DESI, filter=["redrock-main-dark-23040.fits",
-                           "hpixexp-main-dark-23040.csv"])
+    _scan(repo, DESI, filter=["redrock-main-dark-23040.fits",
+                              "hpixexp-main-dark-23040.csv"])
     rows = repo.state.data.set_index("path")
     assert set(rows.checksum_algorithm) == {"sha256"}
     repo.commit("Record remote catalog")
@@ -104,7 +119,7 @@ def test_eht_m87_uvfits_downloads_from_cyverse(tmp_path, archive_available):
     archive_available(EHT)
     name = "SR1_M87_2017_095_lo_hops_netcal_StokesI.uvfits"
     repo = Repo.init(tmp_path / "eht")
-    repo.add(EHT, filter=name)
+    _scan(repo, EHT, filter=name)
     assert list(repo.state.data.path) == [name]
     repo.commit("Record remote catalog")
 
@@ -120,7 +135,7 @@ def test_eht_m87_uvfits_downloads_from_cyverse(tmp_path, archive_available):
 def test_eht_url_pattern_catalogs_every_day_and_band(tmp_path, archive_available):
     archive_available(EHT)
     repo = Repo.init(tmp_path / "eht")
-    repo.add(EHT + "SR1_M87_2017_{day:d}_{band}_hops_netcal_StokesI.uvfits")
+    _scan(repo, EHT + "SR1_M87_2017_{day:d}_{band}_hops_netcal_StokesI.uvfits")
     rows = repo.state.data
     assert set(rows.band) == {"lo", "hi"}
     assert {95, 96, 100, 101} <= {int(day) for day in rows.day}
