@@ -5,14 +5,16 @@ import shutil
 import socket
 import subprocess
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import pytest
+import requests
 
 from hallmark import ParaFrame, Repo
 from hallmark.remote.download import _select_remote_config, execute_download_plan
 from hallmark.remote.plan import DownloadItem, DownloadPlan
 from hallmark.transport.ssh import SshBackend
+from http_server import DatasetHTTPServer
 
 
 Standard_files = [
@@ -215,3 +217,42 @@ Host *
         daemon.terminate()
         daemon.wait(timeout=5)
         log.close()
+
+
+@pytest.fixture
+def http_server(monkeypatch):
+    """Start loopback HTTP servers for directories; stop them at teardown.
+
+    Call the fixture value with a directory and an optional listing style.
+    Proxies are disabled so requests reach 127.0.0.1 directly.
+    """
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                 "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    servers = []
+
+    def start(root, listing_style="apache"):
+        server = DatasetHTTPServer(root, listing_style=listing_style).start()
+        servers.append(server)
+        return server
+
+    try:
+        yield start
+    finally:
+        for server in servers:
+            server.close()
+
+
+@pytest.fixture
+def loopback_only(monkeypatch):
+    """Fail any HTTP request that would leave this machine."""
+    send = requests.adapters.HTTPAdapter.send
+
+    def guarded(self, request, *args, **kwargs):
+        host = urlsplit(request.url).hostname
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            raise AssertionError(f"Test attempted a non-loopback request to {host}")
+        return send(self, request, *args, **kwargs)
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", guarded)
