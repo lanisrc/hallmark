@@ -399,10 +399,11 @@ def branch(repo, name):
 @click.argument("target_branch")
 @click.pass_obj
 def checkout(repo, target_branch):
-    """Switch branches and rewrite tracked files from branch state.
+    """Switch to TARGET and rewrite tracked files from its state.
 
-    This is analogous to `git checkout BRANCH`.
-    If the branch does not exist, it is created from the current branch.
+    TARGET may be an existing branch or a commit id. A commit id leaves you on
+    no branch, so use `hm branch NAME` to create one before committing again.
+    An unrecognized TARGET is an error and changes nothing.
     Only hallmark-tracked files are rewritten; unrelated files are left
     alone unless they block restoration of a tracked path.
     """
@@ -412,7 +413,12 @@ def checkout(repo, target_branch):
         switched = repo.checkout(target_branch)
 
     if switched:
-        click.echo(f'Switched to branch "{target_branch}".')
+        snapshot = repo.branches()
+        if snapshot["current"] is None:
+            click.echo(
+                f'Now at commit {snapshot["detached_at"]}; not on a branch.')
+        else:
+            click.echo(f'Switched to branch "{snapshot["current"]}".')
 
 
 @hallmark.command(short_help="Download files from the configured data remote.")

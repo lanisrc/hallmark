@@ -183,6 +183,7 @@ def test_cli():
                 f"Expected exit code 0 for commit, got {result.exit_code}"
             assert "Committed staged state changes." in result.output
 
+            runner.invoke(hallmark, ["branch", "experiment"])
             result = runner.invoke(hallmark, ["checkout", "experiment"])
             result = runner.invoke(hallmark, ["checkout", "experiment"])
             assert result.exit_code == 0, \
@@ -477,6 +478,64 @@ def test_cli_log():
                 f"Expected log output to match git log, got: {result.output.strip()}"
 
 
+def test_cli_checkout_rejects_an_unknown_target():
+    """
+    Test that 'checkout' no longer creates a branch from an unrecognized name, and
+    reports it as a clean error instead.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "Original calibration"])
+
+            result = runner.invoke(hallmark, ["checkout", "brand-new"])
+
+            assert result.exit_code != 0, \
+                f"Expected a non-zero exit code, got {result.exit_code}"
+            assert "no branch or commit named" in result.output, \
+                f"Expected an unknown-target error, got: {result.output}"
+
+            listed = runner.invoke(hallmark, ["branch"])
+            assert "brand-new" not in listed.output, \
+                f"Expected no branch to be created, got: {listed.output}"
+
+
+def test_cli_checkout_of_a_commit_reports_no_branch():
+    """
+    Test that 'checkout COMMIT' restores that commit's files and reports that no
+    branch is selected, rather than creating a branch named after the commit.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "Original calibration"])
+            first_commit = GitRepo(".hm").head.commit.hexsha[:7]
+            Path("a0_i0.h5").write_text("recalibrated\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "."])
+            runner.invoke(hallmark, ["commit", "-m", "New calibration"])
+
+            result = runner.invoke(hallmark, ["checkout", first_commit])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for a commit checkout, got " \
+                f"{result.exit_code}: {result.output}"
+            assert "not on a branch" in result.output.lower(), \
+                f"Expected a detached-commit message, got: {result.output}"
+            assert Path("a0_i0.h5").read_text(encoding="utf-8") == "original\n", \
+                "Expected the commit's file contents to be restored."
+
+            listed = runner.invoke(hallmark, ["branch"])
+            assert first_commit not in listed.output.replace(
+                f"commit {first_commit}", ""), \
+                f"Expected no branch named after the commit, got: {listed.output}"
+
+
 def test_cli_reports_a_detached_commit_without_crashing():
     """
     Test that 'status' and 'branch' describe a detached commit instead of raising, and
@@ -582,6 +641,7 @@ def test_cli_branch_lists_local_branches_and_marks_current():
             Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
             runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
             runner.invoke(hallmark, ["commit", "-m", "add first file"])
+            runner.invoke(hallmark, ["branch", "experiment"])
             runner.invoke(hallmark, ["checkout", "experiment"])
             result = runner.invoke(hallmark, ["branch"])
 

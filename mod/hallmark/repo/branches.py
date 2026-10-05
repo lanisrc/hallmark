@@ -11,7 +11,7 @@ from .config import branch_filename_format, row_to_path, single_data_format
 from .manifest import iter_manifest_entries
 from .history import (
     load_branch_state, load_head_state, find_remote_branch,
-    fetch_missing_objects_from_remote)
+    fetch_missing_objects_from_remote, _load_revision_state)
 from .changes import ensure_clean_tracked_files, tracked_paths
 
 
@@ -41,6 +41,24 @@ def create_branch(repo, name):
     return name
 
 
+def resolve_checkout_target(repo, target):
+    if target in {head.name for head in repo.dothm.heads}:
+        return "branch", target
+
+    remote_revision = find_remote_branch(repo, target)
+    if remote_revision is not None:
+        return "remote", remote_revision
+
+    try:
+        commit = repo.dothm.rev_parse(target)
+    except Exception:
+        commit = None
+    if commit is not None:
+        return "commit", commit.hexsha
+
+    raise CheckoutError(f'no branch or commit named "{target}"')
+
+
 def checkout(repo, target_branch):
     # Validate and normalize the target branch name
     target_branch = repo._validate_branch_name(target_branch)
@@ -55,27 +73,25 @@ def checkout(repo, target_branch):
                 "Cannot switch between local files and remote catalogs")
         if repo.dothm.index.diff("HEAD") or repo.dothm.index.diff(None):
             raise CheckoutError("Commit hallmark state changes before checkout")
-        names = {head.name for head in repo.dothm.heads}
-        remote_branch = find_remote_branch(repo, target_branch)
-        if target_branch not in names and remote_branch is None:
-            repo.dothm.git.checkout("-b", target_branch)
+        catalog_kind, catalog_target = resolve_checkout_target(repo, target_branch)
+        if catalog_kind == "commit":
+            repo.dothm.git.checkout("--detach", catalog_target)
         else:
             repo.dothm.git.checkout(target_branch)
         repo.state = repo.dothm.load_state()
         return True
     ensure_clean_tracked_files(repo)
 
-    local_branches = {head.name for head in repo.dothm.heads}
-    has_local = target_branch in local_branches
+    target_kind, resolved_target = resolve_checkout_target(repo, target_branch)
+    has_local = target_kind == "branch"
+    has_remote = target_kind == "remote"
+    remote_revision = resolved_target if has_remote else None
 
-    # Look for a matching branch on any configured remote.
-    # Returns something like "origin/feature" or None if no remote branch exists.
-    remote_revision = find_remote_branch(repo, target_branch)
-    has_remote = remote_revision is not None
-
-    create_new_branch = not has_local and not has_remote
     current_tracked = tracked_paths(repo)
-    target_state = load_branch_state(repo, target_branch)
+    if target_kind == "commit":
+        target_state = _load_revision_state(repo, resolved_target)
+    else:
+        target_state = load_branch_state(repo, target_branch)
     # Get the data format string for the target branch configuration
     target_fmt = single_data_format(target_state.config)
     if target_fmt is None:
@@ -219,7 +235,7 @@ def checkout(repo, target_branch):
                 repo.dothm.git.checkout("--track",remote_revision)
 
             else:
-                repo.dothm.git.checkout("-b", target_branch)
+                repo.dothm.git.checkout("--detach", resolved_target)
 
             # Reload the repository state after switching branches
             repo.state = repo.dothm.load_state()
@@ -290,8 +306,8 @@ def checkout(repo, target_branch):
                         f'could not restore "{original_path}": '
                         f"{rollback_exc}")
 
-            # if the target branch was newly created and exists in the repository
-            if create_new_branch and target_branch in {
+            # a remote-tracking checkout creates a local branch, so remove it
+            if has_remote and target_branch in {
                 head.name for head in repo.dothm.heads}:
                 # try to delete the newly created branch to rollback the checkout
                 try:

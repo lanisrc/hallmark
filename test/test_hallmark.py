@@ -358,6 +358,7 @@ def test_repo_add_pattern_replaces_manifest_when_fmt_changes(tmp_path):
 
     repo.add("a{a}_i{i}_w{w}.h5")
     repo.commit("main a data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     repo.add("b{a}_i{i}_w{w}.h5")
 
@@ -888,6 +889,7 @@ def test_checkout_rewrites_tracked_files_and_shares_objects(tmp_path):
             for p in (repo.dothm.path / "objects").rglob("*") if p.is_file())
     assert len(main_objects) == 2
 
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     (repo.worktree / "a0_i0.h5").unlink()
     (repo.worktree / "a0_i30.h5").unlink()
@@ -920,6 +922,7 @@ def test_checkout_leaves_untracked_files(tmp_path):
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
 
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     (repo.worktree / "a0_i0.h5").unlink()
     _write_files(repo.worktree, ["a1_i45.h5"])
@@ -941,6 +944,7 @@ def test_checkout_rebuilds_worktree_for_branch_specific_nested_fmt(tmp_path):
     repo.add("main/a{a}_i{i}.h5")
     repo.commit("main data")
 
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     (repo.worktree / "exp" / "run1").mkdir(parents=True)
     _write_files(repo.worktree, ["exp/run1/b0_i0.h5"])
@@ -966,6 +970,7 @@ def test_checkout_aborts_on_dirty_tracked_file(tmp_path):
     _write_files(repo.worktree, ["a0_i0.h5"])
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     repo.checkout("main")
     (repo.worktree / "a0_i0.h5").write_text("changed\n", encoding="utf-8")
@@ -981,6 +986,7 @@ def test_checkout_aborts_on_untracked_path_conflict(tmp_path):
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
 
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     (repo.worktree / "a0_i0.h5").unlink()
     _write_files(repo.worktree, ["a1_i45.h5"])
@@ -1001,6 +1007,7 @@ def test_checkout_allows_return_to_branch_when_target_files_already_match(tmp_pa
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
 
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     repo.add("b{a}_i{i}.h5")
     repo.commit("experiment data")
@@ -1030,6 +1037,7 @@ def test_checkout_rejects_symlink_destination_escape(tmp_path):
     _write_files(repo.worktree, ["main/a0_i0.h5"])
     repo.add("main/a{a}_i{i}.h5")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     (repo.worktree / "main/a0_i0.h5").unlink()
     (repo.worktree / "exp").mkdir()
@@ -1077,6 +1085,7 @@ def test_checkout_hashes_tracked_files_in_one_batch(monkeypatch, tmp_path):
         calls.append(list(paths))
         return original_checksum_many(paths)
     monkeypatch.setattr(repo, "checksum_many", record_checksum_many)
+    repo.create_branch("experiment")
     repo.checkout("experiment")
 
     assert len(calls) == 1, "checksum_many should be called once for all tracked files"
@@ -1200,6 +1209,108 @@ def test_create_branch_requires_an_existing_commit(tmp_path):
         Repo(tmp_path / "repo").create_branch("recal")
 
 
+def _repo_with_two_commits(tmp_path):
+    """
+    Build a repository with two commits on main, left checked out on main.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    Returns:
+        tuple[Repo, str]: the repository and the id of the first commit.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    data_path = repo.worktree / "a0_i0.h5"
+    data_path.write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    repo.commit("Original calibration")
+    first_commit = repo.dothm.head.commit.hexsha
+    data_path.write_text("recalibrated\n", encoding="utf-8")
+    repo.add(".")
+    repo.commit("New calibration")
+    return repo, first_commit
+
+
+def test_checkout_rejects_an_unknown_target_and_changes_nothing(tmp_path):
+    """
+    Test that checking out a name that is neither a branch nor a commit raises and
+    leaves the branches, the current branch and the worktree untouched.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo, _ = _repo_with_two_commits(tmp_path)
+    before_branches = {head.name for head in repo.dothm.heads}
+    before_contents = (repo.worktree / "a0_i0.h5").read_text(encoding="utf-8")
+
+    with pytest.raises(CheckoutError, match="no branch or commit named"):
+        repo.checkout("brand-new")
+
+    assert {head.name for head in repo.dothm.heads} == before_branches, \
+        "Expected checkout not to create a branch for an unknown name."
+    assert repo.branches()["current"] == "main", \
+        "Expected to stay on the current branch."
+    assert (repo.worktree / "a0_i0.h5").read_text(encoding="utf-8") \
+        == before_contents, "Expected the worktree to be left untouched."
+
+
+def test_checkout_of_a_commit_restores_files_without_moving_branches(tmp_path):
+    """
+    Test that checking out a commit id restores that commit's files, leaves no branch
+    selected, and moves no branch.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo, first_commit = _repo_with_two_commits(tmp_path)
+    main_before = repo.dothm.heads["main"].commit.hexsha
+
+    repo.checkout(first_commit[:7])
+
+    reopened = Repo(tmp_path / "repo")
+    assert (reopened.worktree / "a0_i0.h5").read_text(encoding="utf-8") \
+        == "original\n", "Expected the first commit's file contents to be restored."
+    assert reopened.branches()["current"] is None, \
+        "Expected no branch to be selected after checking out a commit."
+    assert reopened.dothm.heads["main"].commit.hexsha == main_before, \
+        "Expected main to stay where it was."
+
+
+def test_checkout_returns_from_a_commit_to_a_branch(tmp_path):
+    """
+    Test that a branch checkout from a detached commit restores the branch's files and
+    selects the branch again.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo, first_commit = _repo_with_two_commits(tmp_path)
+    repo.checkout(first_commit[:7])
+
+    reopened = Repo(tmp_path / "repo")
+    reopened.checkout("main")
+
+    back = Repo(tmp_path / "repo")
+    assert back.branches()["current"] == "main", \
+        f"Expected to be on main, got {back.branches()['current']}"
+    assert (back.worktree / "a0_i0.h5").read_text(encoding="utf-8") \
+        == "recalibrated\n", "Expected main's file contents to be restored."
+
+
+def test_checkout_of_a_commit_aborts_on_a_dirty_tracked_file(tmp_path):
+    """
+    Test that the existing safety check still applies when the target is a commit, so
+    uncommitted work is never discarded.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo, first_commit = _repo_with_two_commits(tmp_path)
+    (repo.worktree / "a0_i0.h5").write_text("uncommitted\n", encoding="utf-8")
+
+    with pytest.raises(CheckoutError, match="uncommitted"):
+        repo.checkout(first_commit[:7])
+
+    assert (repo.worktree / "a0_i0.h5").read_text(encoding="utf-8") \
+        == "uncommitted\n", "Expected the uncommitted change to survive."
+    assert repo.branches()["current"] == "main", \
+        "Expected to stay on the current branch."
+
+
 def _repo_detached_at_first_commit(tmp_path):
     """
     Build a repository with two commits, left with HEAD detached at the first one.
@@ -1300,6 +1411,7 @@ def test_checkout_checks_target_objects_before_switching_branch(tmp_path):
     data_path.write_text("main contents\n", encoding="utf-8")
     repo.add("data_{number}.txt")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     data_path.write_text("experiment contents\n", encoding="utf-8")
     repo.add(".")
@@ -1336,6 +1448,7 @@ def test_checkout_rejects_directory_at_target_file_path(tmp_path):
     data_path.write_text("main\n", encoding="utf-8")
     repo.add("data_{number}.txt")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     data_path.unlink()
     experiment_path = (repo.worktree / "experiment_1.txt")
@@ -1373,6 +1486,7 @@ def test_checkout_rolls_back_after_install_failure(monkeypatch, tmp_path):
     _write_files(repo.worktree, ["a0_i0.h5", "a0_i30.h5"])
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     (repo.worktree / "a0_i0.h5").unlink()
     (repo.worktree / "a0_i30.h5").unlink()
@@ -1426,6 +1540,7 @@ def test_checkout_restores_only_changed_target_files(monkeypatch, tmp_path):
     _write_files(repo.worktree, ["data_1.txt", "data_2.txt"])
     repo.add("data_{number}.txt")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     changed_path = repo.worktree / "data_1.txt"
     changed_path.write_text("experiment contents\n", encoding="utf-8")
@@ -1808,6 +1923,7 @@ def test_tracked_file_replaced_by_directory_is_reported_missing(tmp_path):
     assert snapshot["worktree"]["modified"] == [], \
         f"Expected no modified files, got {snapshot['worktree']['modified']}"
     with pytest.raises(CheckoutError, match="is missing"):
+        repo.create_branch("experiment")
         repo.checkout("experiment")
 
 
@@ -1840,6 +1956,7 @@ def test_tracked_file_replaced_by_symlink_is_reported_missing(tmp_path):
 
     assert snapshot["worktree"] == {"modified": [], "deleted": ["data_1.txt"]}
     with pytest.raises(CheckoutError, match="is missing"):
+        repo.create_branch("experiment")
         repo.checkout("experiment")
     assert outside_path.read_text(encoding="utf-8") == "outside\n", f"Expected outside \
         file to remain unchanged, got {outside_path.read_text(encoding='utf-8')}"
@@ -2295,6 +2412,7 @@ def test_add_worktree_restores_target_branch_data(tmp_path):
     data_path.write_text("main contents\n", encoding="utf-8")
     repo.add("data_{number}.txt")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     data_path.write_text("experiment contents\n", encoding="utf-8")
     repo.add(".")
@@ -2981,6 +3099,7 @@ def test_checkout_remote_branch(tmp_path):
     )
 
     # Create the experiment branch in the source repository AFTER cloning.
+    source.create_branch("experiment")
     source.checkout("experiment")
 
     # Change the file on the experiment branch and commit it.
