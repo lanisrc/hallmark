@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 from git.exc import GitCommandError
 
 from ..error import CheckoutError, DestinationExistsError, DothmError
-from ..utils import resolve_path_in_root
+from ..utils import require_nonempty_string, resolve_path_in_root
 from ..remote.add import is_remote_catalog
 from .config import branch_filename_format, row_to_path, single_data_format
 from .manifest import iter_manifest_entries
@@ -13,6 +13,39 @@ from .history import (
     load_branch_state, load_head_state, find_remote_branch,
     fetch_missing_objects_from_remote)
 from .changes import ensure_clean_tracked_files, tracked_paths
+
+
+def validate_branch_name(git, value) -> str:
+    """
+    Validate and normalize a Git branch name.
+
+    Names that Git would read as options, such as ``-q``, are refused.
+
+    Args:
+        git: GitPython command wrapper used to run ``check-ref-format``.
+        value (str): The branch name to validate.
+
+    Returns:
+        str: The normalized branch name.
+
+    Raises:
+        ValueError: If the branch name is invalid.
+    """
+    # Normalize the branch name to ensure it is a non-empty string
+    branch_name = require_nonempty_string(value, label="branch name")
+    # if the branch name starts with a hyphen, raise a ValueError
+    if branch_name.startswith("-"):
+        raise ValueError(f"invalid branch name: {branch_name!r}")
+
+    # try to validate the branch name using Git's check_ref_format command
+    try:
+        git.check_ref_format("--branch", branch_name)
+    # if Git raises a GitCommandError, re-raise it as a ValueError
+    except GitCommandError as exc:
+        raise ValueError(f"invalid branch name: {branch_name!r}") from exc
+
+    # if all checks pass, return the normalized branch name
+    return branch_name
 
 
 def checkout(repo, target_branch):
@@ -366,6 +399,9 @@ def add_worktree(repo, target_branch):
 
         # iterate over the target state data and restore files from the object store
         try:
+            # Point the new ".hm" at the shared object store for tools that read
+            # objects through a repository path, such as a clone of this worktree.
+            (target_dothm / "objects").symlink_to(repo.objects.root)
             for _, row in target_state.data.iterrows():
                 rel_path = row_to_path(row, target_fmt)
                 # resolve relative path to an absolute path in the target worktree

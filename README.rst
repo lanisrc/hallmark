@@ -85,12 +85,17 @@ Create a repository, stage a remote catalog, then commit it::
     hm download --all --dry-run
     hm download --all
 
-``hm`` is the CLI command; ``hallmark`` remains an alias. Initialization creates the empty
-local repository. Remote ``add`` discovers files without downloading dataset
-contents or committing the catalog. CyVerse, ordinary browsable HTTPS
-directories, SSH and SFTP use the same workflow. Omit the filter to catalog
-all discoverable files beneath the supplied URL.
+``hm`` is the CLI command; ``hallmark`` remains an alias. Commands work from any
+folder inside a repository; ``hm`` finds ``.hm`` in parent folders. If ``.hm``
+is damaged or missing files, commands explain the problem and change nothing.
+Initialization creates the empty local repository. Remote ``add`` discovers
+files without downloading dataset contents or committing the catalog. CyVerse,
+ordinary browsable HTTPS directories, SSH and SFTP use the same workflow. Omit
+the filter to catalog all discoverable files beneath the supplied URL.
 
+``hm download PATH...`` selects catalogued files or folders instead of
+``--all``; ``--filter`` and ``--fmt`` only narrow a selection, and paths that
+are not in the catalog stop the download before the server is contacted.
 Every nonempty CLI transfer asks for confirmation. For separate Python
 downloads, callers can inspect
 ``repo.plan_download()`` and then execute ``repo.download(plan, approved=True)``.
@@ -99,10 +104,12 @@ Optional authentication profiles remain local and can be selected with
 The obsolete ``build`` and remote initialization interfaces have been removed.
 Use ``init``, ``add`` and ``commit`` for new remote catalogs.
 
-Use ``hm clone CATALOG PATH`` for an existing Git-hosted ``.hm`` or a
-published HTTP/SFTP catalog snapshot. Catalogs can live on GitHub or another
+Use ``hm clone CATALOG [PATH]`` for an existing Git-hosted ``.hm`` or a
+published HTTP/SFTP catalog snapshot. ``PATH`` defaults to a new folder named
+after the source and must otherwise be new or empty, outside any Hallmark
+repository. Catalogs can live on GitHub or another
 server while their data remotes point elsewhere. Git clones preserve the full
-catalog and its history. Clone displays a data download plan and asks for
+catalog, its history and every branch, after checking each branch's catalog. Clone displays a data download plan and asks for
 confirmation by default; declining keeps the catalog. Use ``hm clone CATALOG
 PATH --no-download`` for catalog only. Filters narrow the download and cannot
 accompany ``--no-download``. Python ``Repo.clone`` downloads without prompting
@@ -123,7 +130,9 @@ Remote ``add`` supports one dataset root and one ``data.tsv`` table per
 repository. Keep remote catalogs separate from locally versioned files.
 Local ``add`` selects files by filename format; ``commit`` stores their
 contents in ``.hm/objects``. Clone copies catalog history and downloads from
-its configured data remote; transfer of a local object store is not implemented.
+its configured data remote. Repositories with a branch that tracks local files
+cannot be cloned yet: clone reports this and creates nothing, even with
+``--no-download``. Empty repositories and remote catalogs can be cloned.
 
 Development and support
 -----------------------

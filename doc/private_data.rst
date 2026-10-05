@@ -66,8 +66,12 @@ Suppose the export contains ``runs/run_001.h5``, ``runs/run_002.h5`` and
 
 This creates ``./lab/.hm`` and catalogs only the matching run files. The URL
 is the exact discovery root. A filename format selects paths and extracts
-parameters; it does not approve a download. A glob filter can select paths
-without defining parameters:
+parameters; it does not approve a download. Each branch has one filename
+format: adding the bare URL again rescans with the saved format, and a new
+format is refused, before the server is contacted, if any catalogued file does
+not fit it. There is no option to force it; a broader format that fits every
+catalogued file replaces the old one. A glob filter can select paths without
+defining parameters:
 
 .. code-block:: bash
 
@@ -82,6 +86,11 @@ beneath the URL and catalogs all discovered files. A filter still traverses
 directories needed to find matching files. Discovery shows an indeterminate
 progress bar with counts of completed directories and discovered files.
 The percentage and completion time remain unknown until a total is available.
+
+A scan stages its catalog only after it completes. If the connection or access
+fails, or no file matches the URL, filter and filename format, ``add`` explains
+the problem, exits with an error and keeps the previously staged catalog
+unchanged; it never stages a partial result.
 
 Both URL schemes use structured SFTP directory enumeration and file transfers.
 SFTP-only accounts work for discovery as well as downloading. No
@@ -104,6 +113,17 @@ nonsecret backend settings. These settings are saved with the data remote;
 credentials belong in local authentication configuration. See :doc:`backends`
 for the plugin interface.
 
+Keep passwords and keys outside ``.hm``. ``add URL`` and
+``set-config --remote-url`` reject URLs containing a password, an HTTP(S)
+username or token, a query string or a fragment, before contacting the server
+and without repeating the URL. Store SSH users and keys in ``~/.ssh/config`` or
+a local profile in ``~/.config/hallmark/auth.yml`` (see section 4), and
+HTTP(S) logins in ``~/.netrc``. An SSH username such as
+``ssh://researcher@lab-data/srv/exports/lab/`` is not a secret and is allowed.
+``clone`` likewise refuses a source URL with a password or an HTTP(S) username
+or token, before creating anything, because Git would save it in
+``.hm/.git/config``; use a Git credential helper or ``~/.netrc`` instead.
+
 3. Preview, approve and download
 --------------------------------
 
@@ -117,7 +137,8 @@ From the directory containing ``lab``, enter that repository:
    hm download runs/run_001.h5
 
 The dry run reads only the local catalog. It reports file count, known bytes,
-the number of unknown file sizes, destination and source. The CLI reports
+the number of unknown file sizes, destination and source, then lists the
+selected files and any paths that are not in the catalog. The CLI reports
 duration as unknown. Python callers can supply a transfer rate to estimate
 duration when all file sizes are known. The dry run does not test credentials,
 host trust or remote-file existence.
@@ -133,21 +154,42 @@ Choose a scope from inside ``lab``:
 
 .. code-block:: bash
 
-   hm download --filter 'runs/run_00[12].h5' --dry-run
+   hm download runs --dry-run
+   hm download --all --filter 'runs/run_00[12].h5' --dry-run
    hm download --all --output ./payload
 
-Explicit paths use their recorded catalog checksums when available, just like
-``--tsv`` and ``--all``. A path absent from the catalog can be requested, but
-its size and checksum are unknown. Files without a usable publisher checksum
-can be downloaded, but their contents cannot be checked against the catalog.
+Choose files with catalogued paths or folders, ``--tsv`` or ``--all``. Paths
+are relative to the current folder, which can be any folder inside the
+repository. A folder selects every catalogued file below it, including
+subfolders; ``.`` selects everything below the current folder. ``--filter``
+and ``--fmt`` only narrow that selection: on their own they show usage and
+download nothing. A path that matches no catalogued file, such as a typo or a
+folder without catalogued files, stops the download before the server is
+contacted; ``--dry-run`` lists such paths. Selected files use their recorded
+catalog checksums. Files without a usable publisher checksum can be
+downloaded, but their contents cannot be checked against the catalog.
 
 ``--tsv`` can be repeated and combined with explicit paths; overlapping entries
 are deduplicated. ``--all`` cannot be combined with either selection mode.
 Relative output paths are relative to the current directory. Without
 ``--output``, downloads go to the repository worktree; bare ``.hm`` repositories
-require an explicit output directory. Repeating a download transfers the
-selection again and replaces destinations only after successful transfer and
-any recorded checksum verification.
+require an explicit output directory.
+
+Existing files are never replaced. Before contacting the server, a download
+checks each selected file that already exists at its destination, first by
+its recorded size and then by its catalog checksum. A file with its catalog
+checksum is reported as already downloaded and skipped, so repeating a
+download, for example after a failed transfer, fetches only what is missing.
+When the catalog has no checksum for a file, as for SSH exports without a
+checksum manifest, a file with the recorded size is reported as present (size
+matches, not verified) and also skipped. A file with a different size or
+contents, a file the catalog records neither a checksum nor a size for, or a
+folder in its place is a conflict: the download stops and transfers nothing.
+Delete conflicting files first to replace them; there is no overwrite option.
+``--dry-run`` lists files to download, skipped and unverified files, conflicts
+and unknown paths. Checksums from manifests that do not name their algorithm,
+such as ``checksums.txt``, are used when the digest length identifies MD5,
+SHA-1, SHA-256 or SHA-512.
 
 After committing the catalog, use ``download`` to review and approve a transfer.
 Declining keeps the catalog available; an empty selection needs no approval:
@@ -168,8 +210,26 @@ HTTP/SFTP directory containing its metadata. For example, copy this catalog:
 
    hm clone ./.hm ../lab-copy
 
-Git endpoints preserve the complete catalog and history. Published HTTP/SFTP
-snapshots start new local history. A snapshot URL may name the metadata
+Without a destination, ``hm clone`` creates a folder in the current folder
+named after the source: ``lab`` for ``./lab/.hm`` or
+``https://github.com/example/lab.git``. A destination must be a new or empty
+folder outside every Hallmark repository, including the source, because
+repositories cannot be nested; these checks happen before the source is read.
+A failed clone removes only what it created: the destination folder if it was
+new, or the ``.hm`` it added to an existing empty folder. It never follows a
+symbolic link while cleaning up.
+Only empty repositories and remote catalogs can be cloned: if any branch of the
+source tracks local files, whose contents live in its ``.hm/objects``, clone
+reports it and creates nothing, even with ``--no-download``. A local source is
+checked before anything is copied; a Git host or snapshot is checked after its
+metadata is read, and the partial copy is removed.
+
+Git endpoints preserve the complete catalog and history, with a local branch
+for every branch of the source; the copy starts on the branch the source has
+selected. Before finishing, clone checks every branch's committed catalog:
+readable ``config.yml``, ``meta.yml`` and tables, safe relative paths and
+well-formed checksums. An invalid catalog stops the clone and removes the
+copy. Published HTTP/SFTP snapshots start new local history. A snapshot URL may name the metadata
 directory itself or its parent containing ``.hm``. Use ``--source-type git``
 to require Git or ``--source-type catalog`` to require a snapshot. Automatic
 selection treats local paths, SCP-style addresses, Git/file/SSH URLs and URLs
@@ -190,6 +250,10 @@ confirmation; Enter or ``n`` keeps the catalog and exits successfully:
 Use ``--no-download`` for catalog only, without a prompt. It cannot be combined
 with ``--filter`` or ``--fmt`` and is required for bare destinations. An empty
 selection prints ``No files selected for download.`` without prompting.
+If the download cannot run or a file fails, clone reports the copy as
+incomplete. It keeps the catalog and the files that downloaded, and names the
+``hm download --all`` command, with the same filters, that retries; files
+already downloaded are skipped.
 Git authentication and data authentication are independent; catalog-only cloning
 does not require credentials for its data.
 
@@ -283,9 +347,11 @@ Without ``approved=True``, a nonempty transfer raises ``DownloadError`` before
 opening a connection. A plan freezes the selected files, source URL, profile
 reference, backend, backend options and destination. Later catalog or remote
 configuration changes do not redirect it. ``plan_download(filter="**/*.h5")``
-selects matching files from the catalog;
-``plan_download(output_path="subset", tsv_names=["data.tsv"])`` selects a TSV
-and destination. Planning makes no network requests. Known size totals and
+selects matching files from the catalog; ``plan_download(file_paths=["runs"])``
+selects a folder; ``plan_download(output_path="subset", tsv_names=["data.tsv"])``
+selects a TSV and destination. Planning makes no network requests. Requested
+paths that match no catalogued file are listed in ``plan.unknown_paths``;
+downloading such a plan raises ``DownloadError`` before opening a connection. Known size totals and
 unknown-size counts are available as ``known_bytes`` and
 ``unknown_size_count``. ``estimated_seconds`` stays ``None`` unless all sizes
 are known and ``estimated_bytes_per_second`` was supplied when planning.
@@ -346,7 +412,7 @@ access retains Requests' normal ``.netrc`` and environment behavior; Hallmark's
 named auth profiles apply to SSH/SFTP.
 
 From either initialized catalog, inspect and approve a selected subset using
-``hm download --filter PATTERN --dry-run`` and then the same command
+``hm download --all --filter PATTERN --dry-run`` and then the same command
 without ``--dry-run``. Python follows the same steps:
 
 .. code-block:: python
@@ -425,10 +491,12 @@ catalog hosting independent of data hosting.
 Download behavior and troubleshooting
 -------------------------------------
 
-Files are downloaded to temporary paths and published atomically after transfer
-and any recorded checksum verification. A failed transfer preserves an existing
-destination and removes its temporary file. Successful files remain available
-when another file fails; a multi-file download is not a single transaction.
+Unfinished downloads are kept in temporary ``.part`` files beside their
+destinations and moved into place only after the transfer and any recorded
+checksum verification succeed. A failed transfer removes its temporary file.
+A destination that appears while the download runs is not replaced; that file
+fails instead. Successful files remain available when another file fails; a
+multi-file download is not a single transaction.
 The CLI exits nonzero on transfer failures. Cancellation stops the active
 operation and closes the SSH connections and processes it started.
 
@@ -451,6 +519,9 @@ operation and closes the SSH connections and processes it started.
    * - Checksum mismatch
      - Check whether the export changed since catalog creation. Reconcile the
        catalog and source against a trusted version before retrying.
+   * - Existing files conflict with the catalog
+     - Compare the listed files with the catalog. Delete or move them, then
+       download again; Hallmark never overwrites existing files.
    * - Transfer timeout or session limit
      - Adjust the local per-file time budget or lower concurrency to match
        the server's capacity.

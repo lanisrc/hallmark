@@ -419,7 +419,8 @@ def test_download_requires_remote_url(tmp_path):
         tmp_path: A pytest fixture providing a temporary directory.
     Raises:
         DownloadError: If the remote configuration is present but the URL is missing."""
-    repo = _repo(tmp_path, {"remote": {"name": "origin"}})
+    repo = _repo(tmp_path, {"remote": {"name": "origin"}},
+                 pd.DataFrame([{"path": "data.bin"}]))
 
     with pytest.raises(DownloadError, match="No remote URL"):
         plan_download(repo, tmp_path, file_paths=["data.bin"])
@@ -671,7 +672,7 @@ def test_download_rejects_selected_files_without_remote(tmp_path):
     Raises:
         DownloadError: If selected files are provided but no remote is configured.
     """
-    repo = _repo(tmp_path)
+    repo = _repo(tmp_path, data=pd.DataFrame([{"path": "data.bin"}]))
 
     with pytest.raises(DownloadError, match="No remote URL is configured"):
         plan_download(repo, tmp_path, file_paths=["data.bin"])

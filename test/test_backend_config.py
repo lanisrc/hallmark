@@ -54,7 +54,7 @@ def test_add_passes_backend_settings_to_discovery(monkeypatch, tmp_path):
 
     def discover_remote_files(context, **kwargs):
         captured.append(context.remote)
-        return []
+        return [RemoteEntry("tile.fits")]
 
     # No backend installation or network is required to inspect this hand-off.
     class Context:

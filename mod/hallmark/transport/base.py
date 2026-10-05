@@ -95,6 +95,45 @@ def reject_control_characters(value: str, label: str) -> None:
         raise RemoteConfigurationError(f"{label} contains control characters")
 
 
+def reject_url_credentials(url: str) -> None:
+    """
+    Refuse a URL carrying a password, or an HTTP(S) username or token.
+
+    SSH usernames are allowed. Error messages never repeat the URL.
+
+    Raises:
+        RemoteConfigurationError: If the URL contains credentials.
+    """
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        raise RemoteConfigurationError("Invalid remote URL") from None
+    if parsed.password is not None or (
+            parsed.username is not None
+            and parsed.scheme.lower() in {"http", "https"}):
+        raise RemoteConfigurationError(
+            "URLs must not contain credentials; configure them locally, for "
+            "example in ~/.netrc, ~/.ssh/config or a Git credential helper")
+
+
+def reject_url_secrets(url: str) -> None:
+    """
+    Refuse a data-remote URL that would store a secret in the catalog.
+
+    Passwords, HTTP(S) usernames (often access tokens), query strings and
+    fragments are rejected; SSH usernames are allowed. Error messages never
+    repeat the URL.
+
+    Raises:
+        RemoteConfigurationError: If the URL could contain a secret.
+    """
+    reject_url_credentials(url)
+    if "?" in url or "#" in url:
+        raise RemoteConfigurationError(
+            "Remote URLs must not contain a query or fragment; "
+            "percent-encode ? and # in file names")
+
+
 def validate_remote_path(value) -> Path:
     """Validate a literal catalog path without decoding or trimming it."""
     raw = str(value)

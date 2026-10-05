@@ -59,12 +59,20 @@ def test_remote_add_does_not_require_filename_inference(tmp_path, metadata_serve
     assert repo.plan_download().file_count == 1
 
 
-def test_empty_filtered_add_is_valid(tmp_path, metadata_server):
+def test_empty_filtered_add_is_an_error_and_keeps_catalog(tmp_path, metadata_server):
     pages, _ = metadata_server
     root = "https://example.test/data/"
     pages[root] = '<h1>Index of data</h1><a href="notes.txt">notes.txt</a>'
     repo = Repo.init(tmp_path / "clone")
-    repo.add(root, remote_fmt="run{run:d}.h5")
+    before = {name: (repo.dothm.path / name).read_bytes()
+              for name in ("config.yml", "data.tsv", ".git/index")}
+    with pytest.raises(ValueError) as error:
+        repo.add(root, remote_fmt="run{run:d}.h5")
+    message = str(error.value)
+    assert "No remote files matched" in message
+    assert "run{run:d}.h5" in message and root in message
+    assert "previous catalogue kept" in message
+    assert before == {name: (repo.dothm.path / name).read_bytes() for name in before}
     assert repo.state.data.empty
     assert repo.plan_download().file_count == 0
 
@@ -101,14 +109,15 @@ def test_published_snapshot_preserves_data_remote(tmp_path, metadata_server, nes
 
 
 def test_filtered_git_clone_preserves_history_without_objects(tmp_path, monkeypatch):
+    import pandas as pd
+
     source = Repo.init(tmp_path / "source")
-    (source.worktree / "run1.h5").write_text("one")
-    (source.worktree / "run2.h5").write_text("two")
-    source.add("run{run:d}.h5")
-    source.set_config(remote_url="https://example.test/data/")
+    source.state.config = {"data": [{"db": "data.tsv"}],
+                           "remote": {"url": "https://example.test/data/"}}
+    source.state.data = pd.DataFrame({"path": ["run1.h5", "run2.h5"]})
+    source.dothm.save_state(source.state)
     source.commit("Original scientific data")
     head = source.dothm.head.commit.hexsha
-    assert list(source.objects.root.rglob("*"))
 
     def fail(*args, **kwargs):
         raise AssertionError("Filtered metadata clone must not transfer data")
@@ -390,3 +399,30 @@ def test_snapshot_download_uses_independent_payload_server(
     assert all(url.startswith(catalog_url) for url in metadata_server[1])
     assert (repo.worktree / "a.fits").read_bytes() == b"fits"
     assert repo.download_result["succeeded"] == 1
+
+
+@pytest.mark.parametrize("name", ["empty", "empty.hm"])
+def test_snapshot_clone_into_existing_empty_folder(tmp_path, metadata_server, name):
+    pages, _ = metadata_server
+    root = "https://example.test/published/"
+    pages[root + "config.yml"] = "data:\n- db: data.tsv\n"
+    pages[root + "meta.yml"] = "{}\n"
+    pages[root + "data.tsv"] = "path\na.h5\n"
+    target = tmp_path / name
+    target.mkdir()
+    repo = Repo.clone(root, target, download=False)
+    assert repo.state.data["path"].tolist() == ["a.h5"]
+    assert repo.dothm.path == (target if name.endswith(".hm") else target / ".hm")
+
+
+def test_failed_snapshot_clone_keeps_existing_folder_empty(tmp_path, metadata_server):
+    pages, _ = metadata_server
+    root = "https://example.test/published/"
+    pages[root + "config.yml"] = "data:\n- db: data.tsv\n"
+    pages[root + "meta.yml"] = "{}\n"
+    pages[root + "data.tsv"] = "path\n../escape\n"
+    target = tmp_path / "empty"
+    target.mkdir()
+    with pytest.raises((CloneError, ValueError)):
+        Repo.clone(root, target, download=False)
+    assert target.is_dir() and list(target.iterdir()) == []

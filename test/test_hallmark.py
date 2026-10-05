@@ -1280,13 +1280,22 @@ def test_checkout_restores_only_changed_target_files(monkeypatch, tmp_path):
 
 ### Repo.clone() tests ###
 
+def _remote_catalog(path, files):
+    """Commit a catalog of files kept on a data server, with SHA-1 checksums."""
+    repo = Repo.init(path)
+    repo.state.config = {"data": [{"db": "data.tsv"}],
+                         "remote": {"url": "https://example.com/data/"}}
+    repo.state.data = pd.DataFrame([
+        {"path": name, "checksum_algorithm": "sha1", "checksum": checksum}
+        for name, checksum in files])
+    repo.dothm.save_state(repo.state)
+    repo.commit("add source data")
+    return repo
+
+
 def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
-    source = Repo.init(tmp_path / "source")
-    _write_files(source.worktree, ["a0_i0.h5"])
-    source.add("a{a}_i{i}.h5")
-    source.set_config(remote_url="https://example.com/data/")
-    expected_sha1 = Repo.checksum(source.worktree / "a0_i0.h5")
-    source.commit("add source data")
+    expected_sha1 = "a" * 40
+    source = _remote_catalog(tmp_path / "source", [("a0_i0.h5", expected_sha1)])
 
     captured = {}
 
@@ -1306,7 +1315,7 @@ def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
 
     assert captured == {
         "url": "https://example.com/data/a0_i0.h5",
-        "sha1": expected_sha1,
+        "sha1": ("sha1", expected_sha1),
     }
     assert (clone.worktree / "a0_i0.h5").read_text(encoding="utf-8") == \
         "downloaded\n"
@@ -1315,11 +1324,7 @@ def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
 
 
 def test_repo_clone_can_skip_remote_data_download(monkeypatch, tmp_path):
-    source = Repo.init(tmp_path / "source")
-    _write_files(source.worktree, ["a0_i0.h5"])
-    source.add("a{a}_i{i}.h5")
-    source.set_config(remote_url="https://example.com/data/")
-    source.commit("add source data")
+    source = _remote_catalog(tmp_path / "source", [("a0_i0.h5", "a" * 40)])
 
     def fail_download(*args, **kwargs):
         raise AssertionError("download should not be attempted")
@@ -2796,12 +2801,10 @@ def test_checkout_remote_branch(tmp_path):
     source.commit("Initial commit")
 
 
-    # Clone the source while it only has the main branch.
-    clone = Repo.clone(
-        str(source.dothm.path),
-        tmp_path / "clone",
-        download=False,
-    )
+    # Clone the source while it only has the main branch. hm clone refuses
+    # repositories that track local files, so copy the history with Git.
+    GitRepo.clone_from(str(source.dothm.path), str(tmp_path / "clone" / ".hm"))
+    clone = Repo(tmp_path / "clone")
 
     # The cloned repository should have the tracked file in its worktree.
     (clone.worktree / "data.txt").write_text(

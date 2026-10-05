@@ -15,13 +15,14 @@
 
 from __future__ import annotations
 
+import shlex
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
-from git.exc import GitCommandError
+from git.exc import InvalidGitRepositoryError, NoSuchPathError
 
-from .branches import checkout, add_worktree
+from .branches import checkout, add_worktree, validate_branch_name
 from ..remote.add import add_remote, is_remote_catalog
 from .dothm import Dothm
 from .state import State
@@ -31,7 +32,7 @@ from ..paraframe import ParaFrame
 from .manifest import build_file_table, file_versions_by_path, iter_manifest_entries
 from .history import (
     load_head_state)
-from ..error import DestinationExistsError
+from ..error import DestinationExistsError, DothmError
 from ..utils import (
     FILE_IO_CHUNK_SIZE,
     use_working_directory,
@@ -80,6 +81,56 @@ class Repo:
             return path, None
         return path / ".hm", path
 
+    @staticmethod
+    def find_root(start: Union[Path, str] = ".") -> Optional[Path]:
+        """
+        Locate the repository containing a folder without opening it.
+
+        Args:
+            start (Path | str): Folder to search from. Parent folders are
+                searched in turn.
+
+        Returns:
+            Path | None: The worktree, or the bare ``.hm`` repository, of the
+            nearest enclosing repository; None if there is none.
+        """
+        start = Path(start).expanduser().resolve()
+        for folder in (start, *start.parents):
+            # A bare repository is itself the ".hm" folder, as in Repo(path).
+            if folder.name == ".hm" or (
+                    folder.suffix == ".hm" and (folder / ".git").exists()):
+                return folder
+            # Stop at a damaged ".hm" too, so opening it can explain the damage.
+            if (folder / ".hm").exists() or (folder / ".hm").is_symlink():
+                return folder
+        return None
+
+    @classmethod
+    def find(cls, start: Union[Path, str] = ".") -> "Repo":
+        """
+        Open the repository containing a folder, searching parent folders.
+
+        ``Repo(path)`` opens exactly ``path``; ``find`` lets commands run from
+        any folder inside a worktree.
+
+        Args:
+            start (Path | str): Folder to search from. Defaults to the current
+                folder.
+
+        Returns:
+            Repo: The nearest enclosing repository.
+
+        Raises:
+            DothmError: If neither the folder nor any parent contains ``.hm``.
+        """
+        root = cls.find_root(start)
+        if root is None:
+            raise DothmError(
+                f'Not a Hallmark repository (or any parent folder): '
+                f'"{Path(start).expanduser().resolve()}"; '
+                "run hm init or hm clone")
+        return cls(root)
+
     def __init__(self, path: Union[Path, str]) -> None:
         '''
         Open an existing hallmark repository.
@@ -90,18 +141,29 @@ class Repo:
             none.
         '''
         dothm_path, worktree_path = self.resolve_repo_paths(path)
-        self.dothm = Dothm(dothm_path)
+        # Opening only reads: a damaged repository is explained, not repaired.
+        try:
+            self.dothm = Dothm(dothm_path)
+        except InvalidGitRepositoryError as exc:
+            raise DothmError(
+                f'Repository at "{dothm_path}" is damaged: it is not a Git '
+                "worktree; nothing was changed") from exc
+        except NoSuchPathError as exc:
+            # A missing .hm keeps the GitPython error; a dangling link is damage.
+            if not Path(dothm_path).is_symlink():
+                raise
+            raise DothmError(
+                f'Repository at "{dothm_path}" is damaged: it links to a folder '
+                "that does not exist; nothing was changed") from exc
         self.worktree = worktree_path and Worktree(worktree_path)
-        self.state = self.dothm.load_state()
+        try:
+            self.state = self.dothm.load_state()
+        except DothmError as exc:
+            raise DothmError(f"{exc}; nothing was changed") from exc
         self.download_result = None
 
-        common = Path(self.dothm.common_dir).resolve().parent
-        self.objects = Objects(common)
-        dothm_objects = Path(dothm_path) / "objects"
-        main_objects = common / "objects"
-        if dothm_objects.resolve() != main_objects.resolve() \
-        and not dothm_objects.exists():
-            dothm_objects.symlink_to(main_objects)
+        # Linked worktrees share the object store of the main ".hm".
+        self.objects = Objects(Path(self.dothm.common_dir).resolve().parent)
 
     def _resolve_worktree_path(self, value, *, label: str = "tracked path") -> Path:
         """
@@ -135,21 +197,7 @@ class Repo:
         Raises:
             ValueError: If the branch name is invalid.
         """
-        # Normalize the branch name to ensure it is a non-empty string
-        branch_name = require_nonempty_string(value, label="branch name")
-        # if the branch name starts with a hyphen, raise a ValueError
-        if branch_name.startswith("-"):
-            raise ValueError(f"invalid branch name: {branch_name!r}")
-
-        # try to validate the branch name using Git's check_ref_format command
-        try:
-            self.dothm.git.check_ref_format("--branch", branch_name)
-        # if Git raises a GitCommandError, re-raise it as a ValueError
-        except GitCommandError as exc:
-            raise ValueError(f"invalid branch name: {branch_name!r}") from exc
-
-        # if all checks pass, return the normalized branch name
-        return branch_name
+        return validate_branch_name(self.dothm.git, value)
 
     def _calculate_file_checksums(self, pf: ParaFrame) -> None:
         """
@@ -206,27 +254,43 @@ class Repo:
 
     def _download_cloned_files(self, *, approve, max_workers, progress,
                                  filter=None, fmt=None):
-        """Run an approved transfer after catalog creation has completed."""
+        """
+        Run an approved transfer after catalog creation has completed.
+
+        Raises:
+            DownloadError: If the download cannot run or a file fails. The
+                message reports the clone as incomplete and how to retry.
+        """
         from ..remote.download import DownloadError
 
-        plan = self.plan_download(filter=filter, fmt=fmt)
-        if plan.file_count and approve is not None and not approve(plan):
-            return
-        self.download_result = self.download(
-            plan, approved=True, max_workers=max_workers, progress=progress)
+        patterns = [filter] if isinstance(filter, str) else list(filter or [])
+        command = ["hm download --all",
+                   *(f"--filter {shlex.quote(pattern)}" for pattern in patterns)]
+        if fmt is not None:
+            command.append(f"--fmt {shlex.quote(fmt)}")
+        retry = f'run {" ".join(command)} in "{self.worktree}" to retry'
+        incomplete = f'Clone incomplete: catalogue at "{self.dothm.path}"'
+        try:
+            plan = self.plan_download(filter=filter, fmt=fmt)
+            if plan.file_count and approve is not None and not approve(plan):
+                return
+            self.download_result = self.download(
+                plan, approved=True, max_workers=max_workers, progress=progress)
+        except DownloadError as exc:
+            raise DownloadError(
+                f"{incomplete}; the download failed: {exc}; {retry}") from exc
         if self.download_result["failed"]:
             details = "\n".join(self.download_result["errors"][:5])
             raise DownloadError(
-                f"Failed to download {self.download_result['failed']} "
-                f"file(s):\n{details}\n"
-                f'Catalog kept at "{self.dothm.path}". '
-                "Successfully downloaded files were kept.")
+                f"{incomplete}; {self.download_result['failed']} file(s) "
+                f"failed:\n{details}\n"
+                f"Successfully downloaded files were kept; {retry}.")
 
     @classmethod
     def clone(
         cls,
         url: str,
-        path: Union[Path, str],
+        path: Optional[Union[Path, str]] = None,
         *,
         auth: Optional[str] = None,
         filter=None,
@@ -247,7 +311,10 @@ class Repo:
 
         Args:
             url (str): Existing Git catalog or published snapshot location.
-            path (Path | str): New worktree or bare ``.hm`` repository path.
+            path (Path | str, optional): New or empty worktree folder, or bare
+                ``.hm`` repository path, outside any repository and the local
+                source. Defaults to a folder in the current folder named after
+                the source.
             auth (str, optional): Local profile for snapshot metadata access.
                 Git sources use Git's authentication configuration instead.
             filter (str | list[str], optional): Download selection globs.
@@ -270,16 +337,21 @@ class Repo:
             when a download was attempted, including an empty selection.
 
         Raises:
-            DestinationExistsError: If the destination already exists.
-            CloneError: If a requested catalog is missing or invalid.
+            DestinationExistsError: If the destination exists and is not an
+                empty folder.
+            CloneError: If the destination is nested in a repository or
+                overlaps the source, or a requested catalog is missing or
+                invalid.
             ValueError: If source options are invalid or conflict.
             DownloadError: If metadata access or downloading fails, or a download
                 is requested for a bare destination.
         """
-        from ..remote.clone import clone_catalog
+        from ..remote.clone import clone_catalog, default_clone_destination
         from ..remote.discovery import path_matches
         from ..remote.download import DownloadError, _require_positive_integer
 
+        if path is None:
+            path = default_clone_destination(url)
         _require_positive_integer(max_workers, label="max_workers")
         if (filter is not None or fmt is not None) and not download:
             raise ValueError("clone filter and fmt require download=True; "

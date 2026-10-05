@@ -12,6 +12,8 @@ from pathlib import Path
 from string import Formatter
 from typing import Dict, Optional
 
+import parse
+
 from ..utils import (
     convert_format_value, require_nonempty_string,
     validate_path_name, validate_relative_path)
@@ -21,6 +23,7 @@ from ..transport.base import (
     validate_backend_name,
     validate_profile_name,
     reject_control_characters,
+    reject_url_secrets,
     copy_backend_options,
 )
 
@@ -399,6 +402,7 @@ def set_config(
         if isinstance(remote_url, str):
             reject_control_characters(remote_url, "Remote URL")
         remote_url = require_nonempty_string(remote_url, label="remote_url")
+        reject_url_secrets(remote_url)
     if remote_auth not in (None, ""):
         validate_profile_name(remote_auth)
 
@@ -482,6 +486,52 @@ def filename_fields(fmt: str) -> list[str]:
             seen.add(field_name)
             fields.append(field_name)
     return fields
+
+
+def _catalogued_paths(state) -> list[str]:
+    """
+    Used by check_pattern_keeps_catalogue.
+    Return the relative path of every file in a state's catalog.
+    """
+    if "path" in state.data.columns:
+        return [str(path) for path in state.data["path"]]
+    fmt = single_data_format(state.config)
+    if fmt is None:
+        return []
+    return [row_to_path(row, fmt).as_posix()
+            for row in state.data.to_dict(orient="records")]
+
+
+def check_pattern_keeps_catalogue(state, new_fmt: Optional[str]) -> None:
+    """
+    Refuse a filename pattern that files in the catalog do not fit.
+
+    A branch has one pattern, so replacing it must not drop catalogued files.
+    Only local state is read.
+
+    Args:
+        state (State): Staged repository state.
+        new_fmt (str, optional): Proposed filename pattern; None keeps none.
+
+    Raises:
+        ValueError: If any catalogued path does not match ``new_fmt``. The
+            message lists a few of them; there is no force option.
+    """
+    if new_fmt is None or state.data.empty:
+        return
+    parser = parse.compile(new_fmt, case_sensitive=True)
+    misfits = [path for path in _catalogued_paths(state)
+               if parser.parse(path) is None]
+    if not misfits:
+        return
+    shown = ", ".join(misfits[:3])
+    if len(misfits) > 3:
+        shown += f" and {len(misfits) - 3} more"
+    raise ValueError(
+        f"Pattern {new_fmt!r} does not fit {len(misfits)} catalogued file(s) "
+        f"({shown}). A branch has one pattern and a new one cannot drop "
+        "catalogued files; use a pattern that fits them too (there is no "
+        "force option)")
 
 
 def validate_tsv_filename(value) -> str:

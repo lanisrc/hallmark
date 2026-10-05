@@ -59,8 +59,10 @@ def test_remote_add_merges_paths_and_leaves_unmatched_rows(tmp_path, remote_list
     repo.commit("Second selection")
     repo.add(root, filter="*002.fits")
     assert repo.dothm.index.diff("HEAD") == []
-    repo.add(root, filter="absent*")
+    with pytest.raises(ValueError, match="No remote files matched"):
+        repo.add(root, filter="absent*")
     assert repo.dothm.index.diff("HEAD") == []
+    assert repo.state.data.path.tolist() == ["M87_001.fits", "M87_002.fits"]
 
 
 def test_remote_catalog_clone_and_branches_keep_payloads_separate(
@@ -223,3 +225,214 @@ def test_removed_cli_interfaces_fail_clearly(monkeypatch, tmp_path, arguments):
     assert result.exit_code != 0
     assert "No such" in result.output
     assert Repo(repo.worktree).state.data.empty
+
+
+def _state_bytes(repo):
+    return {name: (repo.dothm.path / name).read_bytes()
+            for name in ("config.yml", "meta.yml", "data.tsv", ".git/index")}
+
+
+@pytest.mark.parametrize("url, message", [
+    ("https://user:secret@example.test/data/{a}.h5", "credentials"),
+    ("https://secret@example.test/data/{a}.h5", "credentials"),
+    ("http://secret@example.test/data/", "credentials"),
+    ("sftp://user:secret@example.test/data/", "credentials"),
+    ("https://example.test/data/{a}.h5?sig=secret", "query or fragment"),
+    ("https://example.test/data/?secret", "query or fragment"),
+    ("https://example.test/data/{a}.h5#secret", "query or fragment"),
+])
+def test_remote_add_rejects_secrets_in_urls_before_network(
+        tmp_path, remote_listing, url, message):
+    repo = Repo.init(tmp_path / "data")
+    before = _state_bytes(repo)
+    with pytest.raises(ValueError, match=message) as error:
+        repo.add(url)
+    assert "secret" not in str(error.value)
+    assert remote_listing[1] == []
+    assert _state_bytes(repo) == before
+
+
+def test_remote_pattern_keeps_ssh_usernames():
+    from hallmark.remote.add import split_remote_pattern
+
+    assert split_remote_pattern("ssh://researcher@campus/srv/data/{run}.h5") == (
+        "ssh://researcher@campus/srv/data/", "{run}.h5")
+
+
+@pytest.mark.parametrize("url", [
+    "https://user:secret@example.test/data/", "https://secret@example.test/data/",
+    "https://example.test/data/?token=secret",
+])
+def test_set_config_rejects_secrets_in_remote_urls(tmp_path, url):
+    repo = Repo.init(tmp_path / "data")
+    before = _state_bytes(repo)
+    with pytest.raises(ValueError) as error:
+        repo.set_config(remote_url=url)
+    assert "secret" not in str(error.value)
+    assert _state_bytes(repo) == before
+    assert Repo(repo.worktree).state.config == repo.state.config
+
+
+@pytest.mark.parametrize("arguments", [
+    ["add", "https://user:hunter2@archive.test/ER2/{a}.h5"],
+    ["add", "https://hunter2@archive.test/ER2/"],
+    ["set-config", "--remote-url", "https://archive.test/ER2/?sig=hunter2"],
+])
+def test_cli_rejects_url_secrets_without_echoing_them(
+        tmp_path, monkeypatch, remote_listing, arguments):
+    repo = Repo.init(tmp_path / "repo")
+    monkeypatch.chdir(repo.worktree)
+    before = _state_bytes(repo)
+    result = CliRunner().invoke(hallmark, arguments)
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert "hunter2" not in result.output
+    assert remote_listing[1] == []
+    assert _state_bytes(repo) == before
+
+
+@pytest.mark.parametrize("url", [
+    "http://user:SECRET@git.example.test/src.git",
+    "https://SECRET@git.example.test/src.git",
+    "ssh://git:SECRET@git.example.test/src.git",
+    "https://SECRET@catalogs.example.test/published/",
+])
+def test_clone_rejects_credentials_before_creating_anything(
+        tmp_path, monkeypatch, url):
+    def reject(*args, **kwargs):
+        raise AssertionError("a source with credentials must not be contacted")
+
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", reject)
+    monkeypatch.setattr(OperationContext, "read_text", reject)
+    target = tmp_path / "copy"
+    with pytest.raises(ValueError, match="credentials") as error:
+        Repo.clone(url, target, download=False)
+    assert "SECRET" not in str(error.value)
+    assert not target.exists()
+    result = CliRunner().invoke(hallmark, [
+        "clone", url, str(target), "--no-download"])
+    assert result.exit_code != 0
+    assert "credentials" in result.output
+    assert "SECRET" not in result.output
+    assert not target.exists()
+
+
+def test_clone_keeps_ssh_usernames(tmp_path, monkeypatch):
+    from hallmark.error import CloneError
+
+    calls = []
+
+    def stop(url, *args, **kwargs):
+        calls.append(url)
+        raise CloneError("stop after the URL check")
+
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", stop)
+    url = "ssh://git@git.example.test/team/src.git"
+    with pytest.raises(CloneError, match="stop after the URL check"):
+        Repo.clone(url, tmp_path / "copy", download=False)
+    assert calls == [url]
+
+
+def test_cli_remote_add_matching_nothing_keeps_previous_catalog(
+        tmp_path, monkeypatch, remote_listing):
+    repo = Repo.init(tmp_path / "repo")
+    repo.add("https://example.test/data/", filter="*.fits")
+    monkeypatch.chdir(repo.worktree)
+    before = _state_bytes(repo)
+    result = CliRunner().invoke(hallmark, [
+        "add", "https://example.test/data/", "--filter", "absent*"])
+    assert result.exit_code == 1
+    assert "No remote files matched" in result.output
+    assert "absent*" in result.output
+    assert "previous catalogue kept" in result.output
+    assert _state_bytes(repo) == before
+
+
+def test_failed_remote_scan_is_explained_and_keeps_previous_catalog(
+        tmp_path, monkeypatch, remote_listing):
+    from hallmark.transport.base import DownloadError
+
+    repo = Repo.init(tmp_path / "repo")
+    repo.add("https://example.test/data/", filter="*.fits")
+    before = _state_bytes(repo)
+
+    def refuse(*args, **kwargs):
+        raise DownloadError("Cannot establish connection to https://example.test")
+
+    monkeypatch.setattr("hallmark.remote.add.discover_remote_files", refuse)
+    with pytest.raises(DownloadError) as error:
+        repo.add("https://example.test/data/")
+    assert str(error.value) == (
+        "Remote scan failed (previous catalogue kept): "
+        "Cannot establish connection to https://example.test")
+    assert _state_bytes(repo) == before
+    assert repo.state.data.path.tolist() == ["M87_001.fits", "M87_002.fits"]
+
+
+def test_new_pattern_that_drops_catalogued_files_is_refused_offline(
+        tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    root = "https://example.test/data/"
+    repo.add(root + "{src}_{day:03d}.fits")
+    repo.commit("Record fits files")
+    remote_listing[1].clear()
+    before = _state_bytes(repo)
+    with pytest.raises(ValueError) as error:
+        repo.add(root + "run{run:d}.fits")
+    message = str(error.value)
+    assert "M87_001.fits" in message and "M87_002.fits" in message
+    assert "no force option" in message
+    assert remote_listing[1] == []
+    assert _state_bytes(repo) == before
+    assert repo.state.config["data"] == [{"db": "data.tsv",
+                                         "fmt": "{src}_{day:03d}.fits"}]
+
+
+def test_broader_pattern_is_accepted_and_kept_rows_keep_their_information(
+        tmp_path, remote_listing):
+    pages, _ = remote_listing
+    digest = "a" * 64
+    pages[""] += '<a href="SHA256SUMS">SHA256SUMS</a>'
+    pages["SHA256SUMS"] = f"{digest}  M87_001.fits\n"
+    repo = Repo.init(tmp_path / "data")
+    root = "https://example.test/data/"
+    repo.add(root + "M87_{day:03d}.fits", filter="*001*")
+    repo.commit("Record the first file")
+    # The first file disappears from the server before the broader scan.
+    pages[""] = pages[""].replace(
+        '<a href="M87_001.fits">M87_001.fits</a>', "")
+    repo.add(root + "{src}_{day:03d}.fits")
+    assert repo.state.config["data"] == [{"db": "data.tsv",
+                                         "fmt": "{src}_{day:03d}.fits"}]
+    rows = repo.state.data.set_index("path")
+    assert rows.index.tolist() == ["M87_001.fits", "M87_002.fits"]
+    assert rows.loc["M87_001.fits", "checksum"] == digest
+    assert rows.loc["M87_001.fits", "checksum_algorithm"] == "sha256"
+    assert rows.loc["M87_001.fits", "src"] == "M87"
+    assert rows.loc["M87_002.fits", "src"] == "M87"
+    assert rows["day"].tolist() == ["1", "2"]
+
+
+def test_bare_url_reuses_the_saved_pattern(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    root = "https://example.test/data/"
+    repo.add(root + "{src}_{day:03d}.fits")
+    repo.commit("Record fits files")
+    repo.add(root)
+    assert repo.state.config["data"] == [{"db": "data.tsv",
+                                         "fmt": "{src}_{day:03d}.fits"}]
+    assert repo.state.data.path.tolist() == ["M87_001.fits", "M87_002.fits"]
+    assert repo.dothm.index.diff("HEAD") == []
+
+
+def test_pattern_refusal_lists_only_a_few_files():
+    import pandas as pd
+    from hallmark.repo.config import check_pattern_keeps_catalogue
+    from hallmark.repo.state import State
+
+    state = State(data=pd.DataFrame({"path": [f"f{i}.txt" for i in range(5)]}))
+    with pytest.raises(ValueError, match=r"5 catalogued file\(s\) "
+                       r"\(f0.txt, f1.txt, f2.txt and 2 more\)"):
+        check_pattern_keeps_catalogue(state, "{name}.fits")
+    check_pattern_keeps_catalogue(state, "{name}.txt")
+    check_pattern_keeps_catalogue(state, None)

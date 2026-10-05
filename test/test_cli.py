@@ -42,7 +42,7 @@ files = [f"a{a}_i{i}.h5"
 
 def _install_repo(monkeypatch, worktree=Path("worktree")):
     """
-    Install a fake hallmark repository for testing, monkeypatching the Repo class
+    Install a fake hallmark repository for testing, monkeypatching Repo.find
     to return a SimpleNamespace with the given worktree.
     Args:
         monkeypatch: pytest fixture for monkeypatching functions and attributes.
@@ -55,7 +55,7 @@ def _install_repo(monkeypatch, worktree=Path("worktree")):
         worktree=worktree,
         plan_download=lambda output=None, **kwargs: _download_plan(
             0, output or worktree or "downloads"))
-    monkeypatch.setattr(cli_module, "Repo", lambda path: repo)
+    monkeypatch.setattr(cli_module, "Repo", SimpleNamespace(find=lambda start: repo))
     return repo
 
 
@@ -102,10 +102,10 @@ def test_group_reports_repository_open_error(monkeypatch):
     Raises:
         GitError: Simulated error to test error handling in the CLI.
     """
-    def fail_repo(path):
+    def fail_repo(start):
         """ Raise a GitError to simulate a failure to open a hallmark repository."""
         raise GitError("not a hallmark repository")
-    monkeypatch.setattr(cli_module, "Repo", fail_repo)
+    monkeypatch.setattr(cli_module, "Repo", SimpleNamespace(find=fail_repo))
     result = CliRunner().invoke(hallmark, ["info"])
 
     assert result.exit_code != 0, f"Expected non-zero exit code, got {result.exit_code}"
@@ -642,8 +642,11 @@ def test_clone_reports_download_error_cleanly(monkeypatch, tmp_path):
         "clone", str(source.dothm.path), str(tmp_path / "target")],
         input="y\n")
     assert result.exit_code != 0
-    assert "Error: Remote download failed" in result.output
+    assert "Error: Clone incomplete: catalogue at" in result.output
+    assert "Remote download failed" in result.output
+    assert "run hm download --all in" in result.output
     assert "Download these files? [y/N]" in result.output
+    assert (tmp_path / "target" / ".hm" / "data.tsv").is_file()
 
 
 def test_clone_cli_skips_download_when_no_remote_files(monkeypatch, tmp_path):
@@ -691,9 +694,11 @@ def test_clone_rejects_nonpositive_max_workers(max_workers):
 @pytest.mark.parametrize(
     "arguments, message",
     [
-        (["download"], "Provide file paths, --tsv, --all, --filter, or --fmt"),
-        (["download", "file.dat", "--all"], "--all cannot be combined"),
-        (["download", "--tsv", "data", "--all"], "--all cannot be combined")])
+        (["download"], "Choose files with paths or --all"),
+        (["download", "--filter", "*.dat"], "only narrow"),
+        (["download", "--fmt", "{name}.dat", "--dry-run"], "only narrow"),
+        (["download", "file.dat", "--all"], "Give paths or --all, not both"),
+        (["download", "--tsv", "data", "--all"], "Give paths or --all, not both")])
 def test_download_cli_rejects_invalid_selection_combinations(
     monkeypatch, arguments, message):
     """
@@ -706,10 +711,15 @@ def test_download_cli_rejects_invalid_selection_combinations(
         arguments: The list of command line arguments to be tested.
         message: The expected error message to be found in the download command output.
     """
-    _install_repo(monkeypatch)
+    repo = _install_repo(monkeypatch)
+
+    def reject_plan(*args, **kwargs):
+        raise AssertionError("an invalid selection must not be planned")
+
+    repo.plan_download = reject_plan
     result = CliRunner().invoke(hallmark, arguments)
 
-    assert result.exit_code != 0, f"Expected non-zero exit code for download with \
+    assert result.exit_code == 2, f"Expected usage exit code for download with \
         arguments {arguments}, got {result.exit_code}"
     assert message in result.output, \
         f"Expected error message '{message}' in output, got: {result.output}"
@@ -771,7 +781,7 @@ def test_download_cli_dry_run_limits_preview(monkeypatch):
     assert "file-000.dat" in result.output
     assert "file-019.dat" in result.output
     assert "file-020.dat" not in result.output
-    assert "... 3 more file(s)" in result.output
+    assert "... 3 more" in result.output
     assert "Download these files?" not in result.output
 
 
@@ -783,8 +793,10 @@ def test_download_cli_reports_empty_selection(monkeypatch):
     assert "Download these files?" not in result.output
 
 
-def test_download_cli_passes_selection_and_options_to_downloader(monkeypatch):
-    repo = _install_repo(monkeypatch)
+def test_download_cli_passes_selection_and_options_to_downloader(
+        monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    repo = _install_repo(monkeypatch, worktree=tmp_path)
     plan = _download_plan(1)
     captured = {}
 
@@ -910,7 +922,7 @@ def test_cli_downloads_only_approved_selected_payload(
     else:
         target = source.worktree
         monkeypatch.chdir(target)
-        arguments = ["download", "--filter", "*.fits"]
+        arguments = ["download", "--all", "--filter", "*.fits"]
     result = CliRunner().invoke(hallmark, arguments, input=answer)
     assert "1 file(s); 4 bytes" in result.output
     assert "Download these files? [y/N]" in result.output
@@ -987,3 +999,282 @@ def test_add_then_download_requires_confirmation(monkeypatch, tmp_path, answer):
     assert Repo(destination).state.data["path"].tolist() == ["a.fits"]
     assert (destination / "a.fits").exists() == (answer == "y\n")
     assert (result.exit_code == 0) == (answer == "y\n")
+
+
+### repository discovery tests ###
+
+def test_cli_commands_find_the_repository_from_a_subfolder(monkeypatch, tmp_path):
+    repo = _local_cli_catalog(tmp_path / "project")
+    nested = repo.worktree / "sub" / "dir"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    runner = CliRunner()
+
+    result = runner.invoke(hallmark, ["info"])
+    assert result.exit_code == 0, result.output
+    assert f'dot-hallmark repo: "{repo.dothm.path}"' in result.output
+    assert f'hallmark worktree: "{repo.worktree}"' in result.output
+
+    result = runner.invoke(hallmark, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "On branch main" in result.output
+
+    result = runner.invoke(hallmark, ["download", "--all", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert f"Destination: {repo.worktree}" in result.output
+    assert "tiny.fits" in result.output
+    assert not (nested / ".hm").exists()
+
+
+def test_cli_reports_missing_repository(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(hallmark, ["status"])
+    assert result.exit_code == 1
+    assert "Not a Hallmark repository (or any parent folder)" in result.output
+    assert not (tmp_path / ".hm").exists()
+
+
+def test_cli_download_paths_are_relative_to_the_current_folder(monkeypatch, tmp_path):
+    repo = _local_cli_catalog(tmp_path / "project")
+    (repo.worktree / "sub").mkdir()
+    monkeypatch.chdir(repo.worktree / "sub")
+    result = CliRunner().invoke(hallmark, ["download", "../tiny.fits", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "1 file(s)" in result.output
+    assert "  tiny.fits" in result.output
+
+
+@pytest.mark.parametrize("path, message", [
+    ("../../outside.fits", "outside the repository"),
+    ("../.hm/config.yml", "inside .hm"),
+])
+def test_cli_download_rejects_paths_outside_the_worktree(
+        monkeypatch, tmp_path, path, message):
+    repo = _local_cli_catalog(tmp_path / "project")
+    (repo.worktree / "sub").mkdir()
+    monkeypatch.chdir(repo.worktree / "sub")
+
+    def reject_plan(*args, **kwargs):
+        raise AssertionError("invalid paths must be rejected before planning")
+
+    monkeypatch.setattr(Repo, "plan_download", reject_plan)
+    result = CliRunner().invoke(hallmark, ["download", path, "--dry-run"])
+    assert result.exit_code != 0
+    assert message in result.output
+
+
+@pytest.mark.parametrize("folder, argument", [
+    ("A", "."), ("A", ".."), ("A", "../"), (".", "./"), ("A", "<root>"),
+    ("A/deeper", "../.."),
+])
+def test_cli_add_dot_from_a_subfolder_stages_the_whole_repository(
+        monkeypatch, tmp_path, folder, argument):
+    repo = Repo.init(tmp_path / "project")
+    for group in ("A", "B"):
+        (repo.worktree / group).mkdir()
+        for run in (1, 2):
+            (repo.worktree / group / f"run{run}.txt").write_text(f"{group}{run}")
+    repo.add("{group}/run{run:d}.txt")
+    repo.commit("Record both folders")
+    changed = repo.worktree / "A" / "run1.txt"
+    changed.write_text("A1 fixed")
+    (repo.worktree / folder).mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(repo.worktree / folder)
+    if argument == "<root>":
+        argument = str(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["add", argument])
+    assert result.exit_code == 0, result.output
+    reopened = Repo(repo.worktree)
+    assert reopened.state.config["data"][0]["fmt"] == "{group}/run{run:d}.txt"
+    data = reopened.state.data
+    rows = {(row["group"], row["run"]): row["sha1"]
+            for row in data.to_dict(orient="records")}
+    assert sorted(rows) == [("A", "1"), ("A", "2"), ("B", "1"), ("B", "2")]
+    assert rows[("A", "1")] == Repo.checksum(changed)
+    assert rows[("B", "2")] == Repo.checksum(repo.worktree / "B" / "run2.txt")
+
+
+def _nested_cli_catalog(path):
+    """Create a remote catalog whose files are spread over nested folders."""
+    repo = Repo.init(path)
+    repo.state.config = {
+        "data": [{"db": "data.tsv"}],
+        "remote": {"name": "origin", "url": "https://example.test/data/"}}
+    repo.state.data = pd.DataFrame({"path": [
+        "runs/a.fits", "runs/2024/b.fits", "notes/readme.txt"]})
+    repo.dothm.save_state(repo.state)
+    repo.dothm.index.commit("Catalog nested remote files")
+    return repo
+
+
+def test_cli_download_folder_from_inside_it(monkeypatch, tmp_path):
+    repo = _nested_cli_catalog(tmp_path / "project")
+    (repo.worktree / "runs").mkdir()
+    monkeypatch.chdir(repo.worktree / "runs")
+    result = CliRunner().invoke(hallmark, ["download", ".", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "2 file(s)" in result.output
+    assert "  runs/a.fits" in result.output
+    assert "  runs/2024/b.fits" in result.output
+    assert "readme.txt" not in result.output
+    assert f"Destination: {repo.worktree}" in result.output
+
+
+def test_cli_dry_run_reports_unknown_paths(monkeypatch, tmp_path):
+    repo = _nested_cli_catalog(tmp_path / "project")
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, [
+        "download", "runs", "missing.fits", "empty/", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "2 file(s)" in result.output
+    assert "2 path(s) not in the catalog" in result.output
+    assert "Not in the catalog:\n  missing.fits\n  empty\n" in result.output
+
+
+def test_cli_unknown_paths_stop_before_prompt_or_server(monkeypatch, tmp_path):
+    repo = _nested_cli_catalog(tmp_path / "project")
+    monkeypatch.chdir(repo.worktree)
+
+    def reject(*args, **kwargs):
+        raise AssertionError("unknown paths must not contact the server")
+
+    monkeypatch.setattr(requests, "Session", reject)
+    monkeypatch.setattr("hallmark.remote.download.OperationContext", reject)
+    result = CliRunner().invoke(hallmark, ["download", "runs", "missing.fits"],
+                                input="y\n")
+    assert result.exit_code == 1
+    assert "Not in the catalog:\n  missing.fits" in result.output
+    assert "1 path(s) not in the catalog; nothing was downloaded" in result.output
+    assert "Download these files?" not in result.output
+    assert not (repo.worktree / "runs").exists()
+
+
+def _checked_cli_catalog(path):
+    """Create a remote catalog whose files have published SHA-256 checksums."""
+    from hashlib import sha256
+
+    repo = Repo.init(path)
+    repo.state.config = {
+        "data": [{"db": "data.tsv"}],
+        "remote": {"name": "origin", "url": "https://example.test/data/"}}
+    repo.state.data = pd.DataFrame([
+        {"path": name, "checksum_algorithm": "sha256",
+         "checksum": sha256(content).hexdigest(), "size_bytes": len(content)}
+        for name, content in [("a.fits", b"aaaa"), ("b.fits", b"bbbb"),
+                              ("c.fits", b"cccc")]])
+    repo.dothm.save_state(repo.state)
+    repo.dothm.index.commit("Catalog checked remote files")
+    return repo
+
+
+def test_cli_dry_run_reports_skipped_conflicting_and_unknown_files(
+        monkeypatch, tmp_path):
+    repo = _checked_cli_catalog(tmp_path / "project")
+    (repo.worktree / "a.fits").write_bytes(b"aaaa")
+    (repo.worktree / "b.fits").write_bytes(b"xxxx")
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["download", ".", "missing.fits",
+                                           "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "Files to download:\n  c.fits\n" in result.output
+    assert "Already downloaded (skipped):\n  a.fits\n" in result.output
+    assert "b.fits (different contents)" in result.output
+    assert "Delete conflicting files first to replace them" in result.output
+    assert "Not in the catalog:\n  missing.fits\n" in result.output
+    assert (repo.worktree / "b.fits").read_bytes() == b"xxxx"
+
+
+def test_cli_conflict_downloads_nothing_and_never_prompts(monkeypatch, tmp_path):
+    repo = _checked_cli_catalog(tmp_path / "project")
+    (repo.worktree / "b.fits").write_bytes(b"xxxx")
+    monkeypatch.chdir(repo.worktree)
+
+    def reject(*args, **kwargs):
+        raise AssertionError("a conflict must not contact the server")
+
+    monkeypatch.setattr(requests, "Session", reject)
+    result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
+    assert result.exit_code == 1
+    assert "b.fits (different contents)" in result.output
+    assert "Delete conflicting files first to replace them" in result.output
+    assert "nothing was downloaded" in result.output
+    assert "Download these files?" not in result.output
+    assert not (repo.worktree / "a.fits").exists()
+    assert (repo.worktree / "b.fits").read_bytes() == b"xxxx"
+
+
+def test_cli_second_download_skips_verified_files(monkeypatch, tmp_path):
+    from mock_server import MockServer
+
+    repo = _checked_cli_catalog(tmp_path / "project")
+    server = MockServer("https://example.test/data/")
+    for name in ("a.fits", "b.fits", "c.fits"):
+        server.add_file(name, name[0].encode() * 4)
+    requested = []
+    original_get = server.get
+
+    def get(url, **kwargs):
+        requested.append(url)
+        return original_get(url, **kwargs)
+
+    server.get = get
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    monkeypatch.chdir(repo.worktree)
+    runner = CliRunner()
+    result = runner.invoke(hallmark, ["download", "a.fits"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert requested == ["https://example.test/data/a.fits"]
+    result = runner.invoke(hallmark, ["download", "--all"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "1 file(s) already downloaded; skipped" in result.output
+    assert sorted(requested[1:]) == ["https://example.test/data/b.fits",
+                                     "https://example.test/data/c.fits"]
+    result = runner.invoke(hallmark, ["download", "--all"])
+    assert result.exit_code == 0, result.output
+    assert "All selected files are already downloaded." in result.output
+    assert "Download these files?" not in result.output
+    assert len(requested) == 3
+
+
+def test_cli_retry_after_a_failed_clone_downloads_only_missing_files(
+        monkeypatch, tmp_path):
+    from mock_server import MockServer
+
+    source = Repo.init(tmp_path / "source")
+    source.state.config = {
+        "data": [{"db": "data.tsv"}],
+        "remote": {"name": "origin", "url": "https://example.test/data/"}}
+    # Like an SSH export without a checksum manifest: only sizes are known.
+    source.state.data = pd.DataFrame([{"path": "a.fits", "size_bytes": 1},
+                                      {"path": "b.fits", "size_bytes": 1}])
+    source.dothm.save_state(source.state)
+    source.dothm.index.commit("Catalog files without checksums")
+    server = MockServer("https://example.test/data/")
+    server.add_file("a.fits", b"A")
+    server.add_file("b.fits", b"B")
+    requested, failing = [], {"b.fits"}
+    original_get = server.get
+
+    def get(url, **kwargs):
+        requested.append(url)
+        if any(url.endswith(name) for name in failing):
+            raise requests.ConnectionError("transient network failure")
+        return original_get(url, **kwargs)
+
+    server.get = get
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    target = tmp_path / "copy"
+    result = CliRunner().invoke(hallmark, [
+        "clone", str(source.dothm.path), str(target)], input="y\n")
+    assert result.exit_code != 0
+    assert (target / "a.fits").read_bytes() == b"A"
+    failing.clear()
+    requested.clear()
+    monkeypatch.chdir(target)
+    result = CliRunner().invoke(hallmark, ["download", "--all", "--dry-run"])
+    assert "Present (size matches, not verified):\n  a.fits\n" in result.output
+    result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "1 file(s) present (size matches, not verified); skipped" in result.output
+    assert requested == ["https://example.test/data/b.fits"]
+    assert (target / "b.fits").read_bytes() == b"B"

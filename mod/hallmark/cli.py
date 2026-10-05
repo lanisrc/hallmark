@@ -14,6 +14,7 @@
 
 """Hallmark CLI entrypoint and command wiring."""
 
+import os
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -24,8 +25,10 @@ from git.exc import GitError
 
 from . import Repo
 from .remote.download import DownloadError
+from .remote.clone import default_clone_destination
 from .remote.discovery import path_matches
-from .error import CheckoutError, CloneError
+from .error import CheckoutError, CloneError, DothmError
+from .utils import use_working_directory
 
 
 # use a context manager to translate application errors into clean Click errors
@@ -117,7 +120,9 @@ def _run_download(repo, plan, *, max_workers):
     """
     click.echo(plan.summary())
     if not plan.file_count:
-        click.echo("No files selected for download.")
+        click.echo("All selected files are already downloaded."
+                   if plan.skipped or plan.unverified
+                   else "No files selected for download.")
         return
     click.confirm("Download these files?", default=False, abort=True)
     results = repo.download(plan, approved=True, max_workers=max_workers,
@@ -138,9 +143,58 @@ def hallmark(ctx):
     if ctx.invoked_subcommand in [None, "init", "clone"]:
         # return early without attempting to open a repository
         return
-    # attempt to open the hallmark repository in the current directory
+    # open the repository containing the current folder, searching its parents
     with _translate_cli_errors(GitError, prefix="Failed to open hallmark repository"):
-        ctx.obj = Repo(".")
+        with _translate_cli_errors(DothmError):
+            ctx.obj = Repo.find(Path.cwd())
+
+
+def _repo_relative_paths(repo, paths):
+    """
+    Convert paths given relative to the current folder into repository paths.
+
+    Bare repositories have no worktree, so their paths are already relative to
+    the catalog root and are returned unchanged.
+
+    Args:
+        repo: The hallmark repository object.
+        paths (sequence[str]): Paths as typed by the user.
+
+    Returns:
+        tuple[str, ...]: POSIX paths relative to the worktree; "." names the
+        whole worktree.
+
+    Raises:
+        ClickException: If a path is outside the worktree or inside ``.hm``.
+    """
+    if repo.worktree is None:
+        return tuple(paths)
+    worktree = Path(repo.worktree)
+    converted = []
+    for value in paths:
+        # Normalize lexically: catalog paths are literal and need not exist yet.
+        absolute = Path(os.path.normpath(Path.cwd() / value))
+        try:
+            relative = absolute.relative_to(worktree)
+        except ValueError:
+            raise ClickException(
+                f'"{value}" is outside the repository worktree "{worktree}"') from None
+        if relative.parts and relative.parts[0].lower() == ".hm":
+            raise ClickException(f'"{value}" is inside .hm, not a data path')
+        converted.append(relative.as_posix())
+    return tuple(converted)
+
+
+def _names_worktree_root(repo, value):
+    """Return whether an add input is "." or another path to the worktree root."""
+    if repo.worktree is None:
+        return False
+    if value == ".":
+        return True
+    try:
+        return (Path.cwd() / value).resolve() == Path(repo.worktree).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _load_backend_options(path):
@@ -254,11 +308,14 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     """Add files to the hallmark index.
 
     A remote URL or URL pattern stages a catalog without downloading files
-    or committing. Use --fmt and --filter to select remote paths.
+    or committing. Use --fmt and --filter to select remote paths. A scan that
+    fails or matches no files keeps the previously staged catalog.
 
     `hm add [--regex] FORMAT` uses the branch format string workflow.
     `hm add "."` rebuilds the manifest from current files that match
-    the branch `fmt` in `config.yml`.
+    the branch `fmt` in `config.yml`, across the whole repository from any
+    folder inside it. Any other path to the worktree root, such as `..` from
+    a subfolder, does the same.
     Explicit path inputs such as shell-expanded `*` are not supported yet
     with the parameter-based manifest format.
     """
@@ -276,6 +333,11 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
             remote = "://" in inputs[0]
             if remote or any(value is not None for value in remote_options.values()):
                 pf = repo.add(inputs[0], encoding, progress=True, **remote_options)
+            elif _names_worktree_root(repo, inputs[0]):
+                # Like ".", a path naming the worktree root stages the whole
+                # repository from any folder inside it.
+                with use_working_directory(repo.worktree):
+                    pf = repo.add(".", encoding)
             else:
                 pf = repo.add(inputs[0], encoding)
         # oterhwise, use the add_paths method for multiple inputs
@@ -399,6 +461,35 @@ def checkout(repo, target_branch):
         click.echo(f'Switched to branch "{target_branch}".')
 
 
+def _echo_paths(title, paths, limit=20):
+    """Print a titled list of paths, abbreviating long lists."""
+    if not paths:
+        return
+    click.echo(title)
+    for path in paths[:limit]:
+        click.echo(f"  {path}")
+    if len(paths) > limit:
+        click.echo(f"  ... {len(paths) - limit} more")
+
+
+def _report_plan_problems(plan):
+    """
+    List unknown paths and conflicting files that prevent a download.
+
+    Returns:
+        list[str]: Short descriptions of the problems; empty if there are none.
+    """
+    _echo_paths("Existing files that conflict with the catalog:", [
+        f"{conflict.item.relative_path.as_posix()} ({conflict.reason})"
+        for conflict in plan.conflicts])
+    if plan.conflicts:
+        click.echo("Delete conflicting files first to replace them.")
+    _echo_paths("Not in the catalog:", plan.unknown_paths)
+    return [f"{count} {text}" for count, text in (
+        (len(plan.conflicts), "existing file(s) conflict with the catalog"),
+        (len(plan.unknown_paths), "path(s) not in the catalog")) if count]
+
+
 @hallmark.command(short_help="Download files from the configured data remote.")
 @click.argument("files", nargs=-1)
 @click.option("--tsv", "tsv_names", multiple=True,
@@ -406,9 +497,9 @@ def checkout(repo, target_branch):
 @click.option("--all", "download_all", is_flag=True,
               help="Select all cataloged files.")
 @click.option("--filter", "filters", multiple=True,
-              help="Select paths matching a glob. ** matches recursively. "
-                   "May be repeated.")
-@click.option("--fmt", help="Select paths matching a filename format.")
+              help="Keep only selected paths matching a glob. ** matches "
+                   "recursively. May be repeated.")
+@click.option("--fmt", help="Keep only selected paths matching a filename format.")
 @click.option("--remote", "remote_name",
               help="Name of the configured data remote to use.")
 @click.option("--output", type=click.Path(file_okay=False),
@@ -423,32 +514,50 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
     """
     Download selected files from a configured data remote.
 
+    Choose catalogued FILES or folders, or --all; a folder selects every
+    catalogued file below it. FILES are relative to the current folder, which
+    can be any folder inside the repository. --filter and --fmt only narrow
+    that selection. Files already downloaded with their catalog checksum, or
+    with the catalog size when it records no checksum, are skipped. Paths
+    that are not in the catalog, and existing files that differ from it or
+    cannot be checked, stop the download before the server is contacted;
+    delete conflicting files first to replace them.
+
     Preview the selection with --dry-run. Every nonempty download displays
     its plan and asks for confirmation before transferring files.
     """
     if download_all and (files or tsv_names):
-        raise ClickException("--all cannot be combined with file paths or --tsv")
-    if not files and not tsv_names and not download_all and not filters and not fmt:
-        raise ClickException("Provide file paths, --tsv, --all, --filter, or --fmt")
+        raise click.UsageError("Give paths or --all, not both")
+    if not files and not tsv_names and not download_all:
+        raise click.UsageError(
+            "Choose files with paths or --all; --filter and --fmt only narrow "
+            "that selection")
     if repo.worktree is None and output is None:
         raise ClickException("--output is required when downloading from a bare repo")
+    files = _repo_relative_paths(repo, files)
     with _translate_cli_errors(DownloadError, ValueError):
         plan = repo.plan_download(
             output, file_paths=files, tsv_names=tsv_names, all_files=download_all,
             filter=filters or None, fmt=fmt, remote_name=remote_name)
         if dry_run:
             click.echo(plan.summary())
-            for item in plan.items[:20]:
-                click.echo(f"  {item.relative_path.as_posix()}")
-            if plan.file_count > 20:
-                click.echo(f"  ... {plan.file_count - 20} more file(s)")
+            _echo_paths("Files to download:", [
+                item.relative_path.as_posix() for item in plan.items])
+            _echo_paths("Already downloaded (skipped):", [
+                item.relative_path.as_posix() for item in plan.skipped])
+            _echo_paths("Present (size matches, not verified):", [
+                item.relative_path.as_posix() for item in plan.unverified])
+            _report_plan_problems(plan)
             return
+        problems = _report_plan_problems(plan)
+        if problems:
+            raise ClickException("; ".join(problems) + "; nothing was downloaded")
         _run_download(repo, plan, max_workers=max_workers)
 
 
 @hallmark.command(short_help="Clone an existing Hallmark catalog.")
 @click.argument("url")
-@click.argument("path")
+@click.argument("path", required=False)
 @click.option("--auth", help="Optional local SSH authentication profile.")
 @click.option("--filter", "filters", multiple=True,
               help="Select paths matching a glob. ** matches recursively. "
@@ -467,6 +576,8 @@ def clone(url, path, auth, filters, fmt, source_type, no_download, max_workers):
     """
     Clone an existing Git catalog or published catalog snapshot at PATH.
 
+    PATH defaults to a new folder named after the source. It must be new or
+    an empty folder, outside any Hallmark repository and the source.
     By default, copy the catalog then ask before downloading dataset files.
     Declining keeps the catalog and exits successfully. --no-download skips data
     and the prompt; bare destinations require it. --filter and --fmt narrow the
@@ -475,6 +586,11 @@ def clone(url, path, auth, filters, fmt, source_type, no_download, max_workers):
     """
     if (filters or fmt is not None) and no_download:
         raise ClickException("--filter and --fmt cannot be used with --no-download")
+    if path is None:
+        try:
+            path = str(default_clone_destination(url))
+        except CloneError as exc:
+            raise click.UsageError(str(exc)) from exc
     if not no_download and Repo.resolve_repo_paths(path)[1] is None:
         raise ClickException("Bare clones require --no-download")
 

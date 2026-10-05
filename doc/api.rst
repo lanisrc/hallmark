@@ -98,9 +98,11 @@ Stage and commit a remote catalog without downloading dataset files::
    hm add 'ssh://lab-data/srv/data/run{run:d}.h5'
    hm commit -m 'Add remote data'
 
-Use ``hm clone SOURCE PATH`` for an existing Hallmark Git repository
-or published HTTP/SFTP snapshot. Git clones retain the full catalog and its
-history; snapshots start new local history. Use ``--source-type git`` or
+Use ``hm clone SOURCE [PATH]`` for an existing Hallmark Git repository
+or published HTTP/SFTP snapshot. ``PATH`` defaults to a new folder named after
+the source; it must be new or empty and outside any Hallmark repository,
+including the source. Git clones retain the full catalog, its history and
+every branch; snapshots start new local history. Use ``--source-type git`` or
 ``--source-type catalog`` to override automatic detection.
 
 Downloading remote data
@@ -109,11 +111,14 @@ Downloading remote data
 Preview the selected files using the local catalog, then confirm a download::
 
    hm download --all --dry-run
-   hm download --filter 'runs/**'
+   hm download runs
 
-Explicit paths and ``--tsv data.tsv`` also select files. Every nonempty transfer
-in the CLI requires interactive confirmation, including the default clone
-transfer. ``clone --no-download`` skips data and the prompt. Clone filters and
+Choose catalogued paths or folders, relative to the current folder, or
+``--all`` or ``--tsv data.tsv``; ``--filter`` and ``--fmt`` only narrow that
+selection, as in ``hm download --all --filter 'runs/**'``. Paths that are not
+in the catalog stop the download before the server is contacted. Every
+nonempty transfer in the CLI requires interactive confirmation, including the
+default clone transfer. ``clone --no-download`` skips data and the prompt. Clone filters and
 formats cannot be combined with this flag and leave the complete catalog unchanged.
 Declining clone's prompt keeps the catalog and exits successfully.
 A filter or filename format never authorizes a transfer.
