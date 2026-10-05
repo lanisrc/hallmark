@@ -41,7 +41,7 @@ Repository = "https://github.com/l6a/hallmark"
 Issues = "https://github.com/l6a/hallmark/issues"
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "pytest-cov", "pytest-timeout"]
 doc = ["sphinx"]
 lint = ["ruff"]
 
@@ -62,3 +62,16 @@ markers = [
     "ssh_client: exercise the actual local OpenSSH SFTP command parser",
     "ssh_integration: disposable loopback sshd (HALLMARK_RUN_SSH_TESTS=1 required)",
 ]
+
+[tool.coverage.run]
+source_pkgs = ["hallmark"]
+branch = true
+# Store repository-relative paths so data from Linux and macOS jobs combines.
+relative_files = true
+
+[tool.coverage.paths]
+hallmark = ["mod/hallmark", "*/mod/hallmark", "*/site-packages/hallmark"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
