@@ -8,6 +8,25 @@ from hallmark.remote.download import _select_remote_config, execute_download_pla
 from hallmark.remote.plan import DownloadItem, DownloadPlan
 
 
+@pytest.fixture
+def without_configured_identity(tmp_path, monkeypatch):
+    """
+    Point the git configuration at an empty home directory so a test can exercise
+    what happens when no author is configured at any level. GitPython resolves the
+    global configuration through the home directory, not GIT_CONFIG_GLOBAL.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+        monkeypatch: pytest fixture for temporarily modifying environment variables.
+    Returns:
+        Path: the empty home directory, for tests that need to write into it.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    return home
+
+
 @pytest.fixture(autouse=True)
 def configure_commit_identity(monkeypatch):
     """

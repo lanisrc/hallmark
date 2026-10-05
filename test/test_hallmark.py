@@ -1245,7 +1245,8 @@ def test_set_identity_stores_the_author_for_this_repository_only(tmp_path):
         f"Expected the commit to be signed with it, got {author}"
 
 
-def test_commit_requires_both_a_name_and_an_email(tmp_path):
+def test_commit_requires_both_a_name_and_an_email(
+        tmp_path, without_configured_identity):
     """
     Test that committing is refused until both the author name and email are set for
     the repository, and that no commit is created meanwhile.
@@ -1270,29 +1271,56 @@ def test_commit_requires_both_a_name_and_an_email(tmp_path):
         "Expected the commit to succeed once both values are set."
 
 
-def test_identity_ignores_values_configured_outside_the_repository(
-        tmp_path, monkeypatch):
+def test_commit_uses_a_globally_configured_identity(
+        tmp_path, without_configured_identity):
     """
-    Test that an identity configured globally does not satisfy the requirement, since
-    hm config stores the author for one repository only.
+    Test that an author configured in the user's global git configuration is enough to
+    commit, while identity() still reports only what this repository stores.
     Args:
         tmp_path: pytest fixture that provides a temporary directory for the test.
-        monkeypatch: pytest fixture for temporarily modifying environment variables.
+        without_configured_identity: fixture providing an empty home directory.
     """
-    global_config = tmp_path / "global.gitconfig"
-    global_config.write_text(
+    (without_configured_identity / ".gitconfig").write_text(
         "[user]\n\tname = Global Person\n\temail = global@example.edu\n",
         encoding="utf-8")
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
     repo = _repo_without_identity(tmp_path)
 
     assert repo.identity() == (None, None), \
-        f"Expected the global identity to be ignored, got {repo.identity()}"
-    with pytest.raises(RuntimeError, match="Set your name and email first"):
-        repo.commit("First dataset")
+        f"Expected nothing stored for this repository, got {repo.identity()}"
+    assert repo.effective_identity() == ("Global Person", "global@example.edu"), \
+        f"Expected the global identity to be resolved, got {repo.effective_identity()}"
+
+    assert repo.commit("First dataset") is True, \
+        "Expected a globally configured identity to be enough to commit."
+    author = repo.dothm.head.commit.author
+    assert (author.name, author.email) == ("Global Person", "global@example.edu"), \
+        f"Expected the commit to be signed with the global identity, got {author}"
 
 
-def test_clone_does_not_copy_the_authors_identity(tmp_path):
+def test_repository_identity_overrides_a_global_one(
+        tmp_path, without_configured_identity):
+    """
+    Test that an author stored for the repository takes precedence over the user's
+    global git configuration.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+        without_configured_identity: fixture providing an empty home directory.
+    """
+    (without_configured_identity / ".gitconfig").write_text(
+        "[user]\n\tname = Global Person\n\temail = global@example.edu\n",
+        encoding="utf-8")
+    repo = _repo_without_identity(tmp_path)
+    repo.set_identity("Ram Adithya", "ram@example.edu")
+
+    repo.commit("First dataset")
+
+    author = repo.dothm.head.commit.author
+    assert (author.name, author.email) == ("Ram Adithya", "ram@example.edu"), \
+        f"Expected the repository identity to win, got {author}"
+
+
+def test_clone_does_not_copy_the_authors_identity(
+        tmp_path, without_configured_identity):
     """
     Test that cloning a repository does not carry the original author's name and email
     across, so commits in the copy are not misattributed.

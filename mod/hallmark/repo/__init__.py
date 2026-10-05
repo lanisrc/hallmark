@@ -610,7 +610,7 @@ class Repo:
             raise RuntimeError(
                 "You're not on a branch. Run hm branch <name> then "
                 "hm checkout <name> to save changes.")
-        if not all(self.dothm.identity()):
+        if not all(self.dothm.effective_identity()):
             raise RuntimeError(
                 'Set your name and email first: hm config user.name "..." '
                 'and hm config user.email "..."')
@@ -718,6 +718,19 @@ class Repo:
             each ``None`` when it has not been set for this repository.
         '''
         return self.dothm.identity()
+
+    def effective_identity(self) -> Tuple[Optional[str], Optional[str]]:
+        '''
+        Return the commit author name and email git will actually sign with.
+
+        Values stored for this repository take precedence, falling back to the
+        user's global and system git configuration.
+
+        Returns:
+            tuple[string | None, string | None]: The resolved name and email,
+            each ``None`` when it is not configured at any level.
+        '''
+        return self.dothm.effective_identity()
 
     def create_branch(self, name: str) -> str:
         '''

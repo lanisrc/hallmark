@@ -207,8 +207,7 @@ remote:
             if email is not None:
                 writer.set_value("user", "email", email)
 
-    def identity(self) -> tuple[Optional[str], Optional[str]]:
-        reader = self.config_reader("repository")
+    def _read_identity(self, reader) -> tuple[Optional[str], Optional[str]]:
         values = []
         for key in ("name", "email"):
             try:
@@ -217,6 +216,12 @@ remote:
                 value = ""
             values.append(value or None)
         return values[0], values[1]
+
+    def identity(self) -> tuple[Optional[str], Optional[str]]:
+        return self._read_identity(self.config_reader("repository"))
+
+    def effective_identity(self) -> tuple[Optional[str], Optional[str]]:
+        return self._read_identity(self.config_reader())
 
     def load_state(self) -> State:
         return State(
