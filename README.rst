@@ -130,7 +130,9 @@ Remote ``add`` supports one dataset root and one ``data.tsv`` table per
 repository. Keep remote catalogs separate from locally versioned files.
 Local ``add`` selects files by filename format; ``commit`` stores their
 contents in ``.hm/objects``. Clone copies catalog history and downloads from
-its configured data remote; transfer of a local object store is not implemented.
+its configured data remote. Repositories with a branch that tracks local files
+cannot be cloned yet: clone reports this and creates nothing, even with
+``--no-download``. Empty repositories and remote catalogs can be cloned.
 
 Development and support
 -----------------------

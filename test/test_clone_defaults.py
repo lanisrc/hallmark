@@ -14,9 +14,8 @@ from hallmark.transport.base import DownloadError
 from mock_server import MockServer
 
 
-def _remote_catalog_source(path, files=(("item1.txt", b"science"),)):
-    """Create a committed catalog of files that stay on a mock HTTP server."""
-    repo = Repo.init(path)
+def _catalog_remote_files(repo, files, message="Catalogued remote data"):
+    """Commit a catalog of files that stay on the mock HTTP server."""
     repo.state.config = {
         "data": [{"db": "data.tsv"}],
         "remote": {"name": "origin", "url": "https://clone.test/data/"}}
@@ -25,18 +24,20 @@ def _remote_catalog_source(path, files=(("item1.txt", b"science"),)):
          "checksum": sha1(content).hexdigest(), "size_bytes": len(content)}
         for name, content in files])
     repo.dothm.save_state(repo.state)
-    repo.dothm.index.commit("Catalogued remote data")
+    repo.dothm.index.commit(message)
+
+
+def _remote_catalog_source(path, files=(("item1.txt", b"science"),)):
+    """Create a repository whose committed catalog lists remote files."""
+    repo = Repo.init(path)
+    _catalog_remote_files(repo, files)
     return repo
 
 
 @pytest.fixture
 def clone_source(tmp_path, monkeypatch):
-    source = Repo.init(tmp_path / 'source')
     payload = b'science'
-    (source.worktree / 'item1.txt').write_bytes(payload)
-    source.add('item{item:d}.txt')
-    source.set_config(remote_url='https://clone.test/data/')
-    source.commit('Catalogued data')
+    source = _remote_catalog_source(tmp_path / 'source', [('item1.txt', payload)])
     server = MockServer('https://clone.test/data/')
     server.add_file('item1.txt', payload)
     calls = []
@@ -59,7 +60,7 @@ def test_python_clone_downloads_by_default(clone_source, tmp_path):
     target = tmp_path / 'copy'
     repo = Repo.clone(str(source.dothm.path), target)
     assert (target / 'item1.txt').read_bytes() == b'science'
-    assert repo.state.data.iloc[0]['sha1'] == sha1(b'science').hexdigest()
+    assert repo.state.data.iloc[0]['checksum'] == sha1(b'science').hexdigest()
     assert repo.download_result['succeeded'] == 1
     assert calls == ['https://clone.test/data/item1.txt']
 
@@ -180,9 +181,8 @@ def test_clone_filtered_to_zero_files_does_not_prompt(clone_source, tmp_path):
 def test_clone_download_failure_keeps_catalog_and_valid_files(
         clone_source, tmp_path, cli):
     source, calls, server = clone_source
-    (source.worktree / 'item2.txt').write_bytes(b'science')
-    source.add('item{item:d}.txt')
-    source.commit('Add another file')
+    _catalog_remote_files(source, [('item1.txt', b'science'),
+                                   ('item2.txt', b'science')], 'Add another file')
     server.add_file('item1.txt', b'invalid')
     server.add_file('item2.txt', b'science')
     target = tmp_path / 'copy'
@@ -369,3 +369,123 @@ def test_clone_refuses_a_nonempty_folder_or_symlink(tmp_path):
             Repo.clone(str(source.dothm.path), target, download=False)
     assert (full / "keep.txt").read_text() == "keep"
     assert list(empty.iterdir()) == []
+
+
+def _local_file_source(path, *, on_branch=None):
+    """Create a repository whose catalog versions local files in .hm/objects."""
+    source = Repo.init(path)
+    if on_branch is not None:
+        source.commit("Empty main", allow_empty=True)
+        source.dothm.git.checkout("-b", on_branch)
+    (source.worktree / "item1.txt").write_bytes(b"science")
+    source.add("item{item:d}.txt")
+    source.set_config(remote_url="https://clone.test/data/")
+    source.commit("Catalogued local data")
+    if on_branch is not None:
+        source.dothm.git.checkout("main")
+    return source
+
+
+@pytest.mark.parametrize("arguments", [[], ["--no-download"]])
+@pytest.mark.parametrize("on_branch", [None, "experiment"])
+def test_cli_refuses_to_clone_local_file_repositories(
+        tmp_path, monkeypatch, arguments, on_branch):
+    source = _local_file_source(tmp_path / "source", on_branch=on_branch)
+    monkeypatch.chdir(tmp_path)
+
+    def reject(*args, **kwargs):
+        raise AssertionError("a local-file source must be refused before copying")
+
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", reject)
+    result = CliRunner().invoke(hallmark, [
+        "clone", str(source.dothm.path), "copy", *arguments])
+    assert result.exit_code == 1
+    assert "tracks local files" in result.output
+    assert "not supported yet" in result.output
+    assert "Nothing was created." in result.output
+    assert not (tmp_path / "copy").exists()
+
+
+@pytest.mark.parametrize("relative", ["copy", "new/deep/copy"])
+def test_local_file_check_runs_after_cloning_a_git_host(
+        tmp_path, monkeypatch, relative):
+    from hallmark.remote.clone import Dothm
+
+    source = _local_file_source(tmp_path / "source", on_branch="experiment")
+    original = Dothm.clone
+
+    def clone(url, destination, **kwargs):
+        return original(str(source.dothm.path), destination, **kwargs)
+
+    monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", clone)
+    target = tmp_path / relative
+    with pytest.raises(CloneError, match="'experiment' tracks local files"):
+        Repo.clone("https://git.example.test/team/data.git", target, download=False)
+    assert not (tmp_path / Path(relative).parts[0]).exists()
+
+
+@pytest.mark.parametrize("relative", ["copy", "new/deep/copy"])
+def test_snapshot_of_local_files_is_refused(tmp_path, monkeypatch, relative):
+    from hallmark.transport import OperationContext
+    from hallmark.transport.base import RemoteObjectMissing
+
+    root = "https://example.test/published/"
+    pages = {root + "config.yml": "data:\n- fmt: run{run:d}.txt\n",
+             root + "meta.yml": "{}\n",
+             root + "data.tsv": "sha1\trun\n" + "a" * 40 + "\t1\n"}
+
+    def read_text(context, path):
+        url = context.remote.url.rstrip("/") + "/" + path
+        if url not in pages:
+            raise RemoteObjectMissing("No such metadata object")
+        return pages[url]
+
+    monkeypatch.setattr(OperationContext, "read_text", read_text)
+    target = tmp_path / relative
+    with pytest.raises(CloneError, match="tracks local files"):
+        Repo.clone(root, target, download=False)
+    assert not (tmp_path / Path(relative).parts[0]).exists()
+
+
+def test_empty_repository_with_remote_branch_can_be_cloned(tmp_path):
+    source = Repo.init(tmp_path / "source")
+    source.commit("Empty catalog", allow_empty=True)
+    source.dothm.git.checkout("-b", "remote-data")
+    _catalog_remote_files(source, [("item1.txt", b"science")])
+    source.dothm.git.checkout("main")
+    repo = Repo.clone(str(source.dothm.path), tmp_path / "copy", download=False)
+    assert repo.state.data.empty
+
+
+def test_local_folder_that_is_not_a_repository_reports_the_clone_failure(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "notes.txt").write_text("not a repository")
+    with pytest.raises(CloneError, match="hm init PATH, then hm add URL"):
+        Repo.clone(str(plain), tmp_path / "copy", download=False)
+    assert not (tmp_path / "copy").exists()
+
+
+@pytest.mark.parametrize("name", ["-q", "--output=stolen"])
+@pytest.mark.parametrize("host", [False, True])
+def test_clone_refuses_option_like_branch_names(tmp_path, monkeypatch, name, host):
+    from hallmark.remote.clone import Dothm
+
+    source = _remote_catalog_source(tmp_path / "source")
+    source.dothm.git.update_ref(f"refs/heads/{name}", "HEAD")
+    url = str(source.dothm.path)
+    if host:
+        original = Dothm.clone
+
+        def clone(git_url, destination, **kwargs):
+            return original(str(source.dothm.path), destination, **kwargs)
+
+        monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", clone)
+        url = "https://git.example.test/team/data.git"
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    result = CliRunner().invoke(hallmark, ["clone", url, "copy", "--no-download"])
+    assert result.exit_code == 1
+    assert f"Source branch {name!r} has an invalid name" in result.output
+    assert list(work.iterdir()) == []

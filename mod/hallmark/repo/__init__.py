@@ -19,9 +19,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
-from git.exc import GitCommandError, InvalidGitRepositoryError, NoSuchPathError
+from git.exc import InvalidGitRepositoryError, NoSuchPathError
 
-from .branches import checkout, add_worktree
+from .branches import checkout, add_worktree, validate_branch_name
 from ..remote.add import add_remote, is_remote_catalog
 from .dothm import Dothm
 from .state import State
@@ -196,21 +196,7 @@ class Repo:
         Raises:
             ValueError: If the branch name is invalid.
         """
-        # Normalize the branch name to ensure it is a non-empty string
-        branch_name = require_nonempty_string(value, label="branch name")
-        # if the branch name starts with a hyphen, raise a ValueError
-        if branch_name.startswith("-"):
-            raise ValueError(f"invalid branch name: {branch_name!r}")
-
-        # try to validate the branch name using Git's check_ref_format command
-        try:
-            self.dothm.git.check_ref_format("--branch", branch_name)
-        # if Git raises a GitCommandError, re-raise it as a ValueError
-        except GitCommandError as exc:
-            raise ValueError(f"invalid branch name: {branch_name!r}") from exc
-
-        # if all checks pass, return the normalized branch name
-        return branch_name
+        return validate_branch_name(self.dothm.git, value)
 
     def _calculate_file_checksums(self, pf: ParaFrame) -> None:
         """

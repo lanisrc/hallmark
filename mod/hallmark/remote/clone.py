@@ -10,6 +10,8 @@ from urllib.parse import unquote, urlsplit
 
 import pandas as pd
 import yaml
+from git import Repo as GitRepo
+from git.exc import GitCommandError, GitError
 
 from ..repo.dothm import Dothm
 from ..error import CloneError, DestinationExistsError
@@ -24,6 +26,7 @@ from ..transport import OperationContext, RemoteSpec
 from ..transport.base import RemoteObjectMissing, validate_remote_path
 from ..repo.worktree import Worktree
 from ..transport.base import reject_url_credentials
+from ..repo.branches import validate_branch_name
 
 
 def _catalog_filenames(config):
@@ -222,18 +225,25 @@ def _check_destination(cls, url, destination, display_path):
     return destination.is_dir()
 
 
-def _remove_partial_clone(cls, destination, *, existed):
+def _remove_partial_clone(cls, destination, *, created):
     """
     Remove what a failed clone created, never following a symbolic link.
 
-    A destination the clone created is removed. In a worktree folder that
-    existed only its new ``.hm`` is removed; a bare folder that existed, and
-    held nothing before, is emptied again.
+    The folders the clone created for its destination are removed. In a
+    worktree folder that existed only its new ``.hm`` is removed; a bare
+    folder that existed, and held nothing before, is emptied again.
+
+    Args:
+        cls: Repository class, used to tell bare destinations apart.
+        destination (Path): Clone destination.
+        created (Path, optional): Highest folder created for the destination,
+            or None if the destination existed.
     """
-    if destination.is_symlink():
+    if created is not None:
+        if not created.is_symlink():
+            rmtree(created, ignore_errors=True)
         return
-    if not existed:
-        rmtree(destination, ignore_errors=True)
+    if destination.is_symlink():
         return
     if cls.resolve_repo_paths(destination)[1] is not None:
         dothm = destination / ".hm"
@@ -248,6 +258,82 @@ def _remove_partial_clone(cls, destination, *, existed):
             rmtree(child, ignore_errors=True)
         else:
             child.unlink(missing_ok=True)
+
+
+def _tracks_local_files(table_text):
+    """
+    Return whether a ``data.tsv`` catalog versions local files.
+
+    Local catalogs record a ``sha1`` per file and keep contents in
+    ``.hm/objects``; remote catalogs list ``path`` rows on a data server.
+    Unreadable tables are left to catalog validation.
+    """
+    try:
+        frame = pd.read_csv(StringIO(table_text), sep="\t", dtype=str,
+                            keep_default_na=False)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        return False
+    return (not frame.empty and "sha1" in frame.columns
+            and "path" not in frame.columns)
+
+
+def _refuse_local_file_branches(git, branches):
+    """
+    Refuse a clone when a branch's committed catalog versions local files.
+
+    Args:
+        git: GitPython command wrapper of the repository holding the branches.
+        branches (list[tuple[str, str]]): Branch names and their revisions.
+
+    Raises:
+        CloneError: If any branch tracks local files.
+    """
+    local = []
+    for name, revision in branches:
+        try:
+            table = git.show("--end-of-options", f"{revision}:data.tsv")
+        except GitCommandError:
+            continue
+        if _tracks_local_files(table):
+            local.append(name)
+    if local:
+        names = ", ".join(f"'{name}'" for name in local)
+        raise CloneError(
+            f"Branch {names} tracks local files; cloning local-file repositories "
+            "is not supported yet. Nothing was created.")
+
+
+def _refuse_invalid_branch_names(git, names):
+    """
+    Refuse source branches whose names Git would misread, such as options.
+
+    Raises:
+        CloneError: If a branch name is invalid.
+    """
+    for name in names:
+        try:
+            validate_branch_name(git, name)
+        except ValueError:
+            raise CloneError(
+                f"Source branch {name!r} has an invalid name; cloning it is not "
+                "supported. Nothing was created.") from None
+
+
+def _check_local_source(url):
+    """Inspect a local Git source read-only, before anything is written."""
+    root = _local_source_root(url)
+    if root is None:
+        return
+    git_dir = root / ".hm" if (root / ".hm").is_dir() else root
+    try:
+        source = GitRepo(git_dir)
+    except GitError:
+        # Not a readable repository: cloning reports the problem itself.
+        return
+    with source:
+        names = [head.name for head in source.heads]
+        _refuse_invalid_branch_names(source.git, names)
+        _refuse_local_file_branches(source.git, [(name, name) for name in names])
 
 
 def _is_git_source(url, source_type):
@@ -271,11 +357,17 @@ def _clone_git(cls, url, destination, display_path, auth):
     local = Path(url).expanduser()
     git_url = str(local / ".hm") if (local / ".hm").is_dir() else url
     try:
-        Dothm.clone(git_url, dothm_path, display_path=display_path)
+        dothm = Dothm.clone(git_url, dothm_path, display_path=display_path)
     except CloneError as exc:
         raise CloneError(
             f"{exc}\nFor a raw dataset, use hm init PATH, "
             "then hm add URL.") from exc
+    # Sources on a Git host can only be inspected once copied; the caller
+    # removes the copy if a check fails.
+    branches = [(ref.remote_head, ref.name) for remote in dothm.remotes
+                for ref in remote.refs if ref.remote_head != "HEAD"]
+    _refuse_invalid_branch_names(dothm.git, [name for name, _ in branches])
+    _refuse_local_file_branches(dothm.git, branches)
     if worktree_path:
         Worktree.init(worktree_path)
     return cls(destination)
@@ -285,8 +377,9 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
     """
     Clone an existing Git catalog or published HTTP/SFTP catalog snapshot.
 
-    Source URLs with credentials are rejected first. The destination must be
-    new or an empty folder, outside any Hallmark repository and the local
+    Source URLs with credentials are rejected first. Repositories with a
+    branch that tracks local files cannot be cloned yet. The destination must
+    be new or an empty folder, outside any Hallmark repository and the local
     source; this is checked before source access. On failure, only what this
     call created is removed: the destination it created, or the ``.hm`` it
     added to an existing worktree folder. An existing bare folder is emptied
@@ -306,7 +399,8 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
         DestinationExistsError: If the destination exists and is not an empty
             folder.
         CloneError: If the destination is inside a repository or overlaps a
-            local source, or a requested catalog is missing or invalid.
+            local source, a branch tracks local files, or a requested catalog
+            is missing or invalid.
         ValueError: If source options are invalid.
         DownloadError: If remote metadata cannot be read or validated.
     """
@@ -320,7 +414,14 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
     is_git = _is_git_source(url, source_type)
     if is_git and auth is not None:
         raise ValueError("Git cloning uses Git/SSH authentication, not auth profiles")
+    if is_git:
+        _check_local_source(url)
+    created = None
     if not existed:
+        # Remember the highest missing folder so a failure removes them all.
+        created = destination
+        while not (created.parent.exists() or created.parent.is_symlink()):
+            created = created.parent
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:
             destination.mkdir()
@@ -343,6 +444,10 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
             raise CloneError("No published Hallmark catalog at this URL; "
                              "use hm init PATH, then hm add URL "
                              "for a raw dataset")
+        if _tracks_local_files(snapshot["data.tsv"]):
+            raise CloneError(
+                "The published catalog tracks local files; cloning local-file "
+                "repositories is not supported yet. Nothing was created.")
         if cls.resolve_repo_paths(destination)[1] is None:
             # Initialization creates a bare ".hm" folder itself.
             destination.rmdir()
@@ -352,5 +457,5 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
         _commit_catalog_metadata(repo, snapshot, "Import published catalog snapshot")
         return repo
     except BaseException:
-        _remove_partial_clone(cls, destination, existed=existed)
+        _remove_partial_clone(cls, destination, created=created)
         raise

@@ -109,14 +109,15 @@ def test_published_snapshot_preserves_data_remote(tmp_path, metadata_server, nes
 
 
 def test_filtered_git_clone_preserves_history_without_objects(tmp_path, monkeypatch):
+    import pandas as pd
+
     source = Repo.init(tmp_path / "source")
-    (source.worktree / "run1.h5").write_text("one")
-    (source.worktree / "run2.h5").write_text("two")
-    source.add("run{run:d}.h5")
-    source.set_config(remote_url="https://example.test/data/")
+    source.state.config = {"data": [{"db": "data.tsv"}],
+                           "remote": {"url": "https://example.test/data/"}}
+    source.state.data = pd.DataFrame({"path": ["run1.h5", "run2.h5"]})
+    source.dothm.save_state(source.state)
     source.commit("Original scientific data")
     head = source.dothm.head.commit.hexsha
-    assert list(source.objects.root.rglob("*"))
 
     def fail(*args, **kwargs):
         raise AssertionError("Filtered metadata clone must not transfer data")

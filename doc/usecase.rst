@@ -297,7 +297,8 @@ an apparently complete catalog.
 The generated data remote ``origin`` records the source URL and optional
 profile name.
 Existing Git-hosted catalogs keep their complete catalog, history and
-recorded data remotes when cloned. Clone offers data downloads by default and
+recorded data remotes when cloned. Repositories that track local files cannot
+be cloned yet. Clone offers data downloads by default and
 asks for confirmation. ``--no-download`` copies only the catalog. Clone filters
 narrow the download and cannot accompany ``--no-download``; the catalog and
 history remain unchanged.

@@ -218,6 +218,11 @@ repositories cannot be nested; these checks happen before the source is read.
 A failed clone removes only what it created: the destination folder if it was
 new, or the ``.hm`` it added to an existing empty folder. It never follows a
 symbolic link while cleaning up.
+Only empty repositories and remote catalogs can be cloned: if any branch of the
+source tracks local files, whose contents live in its ``.hm/objects``, clone
+reports it and creates nothing, even with ``--no-download``. A local source is
+checked before anything is copied; a Git host or snapshot is checked after its
+metadata is read, and the partial copy is removed.
 
 Git endpoints preserve the complete catalog and history. Published HTTP/SFTP
 snapshots start new local history. A snapshot URL may name the metadata
