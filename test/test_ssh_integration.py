@@ -4,13 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import getpass
 import hashlib
-import os
 from pathlib import Path
-import shutil
-import socket
-import subprocess
 import time
-from urllib.parse import quote
 
 from click.testing import CliRunner
 import pytest
@@ -26,105 +21,6 @@ from hallmark.transport.base import (
 from hallmark.transport.ssh import SshBackend
 
 pytestmark = pytest.mark.ssh_integration
-
-
-@pytest.fixture
-def ssh_server(tmp_path, monkeypatch, request):
-    """Start a loopback SSH server with temporary keys and configuration."""
-    if os.environ.get("HALLMARK_RUN_SSH_TESTS") != "1":
-        pytest.skip("Set HALLMARK_RUN_SSH_TESTS=1 for disposable loopback SSH tests")
-    sshd = shutil.which("sshd") or "/usr/sbin/sshd"
-    if not Path(sshd).exists():
-        pytest.fail("Opted-in SSH tests require openssh-server")
-    for name in ("host", "client", "second", "untrusted"):
-        subprocess.run(
-            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(tmp_path / name)],
-            check=True,
-        )
-    authorized = tmp_path / "authorized"
-    authorized.write_text(
-        (tmp_path / "client.pub").read_text() + (tmp_path / "second.pub").read_text()
-    )
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    config = tmp_path / "sshd_config"
-    config.write_text(f"""ListenAddress 127.0.0.1
-Port {port}
-HostKey {tmp_path}/host
-PidFile {tmp_path}/sshd.pid
-AuthorizedKeysFile {authorized}
-StrictModes no
-UsePAM no
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-PermitRootLogin prohibit-password
-MaxSessions 4
-Subsystem sftp internal-sftp
-""")
-    mode = getattr(request, "param", None)
-    if mode == "sftp-only":
-        config.write_text(config.read_text() + "ForceCommand internal-sftp\n")
-    elif mode == "no-sftp":
-        config.write_text(
-            config.read_text().replace("Subsystem sftp internal-sftp\n", "")
-        )
-    elif mode == "max-one":
-        config.write_text(config.read_text().replace("MaxSessions 4", "MaxSessions 1"))
-    log = (tmp_path / "sshd.log").open("wb")
-    daemon = subprocess.Popen(
-        [sshd, "-D", "-e", "-f", str(config)], stderr=log, start_new_session=True
-    )
-    known = tmp_path / "known_hosts"
-    known.write_text(f"[127.0.0.1]:{port} " + (tmp_path / "host.pub").read_text())
-    client_config = tmp_path / "ssh_config"
-    client_config.write_text(f"""Host hm-test
-    HostName 127.0.0.1
-Host *
-    User {getpass.getuser()}
-    Port {port}
-    IdentityFile {tmp_path}/client
-    IdentityAgent none
-    IdentitiesOnly yes
-    UserKnownHostsFile {known}
-    GlobalKnownHostsFile /dev/null
-""")
-    original = SshBackend._ssh_options
-    monkeypatch.setattr(
-        SshBackend,
-        "_ssh_options",
-        lambda self, **kw: ["-F", str(client_config)] + original(self, **kw),
-    )
-    monkeypatch.delenv("HALLMARK_AUTH_FILE", raising=False)
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
-    root = tmp_path / "export"
-    root.mkdir()
-    try:
-        deadline = time.monotonic() + 5
-        while True:
-            if daemon.poll() is not None:
-                log.flush()
-                pytest.fail((tmp_path / "sshd.log").read_text())
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                    break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    pytest.fail("Local SSH test server did not start")
-                time.sleep(0.05)
-        yield {
-            "root": root,
-            "port": port,
-            "known": known,
-            "base": tmp_path,
-            "config": client_config,
-            "daemon": daemon,
-            "url": "ssh://hm-test" + quote(str(root), safe="/") + "/",
-        }
-    finally:
-        daemon.terminate()
-        daemon.wait(timeout=5)
-        log.close()
 
 
 @pytest.mark.parametrize("scheme", ["ssh", "sftp"])
