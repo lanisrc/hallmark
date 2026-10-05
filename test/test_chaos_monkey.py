@@ -170,7 +170,7 @@ def test_local_monkey_keeps_repository_consistent(tmp_path, monkeypatch, request
 
 @pytest.mark.xfail(strict=True, reason=(
     "Bug: before the first commit, checkout raises GitCommandError because "
-    "init leaves data.tsv uncommitted"))
+    "init leaves data.tsv uncommitted (#58)"))
 def test_checkout_before_first_commit_reports_a_documented_error(tmp_path):
     repo = Repo.init(tmp_path / "obs")
     try:

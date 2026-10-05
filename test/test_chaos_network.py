@@ -112,7 +112,7 @@ def test_published_checksum_rejects_damaged_content(tmp_path, release, fault):
 
 @pytest.mark.xfail(strict=True, reason=(
     "Bug: a body truncated without Content-Length is accepted when the "
-    "catalog records the file size but no checksum"))
+    "catalog records the file size but no checksum (#54)"))
 def test_catalogued_size_rejects_unannounced_truncation(tmp_path, release):
     server = release(publish_checksums=False, listing_style="apache")
     repo = _catalog_repo(tmp_path / "repo", server)

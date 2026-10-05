@@ -30,10 +30,10 @@ def _in_dothm(target):
     1,
     pytest.param(2, marks=pytest.mark.xfail(strict=True, reason=(
         "Bug: Dothm.save_state writes config.yml, meta.yml and data.tsv "
-        "separately, so a failed later write leaves mixed generations"))),
+        "separately, so a failed later write leaves mixed generations (#55)"))),
     pytest.param(3, marks=pytest.mark.xfail(strict=True, reason=(
         "Bug: Dothm.save_state writes config.yml, meta.yml and data.tsv "
-        "separately, so a failed later write leaves mixed generations"))),
+        "separately, so a failed later write leaves mixed generations (#55)"))),
 ])
 def test_failed_state_write_keeps_one_generation(tmp_path, monkeypatch, nth):
     reference = Repo.init(tmp_path / "reference")

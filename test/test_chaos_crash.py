@@ -118,10 +118,10 @@ def two_branches(telescope):
 @pytest.mark.parametrize("nth", [
     pytest.param(1, marks=pytest.mark.xfail(strict=True, reason=(
         "Bug: a checkout killed after moving a file to its backup folder "
-        "cannot be rerun; the file is reported missing"))),
+        "cannot be rerun; the file is reported missing (#56)"))),
     pytest.param(3, marks=pytest.mark.xfail(strict=True, reason=(
         "Bug: a checkout killed after moving a file to its backup folder "
-        "cannot be rerun; the file is reported missing"))),
+        "cannot be rerun; the file is reported missing (#56)"))),
 ])
 def test_killed_checkout_can_be_completed(two_branches, nth):
     repo, _ = two_branches
@@ -133,7 +133,7 @@ def test_killed_checkout_can_be_completed(two_branches, nth):
 
 @pytest.mark.xfail(strict=True, reason=(
     "Bug: add_worktree returns early when the destination already has .hm, "
-    "so a rerun after a crash leaves the worktree without its files"))
+    "so a rerun after a crash leaves the worktree without its files (#57)"))
 def test_killed_add_worktree_is_completed_by_rerun(telescope):
     repo, files = telescope
     repo.add(FMT)
