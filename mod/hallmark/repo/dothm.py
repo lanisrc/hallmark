@@ -170,6 +170,17 @@ remote:
             super().clone_from(url, str(to_path))
             dothm = cls(str(to_path))
 
+            commit = dothm.head.commit
+            initial_message = "Initial commit: local `.hm` repository"
+            if (not commit.parents
+                    and commit.message.strip() == initial_message
+                    and {item.path for item in commit.tree} == {"README.md"}):
+                (dothm.path / "config.yml").write_text(
+                    cls.config_template(), encoding="utf-8")
+                dothm.write_yaml({}, "meta")
+                dothm.write_tsv(State().data, "data")
+                dothm.index.add(["config.yml", "meta.yml", "data.tsv"])
+
             required_files = ["config.yml", "meta.yml", "data.tsv"]
             for file in required_files:
                 if not (dothm.path / file).exists():

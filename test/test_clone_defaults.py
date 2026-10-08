@@ -186,3 +186,26 @@ def test_clone_download_failure_keeps_catalog_and_valid_files(
     assert (target / 'item2.txt').read_bytes() == b'science'
     assert sorted(calls) == [
         'https://clone.test/data/item1.txt', 'https://clone.test/data/item2.txt']
+
+
+@pytest.mark.parametrize('cli', [False, True])
+@pytest.mark.parametrize('download', [False, True])
+@pytest.mark.parametrize('committed', [False, True])
+def test_clone_empty_repository(tmp_path, cli, download, committed):
+    source = Repo.init(tmp_path / 'source')
+    if committed:
+        source.commit('Empty catalog')
+    target = tmp_path / 'copy'
+    if cli:
+        args = ['clone', str(source.dothm.path), str(target)]
+        if not download:
+            args.append('--no-download')
+        result = CliRunner().invoke(hallmark, args)
+        assert result.exit_code == 0, result.output
+        assert 'Download these files?' not in result.output
+        repo = Repo(target)
+    else:
+        repo = Repo.clone(str(source.dothm.path), target, download=download)
+    assert repo.state.data.empty
+    assert repo.dothm.head.commit.hexsha == source.dothm.head.commit.hexsha
+    assert sorted(path.name for path in target.iterdir()) == ['.hm']
