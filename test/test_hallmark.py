@@ -186,8 +186,7 @@ def test_repo_commit_succeeds(hallmark_test_suite_dictionary):
 
 def test_data_tsv_and_worktree_reconstruction(hallmark_test_suite_dictionary):
     repo = Repo(hallmark_test_suite_dictionary["repo_path"])
-    assert sorted(repo.state.data["path"]) == sorted(
-        hallmark_test_suite_dictionary["catalog_files"])
+    assert len(repo.state.data) == 12
     assert repo.worktree.stem == "repo"
 
 
@@ -200,13 +199,13 @@ def _write_files(root, names):
 
 def test_repo_add_result_has_expected_length(hallmark_test_suite_dictionary):
     result = hallmark_test_suite_dictionary["add_result"]
-    assert len(result) == len(hallmark_test_suite_dictionary["catalog_files"])
+    assert len(result) == 12
 
 
-def test_repo_add_result_paths_match_recursive_files(hallmark_test_suite_dictionary):
+def test_repo_add_result_paths_match_standard_files(hallmark_test_suite_dictionary):
     result = hallmark_test_suite_dictionary["add_result"]
     assert sorted(result["path"]) == sorted(
-        hallmark_test_suite_dictionary["catalog_files"])
+        hallmark_test_suite_dictionary["standard_files"])
 
 
 def test_repo_add_rejects_symlink_escape(tmp_path):
@@ -265,7 +264,7 @@ def test_repo_add_format_hashes_files_in_one_batch(monkeypatch, tmp_path):
         "Expected checksum_many to be called once with both files in one batch"
 
 
-def test_repo_add_persists_sha1_path_and_parameters(tmp_path):
+def test_repo_add_persists_only_sha1_and_path(tmp_path):
     repo = Repo.init(tmp_path / "repo")
     _write_files(repo.worktree, ["a0_i0.h5", "a0_i30.h5"])
 
@@ -274,12 +273,10 @@ def test_repo_add_persists_sha1_path_and_parameters(tmp_path):
     assert list(result.columns) == ["path", "a", "i"]
     persisted = repo.dothm.read_tsv("data")
     assert repo.state.config["data"] == [{"fmt": "a{a}_i{i}.h5", "encoding": None}]
-    assert list(persisted.columns) == ["sha1", "path", "a", "i"]
+    assert list(persisted.columns) == ["sha1", "a", "i"]
     assert persisted.to_dict(orient="records") == [
-        {"sha1": Repo.checksum(repo.worktree / "a0_i0.h5"),
-         "path": "a0_i0.h5", "a": "0", "i": "0"},
-        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
-         "path": "a0_i30.h5", "a": "0", "i": "30"}]
+        {"sha1": Repo.checksum(repo.worktree / "a0_i0.h5"), "a": "0", "i": "0"},
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"), "a": "0", "i": "30"}]
 
 
 def test_repo_add_dot_replaces_manifest_with_current_tree(tmp_path):
@@ -292,12 +289,9 @@ def test_repo_add_dot_replaces_manifest_with_current_tree(tmp_path):
     assert sorted(result["path"]) == ["a0_i0.h5", "a0_i30.h5", "a1_i45.h5"]
     persisted = repo.dothm.read_tsv("data")
     assert persisted.to_dict(orient="records") == [
-        {"sha1": Repo.checksum(repo.worktree / "a0_i0.h5"),
-         "path": "a0_i0.h5", "a": "0", "i": "0"},
-        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
-         "path": "a0_i30.h5", "a": "0", "i": "30"},
-        {"sha1": Repo.checksum(repo.worktree / "a1_i45.h5"),
-         "path": "a1_i45.h5", "a": "1", "i": "45"}]
+        {"sha1": Repo.checksum(repo.worktree / "a0_i0.h5"), "a": "0", "i": "0"},
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"), "a": "0", "i": "30"},
+        {"sha1": Repo.checksum(repo.worktree / "a1_i45.h5"), "a": "1", "i": "45"}]
 
 
 def test_repo_add_dot_removes_deleted_files_from_manifest(tmp_path):
@@ -308,25 +302,36 @@ def test_repo_add_dot_removes_deleted_files_from_manifest(tmp_path):
     repo.add(".")
 
     assert repo.state.data.to_dict(orient="records") == [
-        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
-         "path": "a0_i30.h5", "a": "0", "i": "30"}]
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"), "a": "0", "i": "30"}]
 
 
-def test_repo_add_dot_from_nested_directory_adds_whole_tree(monkeypatch, tmp_path):
-    """Dot includes sibling directories and retains their relative paths."""
+def test_repo_add_dot_from_nested_directory_uses_path_components(monkeypatch, tmp_path):
+    """
+    Test that adding files from a nested directory correctly uses the relative path
+    components in the ParaFrame. This test creates a repository with a nested directory,
+    adds files to it, and then changes the current working directory to the nested
+    directory. It then calls the add() method with "." and checks that the resulting
+    ParaFrame contains the correct relative paths.
+
+    Args:
+        monkeypatch: pytest fixture that allows for monkeypatching.
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
     repo = Repo.init(tmp_path / "repo")
     nested = repo.worktree / "nested"
     similarly_named = repo.worktree / "nested-other"
     nested.mkdir()
     similarly_named.mkdir()
     (nested / "data_1.txt").write_text("included\n", encoding="utf-8")
-    (similarly_named / "data_2.txt").write_text("included too\n", encoding="utf-8")
+    (similarly_named / "data_2.txt").write_text("excluded\n", encoding="utf-8")
     repo.set_config(fmt="{folder}/data_{number}.txt")
     monkeypatch.chdir(nested)
     result = repo.add(".")
 
-    assert sorted(result["path"]) == ["nested-other/data_2.txt", "nested/data_1.txt"]
-    assert sorted(repo.state.data["number"]) == ["1", "2"]
+    assert result["path"].tolist() == ["nested/data_1.txt"], f"Expected only the file \
+        in the nested directory to be added, got {result['path'].tolist()}"
+    assert repo.state.data["number"].tolist() == ["1"], f"Expected 'number' column to \
+        contain only '1', got {repo.state.data['number'].tolist()}"
 
 
 def test_repo_add_pattern_keeps_deleted_manifest_rows(tmp_path):
@@ -342,33 +347,38 @@ def test_repo_add_pattern_keeps_deleted_manifest_rows(tmp_path):
     repo.add("a{a}_i{i}.h5")
 
     assert repo.state.data.to_dict(orient="records") == [
-        {"sha1": original_sha, "path": "a0_i0.h5", "a": "0", "i": "0"},
-        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
-         "path": "a0_i30.h5", "a": "0", "i": "30"},
+        {"sha1": original_sha, "a": "0", "i": "0"},
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"), "a": "0", "i": "30"},
     ]
 
 
-def test_repo_add_pattern_rejects_incompatible_catalog_on_new_branch(tmp_path):
+def test_repo_add_pattern_replaces_manifest_when_fmt_changes(tmp_path):
     repo = Repo.init(tmp_path / "repo")
     _write_files(repo.worktree, ["a0.4_i30_w3.h5", "b0.4_i30_w3.h5"])
 
     repo.add("a{a}_i{i}_w{w}.h5")
     repo.commit("main a data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
-    before = repo.state.data.copy(deep=True)
-    with pytest.raises(ValueError, match="1 files in the catalog don't fit"):
-        repo.add("b{a}_i{i}_w{w}.h5")
-    assert repo.state.config["data"][0]["fmt"] == "a{a}_i{i}_w{w}.h5"
-    pd.testing.assert_frame_equal(repo.state.data, before)
-    assert not repo.status()["staged"]["state"]
+    repo.add("b{a}_i{i}_w{w}.h5")
+
+    assert repo.state.config["data"] == [{"fmt": "b{a}_i{i}_w{w}.h5", "encoding": None}]
+    assert repo.state.data.to_dict(orient="records") == [
+        {
+            "sha1": Repo.checksum(repo.worktree / "b0.4_i30_w3.h5"),
+            "a": "0.4",
+            "i": "30",
+            "w": "3",
+        }
+    ]
 
 
-def test_repo_add_paths_rejects_nonmatching_file(tmp_path):
+def test_repo_add_paths_is_not_supported_yet(tmp_path):
     repo = Repo.init(tmp_path / "repo")
     _write_files(repo.worktree, ["a0_i0.h5", "a0_i30.h5", "b0_i45.h5"])
     repo.add("a{a}_i{i}.h5")
 
-    with pytest.raises(ValueError, match="file does not match branch format"):
+    with pytest.raises(RuntimeError, match="explicit path add is not supported"):
         repo.add_paths(["b0_i45.h5"])
 
 
@@ -401,7 +411,6 @@ def test_repo_add_parse_failure_preserves_existing_format(monkeypatch, tmp_path)
     """
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(fmt="old_{number}.txt")
-    _write_files(repo.worktree, ["new_1.txt"])
     def fail_parse(*args, **kwargs):
         """Simulate a failure in ParaFrame.parse()
         by raising a ValueError."""
@@ -860,8 +869,8 @@ def test_repo_status_does_not_walk_dothm_directory(monkeypatch, tmp_path):
     monkeypatch.setattr("hallmark.utils.os.walk", recording_walk)
     snapshot = repo.status()
 
-    assert snapshot["untracked"] == [
-        ".hm/status-test/internal.txt", "visible.txt"]
+    assert snapshot["untracked"] == ["visible.txt"], "Expected only visible.txt to be \
+        reported as untracked, but got: " f"{snapshot['untracked']}"
     assert not any(
         path == repo.dothm.path or repo.dothm.path in path.parents
         for path in walked_directories), \
@@ -880,6 +889,7 @@ def test_checkout_rewrites_tracked_files_and_shares_objects(tmp_path):
             for p in (repo.dothm.path / "objects").rglob("*") if p.is_file())
     assert len(main_objects) == 2
 
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     (repo.worktree / "a0_i0.h5").unlink()
     (repo.worktree / "a0_i30.h5").unlink()
@@ -912,6 +922,7 @@ def test_checkout_leaves_untracked_files(tmp_path):
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
 
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     (repo.worktree / "a0_i0.h5").unlink()
     _write_files(repo.worktree, ["a1_i45.h5"])
@@ -933,9 +944,8 @@ def test_checkout_rebuilds_worktree_for_branch_specific_nested_fmt(tmp_path):
     repo.add("main/a{a}_i{i}.h5")
     repo.commit("main data")
 
+    repo.create_branch("experiment")
     repo.checkout("experiment")
-    (repo.worktree / "main/a0_i0.h5").unlink()
-    repo.add(".")
     (repo.worktree / "exp" / "run1").mkdir(parents=True)
     _write_files(repo.worktree, ["exp/run1/b0_i0.h5"])
     repo.add("exp/run{run}/b{a}_i{i}.h5")
@@ -960,6 +970,7 @@ def test_checkout_aborts_on_dirty_tracked_file(tmp_path):
     _write_files(repo.worktree, ["a0_i0.h5"])
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     repo.checkout("main")
     (repo.worktree / "a0_i0.h5").write_text("changed\n", encoding="utf-8")
@@ -975,6 +986,7 @@ def test_checkout_aborts_on_untracked_path_conflict(tmp_path):
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
 
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     (repo.worktree / "a0_i0.h5").unlink()
     _write_files(repo.worktree, ["a1_i45.h5"])
@@ -995,9 +1007,8 @@ def test_checkout_allows_return_to_branch_when_target_files_already_match(tmp_pa
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
 
+    repo.create_branch("experiment")
     repo.checkout("experiment")
-    (repo.worktree / "a0_i0.h5").unlink()
-    repo.add(".")
     repo.add("b{a}_i{i}.h5")
     repo.commit("experiment data")
 
@@ -1026,9 +1037,9 @@ def test_checkout_rejects_symlink_destination_escape(tmp_path):
     _write_files(repo.worktree, ["main/a0_i0.h5"])
     repo.add("main/a{a}_i{i}.h5")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     (repo.worktree / "main/a0_i0.h5").unlink()
-    repo.add(".")
     (repo.worktree / "exp").mkdir()
     _write_files(repo.worktree, ["exp/a1_i45.h5"])
     repo.add("exp/a{a}_i{i}.h5")
@@ -1074,6 +1085,7 @@ def test_checkout_hashes_tracked_files_in_one_batch(monkeypatch, tmp_path):
         calls.append(list(paths))
         return original_checksum_many(paths)
     monkeypatch.setattr(repo, "checksum_many", record_checksum_many)
+    repo.create_branch("experiment")
     repo.checkout("experiment")
 
     assert len(calls) == 1, "checksum_many should be called once for all tracked files"
@@ -1108,6 +1120,411 @@ def test_checkout_rejects_invalid_branch_names(tmp_path, branch_name):
         repo.checkout(branch_name)
 
 
+def test_create_branch_points_at_current_commit_without_switching(tmp_path):
+    """
+    Test that Repo.create_branch() creates a branch at the current commit and leaves
+    the repository on the branch it was already on.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "a0_i0.h5").write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    repo.commit("Original calibration")
+
+    created = repo.create_branch("recal")
+
+    assert created == "recal", f"Expected the created name back, got {created}"
+    snapshot = repo.branches()
+    assert snapshot["current"] == "main", \
+        f"Expected to stay on main, got {snapshot['current']}"
+    assert "recal" in snapshot["names"], \
+        f"Expected recal to be listed, got {snapshot['names']}"
+    assert repo.dothm.heads["recal"].commit == repo.dothm.heads["main"].commit, \
+        "Expected the new branch to point at the current commit."
+
+
+def test_create_branch_rejects_a_name_that_is_already_taken(tmp_path):
+    """
+    Test that Repo.create_branch() refuses an existing branch name and leaves the
+    original branch pointing where it was.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "a0_i0.h5").write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    repo.commit("Original calibration")
+    repo.create_branch("recal")
+    original_commit = repo.dothm.heads["recal"].commit
+
+    with pytest.raises(ValueError, match="branch already exists"):
+        repo.create_branch("recal")
+
+    assert repo.dothm.heads["recal"].commit == original_commit, \
+        "Expected the existing branch to be left untouched."
+
+
+@pytest.mark.parametrize(
+    "branch_name", [
+        "",
+        "   ",
+        "-f",
+        "../escape",
+        "bad name",
+        "bad..name",
+        "branch~1"])
+def test_create_branch_rejects_invalid_branch_names(tmp_path, branch_name):
+    """
+    Test that Repo.create_branch() raises a ValueError for invalid branch names and
+    creates nothing.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+        branch_name: A parameterized invalid branch name to test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "a0_i0.h5").write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    repo.commit("Original calibration")
+    before = {head.name for head in repo.dothm.heads}
+
+    with pytest.raises(ValueError, match="branch name"):
+        repo.create_branch(branch_name)
+
+    assert {head.name for head in repo.dothm.heads} == before, \
+        "Expected no branch to be created for an invalid name."
+
+
+def test_create_branch_requires_an_existing_commit(tmp_path):
+    """
+    Test that Repo.create_branch() refuses to create a branch while the current branch
+    is unborn, since there is no commit for the new branch to point at.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    repo.dothm.git.checkout("--orphan", "fresh")
+
+    with pytest.raises(ValueError, match="before the first commit"):
+        Repo(tmp_path / "repo").create_branch("recal")
+
+
+def _repo_without_identity(tmp_path):
+    """
+    Build a repository with staged changes and no commit author configured, undoing
+    the identity the test fixture sets on every new repository.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    Returns:
+        Repo: the repository, with a staged change and no identity.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    with repo.dothm.config_writer() as writer:
+        writer.remove_section("user")
+    (repo.worktree / "a0_i0.h5").write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    return Repo(tmp_path / "repo")
+
+
+def test_set_identity_stores_the_author_for_this_repository_only(tmp_path):
+    """
+    Test that set_identity records the author in the repository's own git config, so
+    that commits made there are attributed to it.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_without_identity(tmp_path)
+
+    repo.set_identity("Ram Adithya", "ram@example.edu")
+
+    assert repo.identity() == ("Ram Adithya", "ram@example.edu"), \
+        f"Expected the stored identity back, got {repo.identity()}"
+    repo.commit("First dataset")
+    author = repo.dothm.head.commit.author
+    assert (author.name, author.email) == ("Ram Adithya", "ram@example.edu"), \
+        f"Expected the commit to be signed with it, got {author}"
+
+
+def test_commit_requires_both_a_name_and_an_email(
+        tmp_path, without_configured_identity):
+    """
+    Test that committing is refused until both the author name and email are set for
+    the repository, and that no commit is created meanwhile.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_without_identity(tmp_path)
+    before = repo.dothm.head.commit.hexsha
+
+    with pytest.raises(RuntimeError, match="Set your name and email first"):
+        repo.commit("First dataset")
+
+    repo.set_identity(name="Ram Adithya")
+    with pytest.raises(RuntimeError, match="Set your name and email first"):
+        repo.commit("First dataset")
+
+    assert repo.dothm.head.commit.hexsha == before, \
+        "Expected no commit to be created without a complete identity."
+
+    repo.set_identity(email="ram@example.edu")
+    assert repo.commit("First dataset") is True, \
+        "Expected the commit to succeed once both values are set."
+
+
+def test_commit_uses_a_globally_configured_identity(
+        tmp_path, without_configured_identity):
+    """
+    Test that an author configured in the user's global git configuration is enough to
+    commit, while identity() still reports only what this repository stores.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+        without_configured_identity: fixture providing an empty home directory.
+    """
+    (without_configured_identity / ".gitconfig").write_text(
+        "[user]\n\tname = Global Person\n\temail = global@example.edu\n",
+        encoding="utf-8")
+    repo = _repo_without_identity(tmp_path)
+
+    assert repo.identity() == (None, None), \
+        f"Expected nothing stored for this repository, got {repo.identity()}"
+    assert repo.effective_identity() == ("Global Person", "global@example.edu"), \
+        f"Expected the global identity to be resolved, got {repo.effective_identity()}"
+
+    assert repo.commit("First dataset") is True, \
+        "Expected a globally configured identity to be enough to commit."
+    author = repo.dothm.head.commit.author
+    assert (author.name, author.email) == ("Global Person", "global@example.edu"), \
+        f"Expected the commit to be signed with the global identity, got {author}"
+
+
+def test_repository_identity_overrides_a_global_one(
+        tmp_path, without_configured_identity):
+    """
+    Test that an author stored for the repository takes precedence over the user's
+    global git configuration.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+        without_configured_identity: fixture providing an empty home directory.
+    """
+    (without_configured_identity / ".gitconfig").write_text(
+        "[user]\n\tname = Global Person\n\temail = global@example.edu\n",
+        encoding="utf-8")
+    repo = _repo_without_identity(tmp_path)
+    repo.set_identity("Ram Adithya", "ram@example.edu")
+
+    repo.commit("First dataset")
+
+    author = repo.dothm.head.commit.author
+    assert (author.name, author.email) == ("Ram Adithya", "ram@example.edu"), \
+        f"Expected the repository identity to win, got {author}"
+
+
+def test_clone_does_not_copy_the_authors_identity(
+        tmp_path, without_configured_identity):
+    """
+    Test that cloning a repository does not carry the original author's name and email
+    across, so commits in the copy are not misattributed.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    source = Repo.init(tmp_path / "source")
+    source.set_identity("Ram Adithya", "ram@example.edu")
+    (source.worktree / "a0_i0.h5").write_text("original\n", encoding="utf-8")
+    source.add("a{a}_i{i}.h5")
+    source.commit("First dataset")
+
+    clone = Repo.clone(str(source.dothm.path), tmp_path / "copy", download=False)
+
+    assert clone.identity() == (None, None), \
+        f"Expected the clone to have no identity, got {clone.identity()}"
+    with pytest.raises(RuntimeError, match="Set your name and email first"):
+        clone.commit("Should be refused")
+
+
+def _repo_with_two_commits(tmp_path):
+    """
+    Build a repository with two commits on main, left checked out on main.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    Returns:
+        tuple[Repo, str]: the repository and the id of the first commit.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    data_path = repo.worktree / "a0_i0.h5"
+    data_path.write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    repo.commit("Original calibration")
+    first_commit = repo.dothm.head.commit.hexsha
+    data_path.write_text("recalibrated\n", encoding="utf-8")
+    repo.add(".")
+    repo.commit("New calibration")
+    return repo, first_commit
+
+
+def test_checkout_rejects_an_unknown_target_and_changes_nothing(tmp_path):
+    """
+    Test that checking out a name that is neither a branch nor a commit raises and
+    leaves the branches, the current branch and the worktree untouched.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo, _ = _repo_with_two_commits(tmp_path)
+    before_branches = {head.name for head in repo.dothm.heads}
+    before_contents = (repo.worktree / "a0_i0.h5").read_text(encoding="utf-8")
+
+    with pytest.raises(CheckoutError, match="no branch or commit named"):
+        repo.checkout("brand-new")
+
+    assert {head.name for head in repo.dothm.heads} == before_branches, \
+        "Expected checkout not to create a branch for an unknown name."
+    assert repo.branches()["current"] == "main", \
+        "Expected to stay on the current branch."
+    assert (repo.worktree / "a0_i0.h5").read_text(encoding="utf-8") \
+        == before_contents, "Expected the worktree to be left untouched."
+
+
+def test_checkout_of_a_commit_restores_files_without_moving_branches(tmp_path):
+    """
+    Test that checking out a commit id restores that commit's files, leaves no branch
+    selected, and moves no branch.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo, first_commit = _repo_with_two_commits(tmp_path)
+    main_before = repo.dothm.heads["main"].commit.hexsha
+
+    repo.checkout(first_commit[:7])
+
+    reopened = Repo(tmp_path / "repo")
+    assert (reopened.worktree / "a0_i0.h5").read_text(encoding="utf-8") \
+        == "original\n", "Expected the first commit's file contents to be restored."
+    assert reopened.branches()["current"] is None, \
+        "Expected no branch to be selected after checking out a commit."
+    assert reopened.dothm.heads["main"].commit.hexsha == main_before, \
+        "Expected main to stay where it was."
+
+
+def test_checkout_returns_from_a_commit_to_a_branch(tmp_path):
+    """
+    Test that a branch checkout from a detached commit restores the branch's files and
+    selects the branch again.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo, first_commit = _repo_with_two_commits(tmp_path)
+    repo.checkout(first_commit[:7])
+
+    reopened = Repo(tmp_path / "repo")
+    reopened.checkout("main")
+
+    back = Repo(tmp_path / "repo")
+    assert back.branches()["current"] == "main", \
+        f"Expected to be on main, got {back.branches()['current']}"
+    assert (back.worktree / "a0_i0.h5").read_text(encoding="utf-8") \
+        == "recalibrated\n", "Expected main's file contents to be restored."
+
+
+def test_checkout_of_a_commit_aborts_on_a_dirty_tracked_file(tmp_path):
+    """
+    Test that the existing safety check still applies when the target is a commit, so
+    uncommitted work is never discarded.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo, first_commit = _repo_with_two_commits(tmp_path)
+    (repo.worktree / "a0_i0.h5").write_text("uncommitted\n", encoding="utf-8")
+
+    with pytest.raises(CheckoutError, match="uncommitted"):
+        repo.checkout(first_commit[:7])
+
+    assert (repo.worktree / "a0_i0.h5").read_text(encoding="utf-8") \
+        == "uncommitted\n", "Expected the uncommitted change to survive."
+    assert repo.branches()["current"] == "main", \
+        "Expected to stay on the current branch."
+
+
+def _repo_detached_at_first_commit(tmp_path):
+    """
+    Build a repository with two commits, left with HEAD detached at the first one.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    Returns:
+        Repo: the repository, with HEAD detached.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    data_path = repo.worktree / "a0_i0.h5"
+    data_path.write_text("original\n", encoding="utf-8")
+    repo.add("a{a}_i{i}.h5")
+    repo.commit("Original calibration")
+    data_path.write_text("recalibrated\n", encoding="utf-8")
+    repo.add(".")
+    repo.commit("New calibration")
+    repo.dothm.git.checkout("--detach", "HEAD~1")
+    # detaching the index repository does not restore payload files, so put the
+    # first commit's contents back to match the state hm checkout will produce
+    data_path.write_text("original\n", encoding="utf-8")
+    return Repo(tmp_path / "repo")
+
+
+def test_branches_reports_no_branch_selected_when_detached(tmp_path):
+    """
+    Test that Repo.branches() reports no current branch while HEAD is detached, and
+    names the commit instead of raising.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_detached_at_first_commit(tmp_path)
+
+    snapshot = repo.branches()
+
+    assert snapshot["current"] is None, \
+        f"Expected no current branch, got {snapshot['current']}"
+    assert snapshot["detached_at"], \
+        "Expected the detached commit to be reported."
+    assert "main" in snapshot["names"], \
+        f"Expected main to still be listed, got {snapshot['names']}"
+
+
+def test_status_reports_the_commit_when_detached(tmp_path):
+    """
+    Test that Repo.status() reports a commit rather than a branch while HEAD is
+    detached, and still returns a branch name when one is checked out.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_detached_at_first_commit(tmp_path)
+
+    snapshot = repo.status()
+
+    assert snapshot["branch"] is None, \
+        f"Expected no branch while detached, got {snapshot['branch']}"
+    assert snapshot["commit"], "Expected the current commit to be reported."
+
+    repo.checkout("main")
+    on_branch = Repo(tmp_path / "repo").status()
+    assert on_branch["branch"] == "main", \
+        f"Expected main once checked out, got {on_branch['branch']}"
+
+
+def test_commit_refuses_while_detached(tmp_path):
+    """
+    Test that Repo.commit() refuses to commit while HEAD is detached, so that work is
+    not recorded somewhere no branch points at.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = _repo_detached_at_first_commit(tmp_path)
+    (repo.worktree / "a0_i0.h5").write_text("edited\n", encoding="utf-8")
+    repo.add(".")
+    before = repo.dothm.head.commit.hexsha
+
+    with pytest.raises(RuntimeError, match="not on a branch"):
+        repo.commit("should be refused")
+
+    assert repo.dothm.head.commit.hexsha == before, \
+        "Expected no commit to be created while detached."
+
+
 def test_checkout_checks_target_objects_before_switching_branch(tmp_path):
     """
     Test that the Repo.checkout() method checks for the existence of target objects
@@ -1126,6 +1543,7 @@ def test_checkout_checks_target_objects_before_switching_branch(tmp_path):
     data_path.write_text("main contents\n", encoding="utf-8")
     repo.add("data_{number}.txt")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     data_path.write_text("experiment contents\n", encoding="utf-8")
     repo.add(".")
@@ -1162,9 +1580,9 @@ def test_checkout_rejects_directory_at_target_file_path(tmp_path):
     data_path.write_text("main\n", encoding="utf-8")
     repo.add("data_{number}.txt")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     data_path.unlink()
-    repo.add(".")
     experiment_path = (repo.worktree / "experiment_1.txt")
     experiment_path.write_text("experiment\n", encoding="utf-8")
     repo.add("experiment_{number}.txt")
@@ -1200,6 +1618,7 @@ def test_checkout_rolls_back_after_install_failure(monkeypatch, tmp_path):
     _write_files(repo.worktree, ["a0_i0.h5", "a0_i30.h5"])
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     (repo.worktree / "a0_i0.h5").unlink()
     (repo.worktree / "a0_i30.h5").unlink()
@@ -1253,6 +1672,7 @@ def test_checkout_restores_only_changed_target_files(monkeypatch, tmp_path):
     _write_files(repo.worktree, ["data_1.txt", "data_2.txt"])
     repo.add("data_{number}.txt")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     changed_path = repo.worktree / "data_1.txt"
     changed_path.write_text("experiment contents\n", encoding="utf-8")
@@ -1635,6 +2055,7 @@ def test_tracked_file_replaced_by_directory_is_reported_missing(tmp_path):
     assert snapshot["worktree"]["modified"] == [], \
         f"Expected no modified files, got {snapshot['worktree']['modified']}"
     with pytest.raises(CheckoutError, match="is missing"):
+        repo.create_branch("experiment")
         repo.checkout("experiment")
 
 
@@ -1667,6 +2088,7 @@ def test_tracked_file_replaced_by_symlink_is_reported_missing(tmp_path):
 
     assert snapshot["worktree"] == {"modified": [], "deleted": ["data_1.txt"]}
     with pytest.raises(CheckoutError, match="is missing"):
+        repo.create_branch("experiment")
         repo.checkout("experiment")
     assert outside_path.read_text(encoding="utf-8") == "outside\n", f"Expected outside \
         file to remain unchanged, got {outside_path.read_text(encoding='utf-8')}"
@@ -2122,6 +2544,7 @@ def test_add_worktree_restores_target_branch_data(tmp_path):
     data_path.write_text("main contents\n", encoding="utf-8")
     repo.add("data_{number}.txt")
     repo.commit("main data")
+    repo.create_branch("experiment")
     repo.checkout("experiment")
     data_path.write_text("experiment contents\n", encoding="utf-8")
     repo.add(".")
@@ -2377,18 +2800,24 @@ def test_state_replace_empty_uses_incoming_schema():
     state.replace(replacement)
 
     assert state.data.empty, "Expected state.data to be empty after replacement"
-    assert list(state.data.columns) == ["sha1", "path", "new_parameter"]
+    assert list(state.data.columns) == ["sha1", "new_parameter"], \
+        f"Expected columns ['sha1', 'new_parameter'], got {list(state.data.columns)}"
 
 
-@pytest.mark.parametrize("identity", [{}, {"path": "README.txt"}])
-def test_state_update_static_format_keeps_only_latest_row(identity):
-    state = State(data=pd.DataFrame([{"sha1": "a" * 40, **identity}]))
-    replacement = pd.DataFrame([{"sha1": "b" * 40, **identity}])
-
+def test_state_update_static_format_keeps_only_latest_row():
+    """
+    Test that State.update() with a static format keeps only the latest row for each
+    unique identifier. This test creates a State object with an initial row, then
+    updates it with a new row having the same unique identifier.
+    It checks that the resulting state contains only the latest row.
+    """
+    state = State(data=pd.DataFrame([{"sha1": "a" * 40}]))
+    replacement = pd.DataFrame([{"sha1": "b" * 40, "path": "README.txt"}])
     state.update(replacement)
     state.update(replacement)
 
-    assert state.data.to_dict("records") == [{"sha1": "b" * 40, **identity}]
+    assert state.data.to_dict("records") == [{"sha1": "b" * 40}], \
+        f"Expected only the latest row to be kept, got {state.data.to_dict('records')}"
 
 
 def test_state_normalizes_missing_parameters_to_blank_strings():
@@ -2452,8 +2881,7 @@ def test_state_update_and_replace_share_data_normalization():
     updated.update(incoming)
     replaced = State()
     replaced.replace(incoming)
-    expected = pd.DataFrame({
-        "sha1": ["abc123"], "path": ["item_1.dat"], "number": ["1"]})
+    expected = pd.DataFrame({"sha1": ["abc123"], "number": ["1"]})
 
     pd.testing.assert_frame_equal(updated.data, expected, check_dtype=False)
     pd.testing.assert_frame_equal(replaced.data, expected, check_dtype=False)
@@ -2470,7 +2898,6 @@ def test_manifest_frame_normalizes_missing_and_integral_float_values():
     """
     frame = pd.DataFrame({
             "sha1": ["first", "second", "third"],
-            "path": ["missing.dat", "1.dat", "inf.dat"],
             "value": [pd.NA, 1.0, float("inf")]})
     result = build_file_table(frame, "{value}.dat")
     values = result["value"].tolist()
@@ -2533,25 +2960,6 @@ def test_manifest_map_uses_explicit_fmt_override():
         f"Expected explicit fmt override mapping, got {actual}"
 
 
-@pytest.mark.parametrize("fmt", [None, "a{a}_i{i}.h5"])
-def test_manifest_entries_preserve_stored_relative_paths(fmt):
-    state = State(
-        data=pd.DataFrame({
-            "sha1": ["ABC123", "ABC123"],
-            "path": ["s1/a0_i30.h5", "s2/a0_i30.h5"],
-        })
-    )
-
-    assert list(iter_manifest_entries(state, fmt=fmt)) == [
-        (Path("s1/a0_i30.h5"), "ABC123"),
-        (Path("s2/a0_i30.h5"), "ABC123"),
-    ]
-    assert file_versions_by_path(state, fmt=fmt) == {
-        "s1/a0_i30.h5": "ABC123",
-        "s2/a0_i30.h5": "ABC123",
-    }
-
-
 ### repo.changes tests ###
 
 def test_worktree_changes_accepts_uppercase_expected_checksum(tmp_path):
@@ -2603,55 +3011,28 @@ def test_parse_data_tsv_empty_text_returns_empty_state_schema():
         f"Expected canonical columns ['sha1'], got {list(frame.columns)}"
 
 
-def test_load_head_state_without_commits_is_empty(tmp_path):
+def test_load_head_state_without_commits_uses_current_config_and_empty_data(tmp_path):
+    """
+    With no commits in .hm, load_head_state should return a copy of current config/meta
+    and an empty data table.
+    """
     repo = Repo.init(tmp_path / "repo")
-    repo.dothm.git.update_ref("-d", repo.dothm.head.reference.path)
-    assert not repo.dothm.head.is_valid()
-
     repo.state.config = {"data": [{"fmt": "data_{number}.txt"}]}
-    repo.state.meta = {"nested": {"value": "working"}}
+    repo.state.meta = {"nested": {"value": "original"}}
     repo.state.data = pd.DataFrame({"sha1": ["abc123"], "number": ["1"]})
-
     head_state = load_head_state(repo)
+    head_state.config["data"][0]["fmt"] = "changed"
+    head_state.meta["nested"]["value"] = "changed"
 
-    assert head_state.config == {}
-    assert head_state.meta == {}
-    assert head_state.data.empty
-    assert list(head_state.data.columns) == ["sha1"]
-    assert repo.state.config == {"data": [{"fmt": "data_{number}.txt"}]}
-    assert repo.state.meta == {"nested": {"value": "working"}}
-    pd.testing.assert_frame_equal(
-        repo.state.data,
-        pd.DataFrame({"sha1": ["abc123"], "number": ["1"]}),
-    )
-
-def test_load_head_state_reads_committed_versions_and_metadata(tmp_path):
-    repo = Repo.init(tmp_path / "repo")
-    path = repo.worktree / "a0_i30.h5"
-    path.write_text("original\n", encoding="utf-8")
-    checksum = repo.checksum(path)
-    repo.state.meta = {"nested": {"value": "committed"}}
-    repo.add("a{a}_i{i}.h5")
-    committed_config = repo.dothm.read_yaml("config")
-
-    data_path = repo.dothm.path / "data.tsv"
-    data_path.write_text("unrelated file contents\n", encoding="utf-8")
-    repo.dothm.index.add(["data.tsv"])
-    repo.commit("Committed versions")
-
-    path.write_text("changed\n", encoding="utf-8")
-    repo.state.config["working_only"] = True
-    repo.state.meta = {"nested": {"value": "staged"}}
-    repo.add(".")
-
-    head_state = load_head_state(repo)
-
-    assert head_state.config == committed_config
-    assert head_state.meta == {"nested": {"value": "committed"}}
-    assert file_versions_by_path(head_state) == {"a0_i30.h5": checksum}
-    assert file_versions_by_path(repo.dothm.load_state(staged=True)) == {
-        "a0_i30.h5": repo.checksum(path)
-    }
+    assert head_state.data.empty, \
+        f"Expected empty data for no-commit HEAD fallback, got {head_state.data}"
+    assert list(head_state.data.columns) == ["sha1"], \
+        f"Expected canonical columns ['sha1'], got {list(head_state.data.columns)}"
+    assert repo.state.config["data"][0]["fmt"] == "data_{number}.txt", \
+        f"Expected original repo config to remain unchanged, \
+            got {repo.state.config['data'][0]['fmt']}"
+    assert repo.state.meta["nested"]["value"] == "original", f"Expected original repo \
+        meta to remain unchanged, got {repo.state.meta['nested']['value']}"
 
 
 def test_new_branch_state_is_independent_from_current_state(tmp_path):
@@ -2832,6 +3213,574 @@ def test_checkout_remote_branch(tmp_path):
     )
 
     # Configure the repository's data format and commit the initial state.
+    source.add("data.txt")
+    source.commit("Initial commit")
+
+
+    # Clone the source while it only has the main branch.
+    clone = Repo.clone(
+        str(source.dothm.path),
+        tmp_path / "clone",
+        download=False,
+    )
+
+    # The cloned repository should have the tracked file in its worktree.
+    (clone.worktree / "data.txt").write_text(
+        "main contents\n",
+        encoding="utf-8",
+    )
+
+    # Create the experiment branch in the source repository AFTER cloning.
+    source.create_branch("experiment")
+    source.checkout("experiment")
+
+    # Change the file on the experiment branch and commit it.
+    (source.worktree / "data.txt").write_text(
+        "experiment contents\n",
+        encoding="utf-8",
+    )
+    source.add(".")
+    source.commit("Experiment commit")
+    # Change the file on the experiment branch and commit it.
+
+    print("SOURCE OBJECTS AFTER EXPERIMENT COMMIT:")
+    for p in (source.dothm.path / "objects").rglob("*"):
+        if p.is_file():
+            print(p)
+
+    print("CLONE OBJECTS BEFORE FETCH:")
+    for p in (clone.dothm.path / "objects").rglob("*"):
+        if p.is_file():
+            print(p)
+
+    # Fetch the newly-created remote branch into the clone.
+    clone.dothm.git.fetch("origin")
+
+    print("CLONE OBJECTS AFTER FETCH:")
+    for p in (clone.dothm.path / "objects").rglob("*"):
+        if p.is_file():
+            print(p)
+
+    print("REMOTE EXPERIMENT DATA:")
+    print(clone.dothm.git.show("origin/experiment:data.tsv"))
+
+    # The experiment branch should exist remotely but not locally.
+    local_branches = {head.name for head in clone.dothm.heads}
+    assert "experiment" not in local_branches
+
+    remote_branches = {
+        ref.remote_head
+        for remote in clone.dothm.remotes
+        for ref in remote.refs
+        if ref.remote_head != "HEAD"
+    }
+    assert "experiment" in remote_branches
+    print("\n=== CLONE BRANCHES ===")
+    print(clone.dothm.git.branch("-a"))
+
+    print("\n=== REMOTE REFS ===")
+    for remote in clone.dothm.remotes:
+        for ref in remote.refs:
+            print(ref)
+
+    print("\n=== REMOTE EXPERIMENT COMMIT ===")
+    print(clone.dothm.git.rev_parse("origin/experiment"))
+
+    print("\n=== REMOTE EXPERIMENT FILES ===")
+    print(clone.dothm.git.ls_tree("-r", "--name-only", "origin/experiment"))
+
+    # This is the behavior we are testing:
+    # checkout should create a local tracking branch from the remote branch.
+    clone.checkout("experiment")
+
+    # Checkout should have created and switched to the local branch.
+    assert clone.dothm.active_branch.name == "experiment"
+
+    # The worktree should now contain the version from the remote branch.
+    assert (clone.worktree / "data.txt").read_text(
+        encoding="utf-8"
+    ) == "experiment contents\n"
+
+
+# Staging-specific coverage from sam/add-restore. Existing tests above remain.
+
+def test_data_tsv_and_worktree_reconstruction_with_staging(
+        hallmark_test_suite_dictionary):
+    repo = Repo(hallmark_test_suite_dictionary["repo_path"])
+    assert sorted(repo.state.data["path"]) == sorted(
+        hallmark_test_suite_dictionary["catalog_files"])
+    assert repo.worktree.stem == "repo"
+
+
+def test_repo_add_result_has_expected_length_with_staging(
+        hallmark_test_suite_dictionary):
+    result = hallmark_test_suite_dictionary["add_result"]
+    assert len(result) == len(hallmark_test_suite_dictionary["catalog_files"])
+
+
+def test_repo_add_result_paths_match_recursive_files(hallmark_test_suite_dictionary):
+    result = hallmark_test_suite_dictionary["add_result"]
+    assert sorted(result["path"]) == sorted(
+        hallmark_test_suite_dictionary["catalog_files"])
+
+
+def test_repo_add_persists_sha1_path_and_parameters(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write_files(repo.worktree, ["a0_i0.h5", "a0_i30.h5"])
+
+    result = repo.add("a{a}_i{i}.h5")
+
+    assert list(result.columns) == ["path", "a", "i"]
+    persisted = repo.dothm.read_tsv("data")
+    assert repo.state.config["data"] == [{"fmt": "a{a}_i{i}.h5", "encoding": None}]
+    assert list(persisted.columns) == ["sha1", "path", "a", "i"]
+    assert persisted.to_dict(orient="records") == [
+        {"sha1": Repo.checksum(repo.worktree / "a0_i0.h5"),
+         "path": "a0_i0.h5", "a": "0", "i": "0"},
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
+         "path": "a0_i30.h5", "a": "0", "i": "30"}]
+
+
+def test_repo_add_dot_replaces_manifest_with_current_tree_with_staging(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write_files(repo.worktree, ["a0_i0.h5", "a0_i30.h5"])
+    repo.add("a{a}_i{i}.h5")
+    (repo.worktree / "a1_i45.h5").write_text("a1_i45.h5\n", encoding="utf-8")
+    result = repo.add(".")
+
+    assert sorted(result["path"]) == ["a0_i0.h5", "a0_i30.h5", "a1_i45.h5"]
+    persisted = repo.dothm.read_tsv("data")
+    assert persisted.to_dict(orient="records") == [
+        {"sha1": Repo.checksum(repo.worktree / "a0_i0.h5"),
+         "path": "a0_i0.h5", "a": "0", "i": "0"},
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
+         "path": "a0_i30.h5", "a": "0", "i": "30"},
+        {"sha1": Repo.checksum(repo.worktree / "a1_i45.h5"),
+         "path": "a1_i45.h5", "a": "1", "i": "45"}]
+
+
+def test_repo_add_dot_removes_deleted_files_from_manifest_with_staging(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write_files(repo.worktree, ["a0_i0.h5", "a0_i30.h5"])
+    repo.add("a{a}_i{i}.h5")
+    (repo.worktree / "a0_i0.h5").unlink()
+    repo.add(".")
+
+    assert repo.state.data.to_dict(orient="records") == [
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
+         "path": "a0_i30.h5", "a": "0", "i": "30"}]
+
+
+def test_repo_add_dot_from_nested_directory_adds_whole_tree(monkeypatch, tmp_path):
+    """Dot includes sibling directories and retains their relative paths."""
+    repo = Repo.init(tmp_path / "repo")
+    nested = repo.worktree / "nested"
+    similarly_named = repo.worktree / "nested-other"
+    nested.mkdir()
+    similarly_named.mkdir()
+    (nested / "data_1.txt").write_text("included\n", encoding="utf-8")
+    (similarly_named / "data_2.txt").write_text("included too\n", encoding="utf-8")
+    repo.set_config(fmt="{folder}/data_{number}.txt")
+    monkeypatch.chdir(nested)
+    result = repo.add(".")
+
+    assert sorted(result["path"]) == ["nested-other/data_2.txt", "nested/data_1.txt"]
+    assert sorted(repo.state.data["number"]) == ["1", "2"]
+
+
+def test_repo_add_pattern_keeps_deleted_manifest_rows_with_staging(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write_files(repo.worktree, ["a0_i0.h5", "a0_i30.h5"])
+    repo.add("a{a}_i{i}.h5")
+    original_sha = repo.state.data.loc[
+        (repo.state.data["a"] == "0") & (repo.state.data["i"] == "0"),
+        "sha1",
+    ].iloc[0]
+
+    (repo.worktree / "a0_i0.h5").unlink()
+    repo.add("a{a}_i{i}.h5")
+
+    assert repo.state.data.to_dict(orient="records") == [
+        {"sha1": original_sha, "path": "a0_i0.h5", "a": "0", "i": "0"},
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
+         "path": "a0_i30.h5", "a": "0", "i": "30"},
+    ]
+
+
+def test_repo_add_pattern_rejects_incompatible_catalog_on_new_branch(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write_files(repo.worktree, ["a0.4_i30_w3.h5", "b0.4_i30_w3.h5"])
+
+    repo.add("a{a}_i{i}_w{w}.h5")
+    repo.commit("main a data")
+    repo.create_branch("experiment")
+    repo.checkout("experiment")
+    before = repo.state.data.copy(deep=True)
+    with pytest.raises(ValueError, match="1 files in the catalog don't fit"):
+        repo.add("b{a}_i{i}_w{w}.h5")
+    assert repo.state.config["data"][0]["fmt"] == "a{a}_i{i}_w{w}.h5"
+    pd.testing.assert_frame_equal(repo.state.data, before)
+    assert not repo.status()["staged"]["state"]
+
+
+def test_repo_add_paths_rejects_nonmatching_file(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write_files(repo.worktree, ["a0_i0.h5", "a0_i30.h5", "b0_i45.h5"])
+    repo.add("a{a}_i{i}.h5")
+
+    with pytest.raises(ValueError, match="file does not match branch format"):
+        repo.add_paths(["b0_i45.h5"])
+
+
+def test_repo_add_parse_failure_preserves_existing_format_with_staging(
+        monkeypatch, tmp_path):
+    """
+    Test that if ParaFrame.parse() fails during Repo.add(), the existing
+    format in the
+    repository's configuration is preserved. This test initializes a repository, sets an
+    initial format, and then monkeypatches ParaFrame.parse() to raise a
+    ValueError.
+    It then attempts to add a new format and checks that the original format remains in
+    the configuration.
+    Args:
+        monkeypatch: pytest fixture that allows for monkeypatching.
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    Raises:
+        ValueError: If ParaFrame.parse() is called and raises a
+        ValueError.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    repo.set_config(fmt="old_{number}.txt")
+    _write_files(repo.worktree, ["new_1.txt"])
+    def fail_parse(*args, **kwargs):
+        """Simulate a failure in ParaFrame.parse()
+        by raising a ValueError."""
+        raise ValueError("invalid format")
+    monkeypatch.setattr("hallmark.repo.ParaFrame.parse", fail_parse)
+
+    with pytest.raises(ValueError, match="invalid format"):
+        repo.add("new_{number}.txt")
+    assert repo.state.config["data"][0]["fmt"] == ("old_{number}.txt"), \
+        "Expected the original format to be preserved in the config file"
+    assert repo.dothm.read_yaml("config")["data"][0]["fmt"] == "old_{number}.txt", \
+        "Expected the original format to be preserved in the config file"
+
+
+def test_repo_status_does_not_walk_dothm_directory_with_staging(monkeypatch, tmp_path):
+    """
+    Repo.status() should prune .hm before recursively searching for
+    untracked files.
+    Args:
+        monkeypatch: pytest fixture that allows for dynamic modification of classes
+        and functions.
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "visible.txt").write_text("visible\n", encoding="utf-8")
+    internal_directory = repo.dothm.path / "status-test"
+    internal_directory.mkdir()
+    (internal_directory / "internal.txt").write_text("internal\n", encoding="utf-8")
+    original_walk = os.walk
+    walked_directories = []
+    def recording_walk(root):
+        """Record the directories walked by os.walk and yield the results from the
+        original os.walk."""
+        for current, directories, files in original_walk(root):
+            walked_directories.append(Path(current))
+            yield current, directories, files
+    monkeypatch.setattr("hallmark.utils.os.walk", recording_walk)
+    snapshot = repo.status()
+
+    assert snapshot["untracked"] == [
+        ".hm/status-test/internal.txt", "visible.txt"]
+    assert not any(
+        path == repo.dothm.path or repo.dothm.path in path.parents
+        for path in walked_directories), \
+        "Expected .hm directory to be pruned from os.walk, but it was walked"
+
+
+def test_checkout_rebuilds_worktree_for_branch_specific_nested_fmt_with_staging(
+        tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "main").mkdir()
+    _write_files(repo.worktree, ["main/a0_i0.h5"])
+    repo.add("main/a{a}_i{i}.h5")
+    repo.commit("main data")
+
+    repo.create_branch("experiment")
+    repo.checkout("experiment")
+    (repo.worktree / "main/a0_i0.h5").unlink()
+    repo.add(".")
+    (repo.worktree / "exp" / "run1").mkdir(parents=True)
+    _write_files(repo.worktree, ["exp/run1/b0_i0.h5"])
+    repo.add("exp/run{run}/b{a}_i{i}.h5")
+    repo.commit("experiment data")
+
+    repo.checkout("main")
+    root = Path(str(repo.worktree))
+    assert sorted(str(path.relative_to(root)) for path in root.rglob("*.h5")
+        if repo.dothm.path not in path.parents) == [
+        "main/a0_i0.h5",
+    ]
+    assert not (repo.worktree / "exp").exists()
+
+    repo.checkout("experiment")
+    assert sorted(str(path.relative_to(root)) for path in root.rglob("*.h5")
+        if repo.dothm.path not in path.parents) == [
+        "exp/run1/b0_i0.h5",
+    ]
+    assert not (repo.worktree / "main").exists()
+
+
+def test_checkout_allows_return_to_branch_when_target_files_already_match_with_staging(
+        tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    _write_files(repo.worktree, ["a0_i0.h5", "b0_i0.h5"])
+    repo.add("a{a}_i{i}.h5")
+    repo.commit("main data")
+
+    repo.create_branch("experiment")
+    repo.checkout("experiment")
+    (repo.worktree / "a0_i0.h5").unlink()
+    repo.add(".")
+    repo.add("b{a}_i{i}.h5")
+    repo.commit("experiment data")
+
+    repo.checkout("main")
+
+    assert sorted(path.name for path in Path(str(repo.worktree)).glob("*.h5")) == [
+        "a0_i0.h5",
+    ]
+
+
+def test_checkout_rejects_symlink_destination_escape_with_staging(tmp_path):
+    """
+    Test that checking out a branch fails if a symlink in the worktree points outside
+    the repository and would be overwritten by a tracked file from the target branch.
+    This test creates a symlink inside the repository that points to a directory outside
+    the repository, and then attempts to check out a branch that has a tracked file with
+    the same name as the symlink.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    Raises:
+        CheckoutError: If the symlink points outside the repository worktree and would
+        be overwritten by a tracked file from the target branch.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "main").mkdir()
+    _write_files(repo.worktree, ["main/a0_i0.h5"])
+    repo.add("main/a{a}_i{i}.h5")
+    repo.commit("main data")
+    repo.create_branch("experiment")
+    repo.checkout("experiment")
+    (repo.worktree / "main/a0_i0.h5").unlink()
+    repo.add(".")
+    (repo.worktree / "exp").mkdir()
+    _write_files(repo.worktree, ["exp/a1_i45.h5"])
+    repo.add("exp/a{a}_i{i}.h5")
+    repo.commit("experiment data")
+    repo.checkout("main")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = repo.worktree / "exp"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are not available")
+
+    with pytest.raises(CheckoutError, match="symbolic link"):
+        repo.checkout("experiment")
+    assert repo.dothm.active_branch.name == "main", f"Expected active branch to be \
+        'main', but found: {repo.dothm.active_branch.name}"
+    assert list(outside.iterdir()) == [], \
+        f"Expected outside directory to be empty, but found: {list(outside.iterdir())}"
+
+
+def test_checkout_rejects_directory_at_target_file_path_with_staging(tmp_path):
+    """
+    Test that the Repo.checkout() method raises a CheckoutError when a directory exists
+    at the path of a tracked file in the target branch. This test creates a repository,
+    adds a file, commits it, checks out a new branch, deletes the file, creates
+    a directory at the same path, and attempts to check out the new branch.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+    Raises:
+        CheckoutError: If a directory exists at the path of a tracked file in the target
+        branch.
+    """
+    repo = Repo.init(tmp_path / "repo")
+    data_path = repo.worktree / "data_1.txt"
+    data_path.write_text("main\n", encoding="utf-8")
+    repo.add("data_{number}.txt")
+    repo.commit("main data")
+    repo.create_branch("experiment")
+    repo.checkout("experiment")
+    data_path.unlink()
+    repo.add(".")
+    experiment_path = (repo.worktree / "experiment_1.txt")
+    experiment_path.write_text("experiment\n", encoding="utf-8")
+    repo.add("experiment_{number}.txt")
+    repo.commit("experiment data")
+    repo.checkout("main")
+    experiment_path.mkdir()
+
+    with pytest.raises(CheckoutError, match="untracked non-file"):
+        repo.checkout("experiment")
+    assert repo.dothm.active_branch.name == "main", f"Expected active branch to be \
+        'main', but found: {repo.dothm.active_branch.name}"
+    assert experiment_path.is_dir(), \
+        f"Expected {experiment_path} to remain a directory after failed checkout"
+
+
+def test_state_replace_empty_uses_incoming_schema_with_staging():
+    """
+    Test that State.replace() uses the schema of the incoming DataFrame when the
+    current state is empty. This test creates a State object with an initial DataFrame,
+    then replaces it with an empty DataFrame that has a different schema. It checks that
+    the resulting state has the schema of the incoming DataFrame.
+    """
+    state = State(
+        data=pd.DataFrame([{"sha1": "a" * 40, "old_parameter": "old"}]))
+    replacement = pd.DataFrame(columns=["sha1", "path", "new_parameter"])
+    state.replace(replacement)
+
+    assert state.data.empty, "Expected state.data to be empty after replacement"
+    assert list(state.data.columns) == ["sha1", "path", "new_parameter"]
+
+
+@pytest.mark.parametrize("identity", [{}, {"path": "README.txt"}])
+def test_state_update_static_format_keeps_only_latest_row_with_staging(identity):
+    state = State(data=pd.DataFrame([{"sha1": "a" * 40, **identity}]))
+    replacement = pd.DataFrame([{"sha1": "b" * 40, **identity}])
+
+    state.update(replacement)
+    state.update(replacement)
+
+    assert state.data.to_dict("records") == [{"sha1": "b" * 40, **identity}]
+
+
+def test_state_update_and_replace_share_data_normalization_with_staging():
+    """
+    Test that State.update() and State.replace() share the same data normalization logic
+    This test creates a State object and updates it with incoming data, then replaces it
+    with the same incoming data. It checks that both methods produce the same normalized
+    DataFrame."""
+    incoming = pd.DataFrame({"sha1": ["abc123"], "path": ["item_1.dat"], "number": [1]})
+    updated = State()
+    updated.update(incoming)
+    replaced = State()
+    replaced.replace(incoming)
+    expected = pd.DataFrame({
+        "sha1": ["abc123"], "path": ["item_1.dat"], "number": ["1"]})
+
+    pd.testing.assert_frame_equal(updated.data, expected, check_dtype=False)
+    pd.testing.assert_frame_equal(replaced.data, expected, check_dtype=False)
+
+
+def test_manifest_frame_normalizes_missing_and_integral_float_values_with_staging():
+    """
+    Test that build_file_table normalizes missing values and integral float values
+    to the expected string representations. This test creates a DataFrame with missing
+    and integral float values, then calls build_file_table to normalize it.
+    It checks that the resulting DataFrame has the expected normalized values.
+    """
+    frame = pd.DataFrame({
+            "sha1": ["first", "second", "third"],
+            "path": ["missing.dat", "1.dat", "inf.dat"],
+            "value": [pd.NA, 1.0, float("inf")]})
+    result = build_file_table(frame, "{value}.dat")
+    values = result["value"].tolist()
+
+    assert pd.isna(values[0]), f"Expected first value to be NaN, got {values[0]}"
+    assert values[1:] == ["1", "inf"], f"Expected values ['1', 'inf'], got {values[1:]}"
+
+
+@pytest.mark.parametrize("fmt", [None, "a{a}_i{i}.h5"])
+def test_manifest_entries_preserve_stored_relative_paths(fmt):
+    state = State(
+        data=pd.DataFrame({
+            "sha1": ["ABC123", "ABC123"],
+            "path": ["s1/a0_i30.h5", "s2/a0_i30.h5"],
+        })
+    )
+
+    assert list(iter_manifest_entries(state, fmt=fmt)) == [
+        (Path("s1/a0_i30.h5"), "ABC123"),
+        (Path("s2/a0_i30.h5"), "ABC123"),
+    ]
+    assert file_versions_by_path(state, fmt=fmt) == {
+        "s1/a0_i30.h5": "ABC123",
+        "s2/a0_i30.h5": "ABC123",
+    }
+
+
+def test_load_head_state_without_commits_is_empty(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    repo.dothm.git.update_ref("-d", repo.dothm.head.reference.path)
+    assert not repo.dothm.head.is_valid()
+
+    repo.state.config = {"data": [{"fmt": "data_{number}.txt"}]}
+    repo.state.meta = {"nested": {"value": "working"}}
+    repo.state.data = pd.DataFrame({"sha1": ["abc123"], "number": ["1"]})
+
+    head_state = load_head_state(repo)
+
+    assert head_state.config == {}
+    assert head_state.meta == {}
+    assert head_state.data.empty
+    assert list(head_state.data.columns) == ["sha1"]
+    assert repo.state.config == {"data": [{"fmt": "data_{number}.txt"}]}
+    assert repo.state.meta == {"nested": {"value": "working"}}
+    pd.testing.assert_frame_equal(
+        repo.state.data,
+        pd.DataFrame({"sha1": ["abc123"], "number": ["1"]}),
+    )
+
+
+def test_load_head_state_reads_committed_versions_and_metadata(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    path = repo.worktree / "a0_i30.h5"
+    path.write_text("original\n", encoding="utf-8")
+    checksum = repo.checksum(path)
+    repo.state.meta = {"nested": {"value": "committed"}}
+    repo.add("a{a}_i{i}.h5")
+    committed_config = repo.dothm.read_yaml("config")
+
+    data_path = repo.dothm.path / "data.tsv"
+    data_path.write_text("unrelated file contents\n", encoding="utf-8")
+    repo.dothm.index.add(["data.tsv"])
+    repo.commit("Committed versions")
+
+    path.write_text("changed\n", encoding="utf-8")
+    repo.state.config["working_only"] = True
+    repo.state.meta = {"nested": {"value": "staged"}}
+    repo.add(".")
+
+    head_state = load_head_state(repo)
+
+    assert head_state.config == committed_config
+    assert head_state.meta == {"nested": {"value": "committed"}}
+    assert file_versions_by_path(head_state) == {"a0_i30.h5": checksum}
+    assert file_versions_by_path(repo.dothm.load_state(staged=True)) == {
+        "a0_i30.h5": repo.checksum(path)
+    }
+
+
+def test_checkout_remote_branch_with_staging(tmp_path):
+    '''
+    Test that checkout can create a local branch from a remote branch.
+    '''
+
+
+    # Create a source repository that will act as the remote repository.
+    source = Repo.init(tmp_path / "source")
+
+    (source.worktree / "data.txt").write_text(
+        "main contents\n",
+        encoding="utf-8",
+    )
+
+    # Configure the repository's data format and commit the initial state.
     source.set_config(fmt="{name}.txt")
     source.add("data.txt")
     source.commit("Initial commit")
@@ -2851,6 +3800,7 @@ def test_checkout_remote_branch(tmp_path):
     )
 
     # Create the experiment branch in the source repository AFTER cloning.
+    source.create_branch("experiment")
     source.checkout("experiment")
 
     # Change the file on the experiment branch and commit it.

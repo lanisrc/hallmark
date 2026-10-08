@@ -194,7 +194,10 @@ def status(repo):
         snapshot = repo.status()
     # if there is a snapshot of the current branch, display its name to the user
     if snapshot:
-        click.echo(f'On branch {snapshot["branch"]}')
+        if snapshot["branch"] is None:
+            click.echo(f'Not on a branch; at commit {snapshot["commit"]}')
+        else:
+            click.echo(f'On branch {snapshot["branch"]}')
 
     staged = snapshot["staged"]
     worktree = snapshot["worktree"]
@@ -408,16 +411,68 @@ def log(repo):
         click.echo(history)
 
 
-@hallmark.command(short_help="List hallmark branches.")
+_IDENTITY_KEYS = {"user.name": "name", "user.email": "email"}
+
+_IDENTITY_USAGE = (
+    'Usage: hm config user.name "Your Name"'
+    ' or hm config user.email "you@example.com"')
+
+
+@hallmark.command(short_help="Set the commit author for this repository.")
+@click.argument("key", required=False)
+@click.argument("value", required=False)
 @click.pass_obj
-def branch(repo):
-    """List local hallmark branches."""
+def config(repo, key, value):
+    """Save KEY as VALUE for this repository only.
+
+    KEY is `user.name` or `user.email`. These name the author of commits
+    made here. They are not shared by `hm clone`.
+    """
+    if key not in _IDENTITY_KEYS:
+        raise ClickException(_IDENTITY_USAGE)
+
+    if value is None:
+        with _translate_cli_errors(*_REPO_READ_ERRORS):
+            current = dict(zip(
+                ("user.name", "user.email"), repo.effective_identity()))[key]
+        if current is None:
+            raise ClickException(
+                f'{key} is not set. Set it with: hm config {key} "..."')
+        click.echo(current)
+        return
+
+    if not value.strip():
+        raise ClickException(_IDENTITY_USAGE)
+
+    with _translate_cli_errors(*_REPO_READ_ERRORS):
+        repo.set_identity(**{_IDENTITY_KEYS[key]: value.strip()})
+
+    click.echo(f"Set {key} for this repository.")
+
+
+@hallmark.command(short_help="List or create hallmark branches.")
+@click.argument("name", required=False)
+@click.pass_obj
+def branch(repo, name):
+    """List local hallmark branches, or create NAME at the current commit.
+
+    Creating a branch does not switch to it; use `hm checkout NAME` for that.
+    """
+    if name is not None:
+        with _translate_cli_errors(*_REPO_READ_ERRORS):
+            created = repo.create_branch(name)
+        click.echo(f'Created branch "{created}".')
+        return
+
     # use the _translate_cli_errors context manager to handle specific exceptions
     with _translate_cli_errors(*_REPO_READ_ERRORS):
         snapshot = repo.branches()
     # if there is a snapshot of the branches, display them to the user
     if snapshot:
         current = snapshot["current"]
+
+    if current is None:
+        click.echo(f'* (no branch; at commit {snapshot["detached_at"]})')
 
     for name in snapshot["names"]:
         prefix = "*" if name == current else " "
@@ -428,10 +483,11 @@ def branch(repo):
 @click.argument("target_branch")
 @click.pass_obj
 def checkout(repo, target_branch):
-    """Switch branches and rewrite tracked files from branch state.
+    """Switch to TARGET and rewrite tracked files from its state.
 
-    This is analogous to `git checkout BRANCH`.
-    If the branch does not exist, it is created from the current branch.
+    TARGET may be an existing branch or a commit id. A commit id leaves you on
+    no branch, so use `hm branch NAME` to create one before committing again.
+    An unrecognized TARGET is an error and changes nothing.
     Only hallmark-tracked files are rewritten; unrelated files are left
     alone unless they block restoration of a tracked path.
     """
@@ -441,7 +497,12 @@ def checkout(repo, target_branch):
         switched = repo.checkout(target_branch)
 
     if switched:
-        click.echo(f'Switched to branch "{target_branch}".')
+        snapshot = repo.branches()
+        if snapshot["current"] is None:
+            click.echo(
+                f'Now at commit {snapshot["detached_at"]}; not on a branch.')
+        else:
+            click.echo(f'Switched to branch "{snapshot["current"]}".')
 
 
 @hallmark.command(short_help="Download files from the configured data remote.")

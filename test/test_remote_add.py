@@ -69,9 +69,11 @@ def test_remote_catalog_clone_and_branches_keep_payloads_separate(
     source.add("https://example.test/data/", filter="*.fits")
     source.commit("Remote catalog")
     repo = Repo.clone(str(source.dothm.path), tmp_path / "copy", download=False)
+    repo.set_identity("Hallmark Tests", "tests@example.invalid")
     assert repo.dothm.head.commit.hexsha == source.dothm.head.commit.hexsha
     assert repo.status()["worktree"]["deleted"] == []
     original = repo.dothm.active_branch.name
+    repo.create_branch("notes")
     repo.checkout("notes")
     repo.add("https://example.test/data/", filter="*.txt")
     with pytest.raises(CheckoutError, match="Commit"):

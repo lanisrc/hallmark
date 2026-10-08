@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from configparser import NoOptionError, NoSectionError
 from functools import cached_property
 from pathlib import Path
 from typing import Optional, Union
@@ -229,6 +230,33 @@ remote:
         except GitCommandError as exc:
             raise DothmError(f'Failed to link "{path}": {exc}')
         return Dothm(path)
+
+    def set_identity(
+        self,
+        name: Optional[str] = None,
+        email: Optional[str] = None,
+    ) -> None:
+        with self.config_writer() as writer:
+            if name is not None:
+                writer.set_value("user", "name", name)
+            if email is not None:
+                writer.set_value("user", "email", email)
+
+    def _read_identity(self, reader) -> tuple[Optional[str], Optional[str]]:
+        values = []
+        for key in ("name", "email"):
+            try:
+                value = str(reader.get_value("user", key)).strip()
+            except (NoSectionError, NoOptionError):
+                value = ""
+            values.append(value or None)
+        return values[0], values[1]
+
+    def identity(self) -> tuple[Optional[str], Optional[str]]:
+        return self._read_identity(self.config_reader("repository"))
+
+    def effective_identity(self) -> tuple[Optional[str], Optional[str]]:
+        return self._read_identity(self.config_reader())
 
     def load_state(self, revision=None, *, staged=False) -> State:
         if revision is None:
@@ -449,7 +477,9 @@ remote:
             and path not in paths
         ]
         if for_deletion:
-            self.index.remove(for_deletion, working_tree=False)
+            # These are generated metadata files. Leaving them on disk makes
+            # Git treat them as untracked blockers when another branch has them.
+            self.index.remove(for_deletion, working_tree=True, force=True)
 
         self.write_yaml(state.config, "config")
         self.write_yaml(state.meta, "meta")

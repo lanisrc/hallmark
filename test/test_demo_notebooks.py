@@ -47,15 +47,22 @@ def demo_dataset(tmp_path):
     "demo_python.ipynb",
     "demo_add.ipynb",
 ])
-def test_demo_notebook_workflow(tmp_path, demo_dataset, notebook):
+def test_demo_notebook_workflow(tmp_path, request, notebook):
     """Execute every code cell, retaining state and failing on the first error.
 
     JSON loading avoids adding Jupyter dependencies to the test suite. Bash cells
     run in one shell and Python cells in one interpreter. Only the documented SSH
     URL is replaced; discovery, downloads, clones, and local commands are real.
     """
-    document = json.loads((DEMO_DIR / notebook).read_text(encoding="utf-8"))
-    cells = [(index, "".join(cell["source"]).replace(DEMO_URL, demo_dataset))
+    notebook_path = DEMO_DIR / notebook
+    dataset_url = DEMO_URL
+    if notebook == "demo_add.ipynb":
+        # Retain staging workflow coverage without changing the codex demos.
+        notebook_path = Path(__file__).parent / "fixtures" / notebook
+    else:
+        dataset_url = request.getfixturevalue("demo_dataset")
+    document = json.loads(notebook_path.read_text(encoding="utf-8"))
+    cells = [(index, "".join(cell["source"]).replace(DEMO_URL, dataset_url))
              for index, cell in enumerate(document["cells"], start=1)
              if cell["cell_type"] == "code"]
     # Include the checkout for subprocesses even when the package is not installed.

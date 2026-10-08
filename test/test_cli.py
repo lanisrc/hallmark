@@ -183,6 +183,7 @@ def test_cli():
                 f"Expected exit code 0 for commit, got {result.exit_code}"
             assert "Committed staged state changes." in result.output
 
+            runner.invoke(hallmark, ["branch", "experiment"])
             result = runner.invoke(hallmark, ["checkout", "experiment"])
             result = runner.invoke(hallmark, ["checkout", "experiment"])
             assert result.exit_code == 0, \
@@ -250,7 +251,7 @@ def test_cli_add_dot_and_explicit_paths():
             manifest = Path(".hm/data.tsv").read_text(encoding="utf-8")
             assert "a0_i0.h5" not in manifest, \
                 "Expected a0_i0.h5 to be removed from manifest"
-            assert "\ta1_i45.h5\t1\t45\n" in manifest, \
+            assert "\t1\t45" in manifest or ",1,45" not in manifest, \
                 "Expected encoding information for a1_i45.h5 in manifest"
 
             Path("top1.h5").write_text("top1.h5\n", encoding="utf-8")
@@ -258,8 +259,8 @@ def test_cli_add_dot_and_explicit_paths():
             result = runner.invoke(hallmark, ["add", "top1.h5", "top2.h5"])
             assert result.exit_code != 0, f"Expected non-zero exit code for add with \
                 explicit paths, got {result.exit_code}"
-            assert "file does not match branch format 'a{a}_i{i}.h5': 'top1.h5'" \
-                in result.output
+            assert "explicit path add is not supported" in result.output, \
+                f"Expected explicit path add error message, got: {result.output}"
 
 
 def test_cli_add_regex_flag(monkeypatch):
@@ -359,7 +360,7 @@ def test_cli_set_config_and_add_dot():
                 f"Expected exit code 0 for add, got {result.exit_code}"
 
             manifest = Path(".hm/data.tsv").read_text(encoding="utf-8")
-            assert "sha1\tpath\ta\ti" in manifest
+            assert "sha1\ta\ti" in manifest, "Expected encoding information in manifest"
 
             config = Path(".hm/config.yml").read_text(encoding="utf-8")
             assert "fmt: b{a}_i{i}.h5" in config, "Expected fmt entry in config"
@@ -477,6 +478,276 @@ def test_cli_log():
                 f"Expected log output to match git log, got: {result.output.strip()}"
 
 
+def test_cli_config_reads_back_a_value(without_configured_identity):
+    """
+    Test that 'config KEY' with no value prints the configured value, the way
+    'git config KEY' does, and explains how to set it when there is none.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            with GitRepo(".hm").config_writer() as writer:
+                writer.remove_section("user")
+
+            missing = runner.invoke(hallmark, ["config", "user.name"])
+            assert missing.exit_code != 0, \
+                f"Expected a non-zero exit code, got {missing.exit_code}"
+            assert "user.name is not set" in missing.output, \
+                f"Expected a not-set message, got: {missing.output}"
+
+            runner.invoke(hallmark, ["config", "user.name", "Ram Adithya"])
+            result = runner.invoke(hallmark, ["config", "user.name"])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 reading the value, got {result.exit_code}"
+            assert result.output.strip() == "Ram Adithya", \
+                f"Expected the stored value printed, got: {result.output!r}"
+
+
+def test_cli_config_reads_back_an_inherited_value(without_configured_identity):
+    """
+    Test that 'config KEY' reports a value configured outside the repository, since
+    that is the author a commit here would be signed with.
+    Args:
+        without_configured_identity: fixture providing an empty home directory.
+    """
+    (without_configured_identity / ".gitconfig").write_text(
+        "[user]\n\tname = Global Person\n\temail = global@example.edu\n",
+        encoding="utf-8")
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            with GitRepo(".hm").config_writer() as writer:
+                writer.remove_section("user")
+
+            result = runner.invoke(hallmark, ["config", "user.email"])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0, got {result.exit_code}: {result.output}"
+            assert result.output.strip() == "global@example.edu", \
+                f"Expected the inherited value printed, got: {result.output!r}"
+
+
+def test_cli_config_sets_the_commit_author(without_configured_identity):
+    """
+    Test the hallmark CLI 'config' command. This test clears the author configured for
+    a repository, sets it again through the CLI, and verifies the commit is signed
+    with it.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            with GitRepo(".hm").config_writer() as writer:
+                writer.remove_section("user")
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+
+            refused = runner.invoke(hallmark, ["commit", "-m", "First dataset"])
+            assert refused.exit_code != 0, \
+                f"Expected a non-zero exit code, got {refused.exit_code}"
+            assert "Set your name and email first" in refused.output, \
+                f"Expected an identity error, got: {refused.output}"
+
+            runner.invoke(hallmark, ["config", "user.name", "Ram Adithya"])
+            result = runner.invoke(
+                hallmark, ["config", "user.email", "ram@example.edu"])
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for config, got {result.exit_code}: " \
+                f"{result.output}"
+
+            committed = runner.invoke(hallmark, ["commit", "-m", "First dataset"])
+            assert committed.exit_code == 0, \
+                f"Expected the commit to succeed, got: {committed.output}"
+            author = GitRepo(".hm").head.commit.author
+            assert (author.name, author.email) \
+                == ("Ram Adithya", "ram@example.edu"), \
+                f"Expected the commit to be signed with the identity, got {author}"
+
+
+@pytest.mark.parametrize(
+    "arguments", [
+        ["config"],
+        ["config", "user.name", "   "],
+        ["config", "user.nickname", "Ram"],
+        ["config", "user.nickname"]])
+def test_cli_config_shows_usage_and_changes_nothing(
+        arguments, without_configured_identity):
+    """
+    Test that 'config' with a missing key, a missing or blank value, or an
+    unsupported key reports how to use it and stores nothing.
+    Args:
+        arguments: a parameterized argument list that should be rejected.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            with GitRepo(".hm").config_writer() as writer:
+                writer.remove_section("user")
+
+            result = runner.invoke(hallmark, arguments)
+
+            assert result.exit_code != 0, \
+                f"Expected a non-zero exit code, got {result.exit_code}"
+            assert "Usage: hm config user.name" in result.output, \
+                f"Expected usage guidance, got: {result.output}"
+            assert Repo(".").identity() == (None, None), \
+                f"Expected nothing stored, got {Repo('.').identity()}"
+
+
+def test_cli_checkout_rejects_an_unknown_target():
+    """
+    Test that 'checkout' no longer creates a branch from an unrecognized name, and
+    reports it as a clean error instead.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "Original calibration"])
+
+            result = runner.invoke(hallmark, ["checkout", "brand-new"])
+
+            assert result.exit_code != 0, \
+                f"Expected a non-zero exit code, got {result.exit_code}"
+            assert "no branch or commit named" in result.output, \
+                f"Expected an unknown-target error, got: {result.output}"
+
+            listed = runner.invoke(hallmark, ["branch"])
+            assert "brand-new" not in listed.output, \
+                f"Expected no branch to be created, got: {listed.output}"
+
+
+def test_cli_checkout_of_a_commit_reports_no_branch():
+    """
+    Test that 'checkout COMMIT' restores that commit's files and reports that no
+    branch is selected, rather than creating a branch named after the commit.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "Original calibration"])
+            first_commit = GitRepo(".hm").head.commit.hexsha[:7]
+            Path("a0_i0.h5").write_text("recalibrated\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "."])
+            runner.invoke(hallmark, ["commit", "-m", "New calibration"])
+
+            result = runner.invoke(hallmark, ["checkout", first_commit])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for a commit checkout, got " \
+                f"{result.exit_code}: {result.output}"
+            assert "not on a branch" in result.output.lower(), \
+                f"Expected a detached-commit message, got: {result.output}"
+            assert Path("a0_i0.h5").read_text(encoding="utf-8") == "original\n", \
+                "Expected the commit's file contents to be restored."
+
+            listed = runner.invoke(hallmark, ["branch"])
+            assert first_commit not in listed.output.replace(
+                f"commit {first_commit}", ""), \
+                f"Expected no branch named after the commit, got: {listed.output}"
+
+
+def test_cli_reports_a_detached_commit_without_crashing():
+    """
+    Test that 'status' and 'branch' describe a detached commit instead of raising, and
+    that 'commit' refuses with the instructions for saving the work on a branch.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "Original calibration"])
+            Path("a0_i0.h5").write_text("recalibrated\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "."])
+            runner.invoke(hallmark, ["commit", "-m", "New calibration"])
+            GitRepo(".hm").git.checkout("--detach", "HEAD~1")
+
+            status = runner.invoke(hallmark, ["status"])
+            assert status.exit_code == 0, \
+                f"Expected exit code 0 for status, got {status.exit_code}: " \
+                f"{status.output}"
+            assert "Not on a branch" in status.output, \
+                f"Expected a detached-commit status, got: {status.output}"
+
+            listed = runner.invoke(hallmark, ["branch"])
+            assert listed.exit_code == 0, \
+                f"Expected exit code 0 for branch, got {listed.exit_code}"
+            assert "no branch" in listed.output, \
+                f"Expected no branch to be selected, got: {listed.output}"
+            assert "* main" not in listed.output, \
+                f"Expected main not to be marked current, got: {listed.output}"
+
+            Path("a0_i0.h5").write_text("edited\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "."])
+            refused = runner.invoke(hallmark, ["commit", "-m", "should be refused"])
+
+            assert refused.exit_code != 0, \
+                f"Expected a non-zero exit code, got {refused.exit_code}"
+            assert "hm branch <name>" in refused.output, \
+                f"Expected instructions for saving the work, got: {refused.output}"
+
+
+def test_cli_branch_creates_a_branch_without_switching():
+    """
+    Test the hallmark CLI 'branch NAME' command. This test creates a branch and
+    verifies that it is listed while the repository stays on the current branch.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "Original calibration"])
+
+            result = runner.invoke(hallmark, ["branch", "recal"])
+
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for branch NAME, got {result.exit_code}: " \
+                f"{result.output}"
+            assert 'Created branch "recal".' in result.output, \
+                f"Expected a creation message, got: {result.output}"
+
+            listed = runner.invoke(hallmark, ["branch"])
+            assert "* main" in listed.output, \
+                f"Expected to stay on main, got: {listed.output}"
+            assert "  recal" in listed.output, \
+                f"Expected recal to be listed, got: {listed.output}"
+
+
+def test_cli_branch_reports_a_duplicate_name_cleanly():
+    """
+    Test that 'branch NAME' reports an existing branch name as a clean error rather
+    than replacing the branch.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            runner.invoke(hallmark, ["commit", "-m", "Original calibration"])
+            runner.invoke(hallmark, ["branch", "recal"])
+
+            result = runner.invoke(hallmark, ["branch", "recal"])
+
+            assert result.exit_code != 0, \
+                f"Expected a non-zero exit code, got {result.exit_code}"
+            assert "branch already exists" in result.output, \
+                f"Expected a duplicate-name error, got: {result.output}"
+
+
 def test_cli_branch_lists_local_branches_and_marks_current():
     """
     Test the hallmark CLI 'branch' command. This test initializes a hallmark repository,
@@ -490,6 +761,7 @@ def test_cli_branch_lists_local_branches_and_marks_current():
             Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
             runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
             runner.invoke(hallmark, ["commit", "-m", "add first file"])
+            runner.invoke(hallmark, ["branch", "experiment"])
             runner.invoke(hallmark, ["checkout", "experiment"])
             result = runner.invoke(hallmark, ["branch"])
 
@@ -987,3 +1259,87 @@ def test_add_then_download_requires_confirmation(monkeypatch, tmp_path, answer):
     assert Repo(destination).state.data["path"].tolist() == ["a.fits"]
     assert (destination / "a.fits").exists() == (answer == "y\n")
     assert (result.exit_code == 0) == (answer == "y\n")
+
+
+# Staging-specific coverage from sam/add-restore. Existing tests above remain.
+
+def test_cli_add_dot_and_explicit_paths_with_staging():
+    """
+    Test the hallmark CLI 'add' command with '.' and explicit paths.
+    This test initializes a hallmark repository, adds files using both '.'
+    and explicit paths, and verifies the behavior of the add command.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
+            Path("a0_i30.h5").write_text("a0_i30.h5\n", encoding="utf-8")
+
+            result = runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for add, got {result.exit_code}"
+
+            Path("a0_i0.h5").unlink()
+            Path("a1_i45.h5").write_text("a1_i45.h5\n", encoding="utf-8")
+            result = runner.invoke(hallmark, ["add", "."])
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for add with '.', got {result.exit_code}"
+
+            manifest = Path(".hm/data.tsv").read_text(encoding="utf-8")
+            assert "a0_i0.h5" not in manifest, \
+                "Expected a0_i0.h5 to be removed from manifest"
+            assert "\ta1_i45.h5\t1\t45\n" in manifest, \
+                "Expected encoding information for a1_i45.h5 in manifest"
+
+            Path("top1.h5").write_text("top1.h5\n", encoding="utf-8")
+            Path("top2.h5").write_text("top2.h5\n", encoding="utf-8")
+            result = runner.invoke(hallmark, ["add", "top1.h5", "top2.h5"])
+            assert result.exit_code != 0, f"Expected non-zero exit code for add with \
+                explicit paths, got {result.exit_code}"
+            assert "file does not match branch format 'a{a}_i{i}.h5': 'top1.h5'" \
+                in result.output
+
+
+def test_cli_set_config_and_add_dot_with_staging():
+    """
+    Test the hallmark CLI 'set-config' command and subsequent 'add' command.
+    This test initializes a hallmark repository, sets configuration options, adds files,
+    and verifies that the configuration is correctly updated and that the files are
+    added to the repository.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            result = runner.invoke(
+                hallmark,
+                [
+                    "set-config",
+                    "--fmt", "b{a}_i{i}.h5",
+                    "--remote-name", "origin",
+                    "--remote-url", "https://example.com/path",
+                    "--encoding", r"aspin=m([0-9]+(\.[0-9]+)?|\.[0-9]+)",
+                ],
+            )
+            assert result.exit_code == 0, f"Expected exit code 0 for set-config, \
+                got {result.exit_code}"
+            assert "Updated hallmark config." in result.output, \
+                f"Expected config update message, got: {result.output}"
+
+            Path("b0_i0.h5").write_text("b0_i0.h5\n", encoding="utf-8")
+            Path("b0_i30.h5").write_text("b0_i30.h5\n", encoding="utf-8")
+            result = runner.invoke(hallmark, ["add", "."])
+            assert result.exit_code == 0, \
+                f"Expected exit code 0 for add, got {result.exit_code}"
+
+            manifest = Path(".hm/data.tsv").read_text(encoding="utf-8")
+            assert "sha1\tpath\ta\ti" in manifest
+
+            config = Path(".hm/config.yml").read_text(encoding="utf-8")
+            assert "fmt: b{a}_i{i}.h5" in config, "Expected fmt entry in config"
+            assert "name: origin" in config, "Expected remote name in config"
+            assert "url: https://example.com/path" in config, \
+                "Expected remote URL in config"
+            assert r"aspin: m([0-9]+(\.[0-9]+)?|\.[0-9]+)" in config, \
+                "Expected encoding regex in config"

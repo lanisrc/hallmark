@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from git.exc import GitCommandError
 
-from .branches import checkout, add_worktree
+from .branches import (
+    checkout, create_branch, current_branch, current_commit, add_worktree)
 from ..remote.add import add_remote, is_remote_catalog
 from .dothm import Dothm
 from .state import State
@@ -690,7 +691,8 @@ class Repo:
         )
 
         return {
-            "branch": self.dothm.active_branch.name,
+            "branch": current_branch(self),
+            "commit": current_commit(self),
             "staged": {
                 "state": state_changes,
                 "added": staged_added,
@@ -774,6 +776,14 @@ class Repo:
             bool: True if a commit was made, False otherwise.
         """
         msg = require_nonempty_string(msg, label="commit message")
+        if current_branch(self) is None:
+            raise RuntimeError(
+                "You're not on a branch. Run hm branch <name> then "
+                "hm checkout <name> to save changes.")
+        if not all(self.dothm.effective_identity()):
+            raise RuntimeError(
+                'Set your name and email first: hm config user.name "..." '
+                'and hm config user.email "..."')
         changes = (
             self.dothm.index.diff("HEAD")
             if self.dothm.head.is_valid() else self.dothm.index.entries
@@ -899,9 +909,64 @@ class Repo:
                 - ``current`` (string): Active branch name
                 - ``names``: All branch names
         '''
-        current = self.dothm.active_branch.name
+        current = current_branch(self)
         names = sorted(head.name for head in self.dothm.heads)
-        return {"current": current, "names": names}
+        detached_at = None if current is not None else current_commit(self)
+        return {
+            "current": current,
+            "names": names,
+            "detached_at": detached_at}
+
+    def set_identity(
+        self,
+        name: Optional[str] = None,
+        email: Optional[str] = None,
+    ) -> None:
+        '''
+        Save the commit author name and email for this repository only.
+
+        Args:
+            name (string | None): Author name to store, if given.
+            email (string | None): Author email to store, if given.
+        '''
+        self.dothm.set_identity(name=name, email=email)
+
+    def identity(self) -> Tuple[Optional[str], Optional[str]]:
+        '''
+        Return the commit author name and email set for this repository.
+
+        Returns:
+            tuple[string | None, string | None]: The stored name and email,
+            each ``None`` when it has not been set for this repository.
+        '''
+        return self.dothm.identity()
+
+    def effective_identity(self) -> Tuple[Optional[str], Optional[str]]:
+        '''
+        Return the commit author name and email git will actually sign with.
+
+        Values stored for this repository take precedence, falling back to the
+        user's global and system git configuration.
+
+        Returns:
+            tuple[string | None, string | None]: The resolved name and email,
+            each ``None`` when it is not configured at any level.
+        '''
+        return self.dothm.effective_identity()
+
+    def create_branch(self, name: str) -> str:
+        '''
+        Create a branch at the current commit without switching to it.
+
+        Args:
+            name (string): Name for the new branch.
+        Returns:
+            string: The created branch name.
+        Raises:
+            ValueError: If the repository has no commits, the name is
+                invalid, or a branch of that name already exists.
+        '''
+        return create_branch(self, name)
 
     def checkout(self, target_branch: str) -> bool:
         '''

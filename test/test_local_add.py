@@ -60,7 +60,10 @@ def _assert_status(repo, *, state=(), added=(), modified=(), deleted=(),
     worktree = {"modified": sorted(worktree_modified),
                 "deleted": sorted(worktree_deleted)}
     assert Repo(repo.worktree).status() == {
-        "branch": branch, "staged": staged, "worktree": worktree,
+        "branch": branch,
+        "commit": (repo.dothm.head.commit.hexsha[:7]
+                   if repo.dothm.head.is_valid() else None),
+        "staged": staged, "worktree": worktree,
         "untracked": sorted(untracked), "remote_catalog": False,
     }
     lines = [f"On branch {branch}"]
@@ -343,6 +346,7 @@ def test_pattern_change_counts_only_incompatible_catalog_rows(local_repo):
 def test_new_branch_can_stage_removals_then_use_its_own_pattern(local_repo):
     repo = local_repo
     _seed(repo)
+    _invoke("branch", "experiment")
     _invoke("checkout", "experiment")
     for path in repo.worktree.glob("*.h5"):
         path.unlink()
@@ -509,6 +513,7 @@ def test_commit_rejects_edit_after_add_and_succeeds_after_readd(
     _invoke("add", "../../a0_i30.h5")
     _assert_status(repo, state=["data.tsv"], modified=["a0_i30.h5"])
     _invoke("commit", "-m", "Current file contents")
+    _invoke("branch", "experiment")
     _invoke("checkout", "experiment")
     _assert_status(repo, branch="experiment")
 
@@ -590,6 +595,7 @@ def test_remote_format_update_preserves_catalog_without_sha1(
     assert saved.state.config["data"][0]["fmt"] == "{name}.fits"
     assert saved.status() == {
         "branch": "main",
+        "commit": saved.dothm.head.commit.hexsha[:7],
         "staged": {
             "state": ["config.yml"],
             "added": [],
