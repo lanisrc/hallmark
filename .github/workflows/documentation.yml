@@ -20,8 +20,9 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - uses: actions/checkout@v6
-
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -31,16 +32,12 @@ jobs:
 
       - name: Build docs
         run: |
-          sphinx-build -b html doc doc/_build
-          test -f doc/_build/py-modindex.html
-
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+          sphinx-build -W --keep-going doc "${{ runner.temp }}/hallmark-docs"
 
       - name: Upload documentation
         uses: actions/upload-pages-artifact@v4
         with:
-          path: doc/_build
+          path: "${{ runner.temp }}/hallmark-docs"
 
       - name: Deploy to GitHub Pages
         id: deployment

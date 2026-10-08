@@ -1,21 +1,19 @@
-*
-!*/
-
-!*.*py
-!*.*ml
-!*file
-!*.py.old
-
 __pycache__/
+*.py[cod]
 *.egg-info/
-
+*.py.old
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.DS_Store
 .ipynb_checkpoints/
-
-!*.md
-!*.rst
 
 # Ignore Sphinx build output by default
 _build/
 
-/demo/
 /cli_test_repos/

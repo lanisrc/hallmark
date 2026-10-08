@@ -4,6 +4,13 @@
     contain the root `toctree` directive.
 
 ..  include:: ../README.rst
+    :end-before: Private data remotes
+
+For private datasets, see :doc:`private_data` for SSH setup, CLI workflows,
+Python examples and troubleshooting.
+
+See :doc:`backends` to add a data service or combine several servers under
+one catalog.
 
 ..  toctree::
     :maxdepth: 2
@@ -11,6 +18,8 @@
 
     design
     usecase
+    private_data
+    backends
     api
 
 

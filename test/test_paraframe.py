@@ -100,7 +100,8 @@ def test_glob_search_applies_final_wildcard_for_short_format(tmp_path):
 
 def test_glob_search_excludes_directories(tmp_path):
     """
-    Test that ParaFrame.glob_search correctly excludes directories from the results.
+    Test that ParaFrame.glob_search correctly excludes directories from the
+    results.
     Args:
         tmp_path (Path): Temporary directory provided by pytest for testing.
     """
@@ -119,7 +120,8 @@ def test_glob_search_excludes_directories(tmp_path):
 
 def test_glob_search_rejects_nonmapping_encoding_entries(tmp_path):
     """
-    Test that ParaFrame.glob_search raises a ValueError when the encoding specifications
+    Test that ParaFrame.glob_search raises a ValueError when the encoding
+    specifications
     provided are not dictionaries.
     Args:
         tmp_path (Path): Temporary directory provided by pytest for testing.
@@ -152,7 +154,8 @@ def test_glob_search_encoding_true_rejects_noniterable_encodings(tmp_path):
 
 def test_parse_accepts_single_encoding_mapping(tmp_path):
     """
-    Test that ParaFrame.parse correctly accepts a single encoding mapping and extracts
+    Test that ParaFrame.parse correctly accepts a single encoding
+    mapping and extracts
     the expected parameter values from the file names.
     Args:
         tmp_path (Path): Temporary directory provided by pytest for testing.
@@ -170,7 +173,8 @@ def test_parse_accepts_single_encoding_mapping(tmp_path):
 
 def test_parse_encoding_false_ignores_invalid_encoding_specs(tmp_path):
     """
-    Test that ParaFrame.parse ignores encoding spec validation when encoding=False.
+    Test that ParaFrame.parse ignores encoding spec validation when
+    encoding=False.
     Args:
         tmp_path (Path): Temporary directory provided by pytest for testing.
     """
@@ -188,7 +192,8 @@ def test_parse_encoding_false_ignores_invalid_encoding_specs(tmp_path):
 
 def test_parse_encoding_true_requires_matching_fmt_spec(tmp_path):
     """
-    Test that ParaFrame.parse raises when encoding=True and no matching fmt encoding
+    Test that ParaFrame.parse raises when encoding=True and no matching
+    fmt encoding
     entry exists.
     Args:
         tmp_path (Path): Temporary directory provided by pytest for testing.
@@ -207,7 +212,8 @@ def test_parse_encoding_true_requires_matching_fmt_spec(tmp_path):
 
 def test_parse_encoding_true_rejects_nonstring_patterns(tmp_path):
     """
-    Test that ParaFrame.parse raises when an encoding regex value is not a string.
+    Test that ParaFrame.parse raises when an encoding regex value is not
+    a string.
     Args:
         tmp_path (Path): Temporary directory provided by pytest for testing.
     Raises:
@@ -225,7 +231,8 @@ def test_parse_encoding_true_rejects_nonstring_patterns(tmp_path):
 
 def test_parse_skips_files_that_fail_to_match_after_encoding(tmp_path, capsys):
     """
-    Test that ParaFrame.parse silently skips (and reports) a globbed file whose
+    Test that ParaFrame.parse silently skips (and reports) a globbed
+    file whose
     encoded name no longer matches the parse template, rather than raising.
     Args:
         tmp_path (Path): Temporary directory provided by pytest for testing.
@@ -247,15 +254,15 @@ def test_parse_skips_files_that_fail_to_match_after_encoding(tmp_path, capsys):
         f"Expected a 'Failed to parse' message, got: {captured.out!r}"
 
 
-### _resolve_encoding_spec tests ###
+### _find_encoding_settings tests ###
 
 def test_resolve_encoding_spec_narrows_to_matching_entry_fmt():
     """
-    Test that _resolve_encoding_spec uses a narrower entry "fmt" as fmt_enc when
+    Test that _find_encoding_settings uses a narrower entry "fmt" as fmt_enc when
     that entry's fmt is found within the full searched fmt.
     """
     encodings = [{"fmt": "a_{aspin}.dat", "encoding": {"aspin": r"m([0-9]+)"}}]
-    yaml_encodings, fmt_enc = ParaFrame._resolve_encoding_spec(
+    yaml_encodings, fmt_enc = ParaFrame._find_encoding_settings(
         "prefix_a_{aspin}.dat", encodings, encoding=True)
 
     assert fmt_enc == "a_{aspin}.dat", \
@@ -266,7 +273,7 @@ def test_resolve_encoding_spec_narrows_to_matching_entry_fmt():
 
 def test_resolve_encoding_spec_rejects_nondict_encoding_value():
     """
-    Test that _resolve_encoding_spec raises when an encoding spec's "encoding"
+    Test that _find_encoding_settings raises when an encoding spec's "encoding"
     value is not itself a dictionary.
     Raises:
         ValueError: If the "encoding" value in the matching encoding spec is not a
@@ -275,12 +282,12 @@ def test_resolve_encoding_spec_rejects_nondict_encoding_value():
     encodings = {"fmt": "a_{n}.dat", "encoding": "not-a-dict"}
 
     with pytest.raises(ValueError, match="must be a dictionary"):
-        ParaFrame._resolve_encoding_spec("a_{n}.dat", encodings, encoding=True)
+        ParaFrame._find_encoding_settings("a_{n}.dat", encodings, encoding=True)
 
 
 def test_resolve_encoding_spec_rejects_empty_regex_spec():
     """
-    Test that _resolve_encoding_spec raises when the matching encoding spec has
+    Test that _find_encoding_settings raises when the matching encoding spec has
     no non-empty regex patterns.
     Raises:
         ValueError: If the matching encoding spec has no non-empty regex patterns.
@@ -288,15 +295,15 @@ def test_resolve_encoding_spec_rejects_empty_regex_spec():
     encodings = {"fmt": "a_{n}.dat", "encoding": {"n": ""}}
 
     with pytest.raises(ValueError, match="has no regex spec"):
-        ParaFrame._resolve_encoding_spec("a_{n}.dat", encodings, encoding=True)
+        ParaFrame._find_encoding_settings("a_{n}.dat", encodings, encoding=True)
 
 
 def test_resolve_encoding_spec_requires_encodings_when_encoding_true():
     """
-    Test that _resolve_encoding_spec raises when encoding=True but no encodings
+    Test that _find_encoding_settings raises when encoding=True but no encodings
     were provided at all.
     Raises:
         ValueError: If encoding=True but no encodings were provided.
     """
     with pytest.raises(ValueError, match="missing from hallmark.yml"):
-        ParaFrame._resolve_encoding_spec("a_{n}.dat", None, encoding=True)
+        ParaFrame._find_encoding_settings("a_{n}.dat", None, encoding=True)

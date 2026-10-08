@@ -7,13 +7,14 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 import os
 import sys
+from importlib.metadata import version as get_version
 
 sys.path.insert(0, os.path.abspath("../mod"))
 
 project = 'hallmark'
 copyright = '2025, the Hallmark Authors'
 author = 'the Hallmark Authors'
-release = '0.2'
+release = get_version('hallmark')
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -39,4 +40,4 @@ modindex_common_prefix = ["hallmark."]
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
 html_theme = 'alabaster'
-html_static_path = ['_static']
+html_static_path = []

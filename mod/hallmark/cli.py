@@ -18,21 +18,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import click
-import requests
 import yaml
 from click import ClickException
 from git.exc import GitError
 
 from . import Repo
-from .helper_functions import validate_path_component
-from .repo_builder import build_repo
-from .downloader import (
-    BULK_DOWNLOAD_WARNING_FILE_COUNT,
-    DownloadError,
-    download_remote_data,
-    select_download_files)
+from .remote.download import DownloadError
+from .remote.discovery import path_matches
 from .error import CheckoutError, CloneError
-from .repo_config import normalize_tsv_name
 
 
 # use a context manager to translate application errors into clean Click errors
@@ -69,40 +62,6 @@ _REPO_READ_ERRORS = (
     ValueError,
     FileNotFoundError,
     CheckoutError)
-
-# exception types translated to a clean CLI error by the hallmark build command
-_BUILD_DATASET_ERRORS = (
-    RuntimeError,
-    ValueError,
-    FileNotFoundError,
-    FileExistsError,
-    GitError,
-    yaml.YAMLError)
-
-
-def _confirm_bulk_download(
-    selected_files,
-    assume_yes: bool,
-    ) -> None:
-    """
-    Used by _run_download.
-    Prompt the user for confirmation if the number of selected files exceeds
-    the warning threshold and the user has not opted to assume yes.
-    Args:
-        selected_files (list): List of files selected for download.
-        assume_yes (bool): Flag indicating whether to assume yes for prompts.
-    Raises:
-        ClickException: If the user does not confirm the download.
-    """
-    file_count = len(selected_files)
-    if (
-        file_count >= BULK_DOWNLOAD_WARNING_FILE_COUNT
-        and not assume_yes):
-        click.echo(
-            f"Selected {file_count} files for download.\n"
-            "The total size is not recorded and may be very large.")
-        click.confirm("Continue?", abort=True)
-
 
 def _report_download_results(results: dict) -> None:
     """
@@ -142,33 +101,31 @@ def _report_download_results(results: dict) -> None:
     raise ClickException(f"Failed to download {failed} file(s)")
 
 
-def _run_download(
-    repo,
-    selected_files,
-    output_path,
-    *,
-    max_workers,
-    assume_yes,
-    remote_name=None,
-    ) -> None:
+def _run_download(repo, plan, *, max_workers):
     """
-    Used by download and clone.
-    Confirm, execute, and report one selected download."""
-    # confirm with user if the number of selected files exceeds warning threshold
-    _confirm_bulk_download(selected_files, assume_yes)
-    # download the selected files from the remote repository
-    results = download_remote_data(
-        repo,
-        output_path,
-        max_workers=max_workers,
-        show_progress=True,
-        selected_files=selected_files,
-        remote_name=remote_name)
-    # report the results of the download operation to the user
+    Display a download plan, request approval, and report the results.
+
+    Args:
+        repo: The hallmark repository object.
+        plan (DownloadPlan): Files, source, and destination to display.
+        max_workers (int): Maximum concurrent download workers.
+
+    Raises:
+        Abort: If a nonempty download is declined.
+        ClickException: If any file transfers fail.
+        DownloadError: If the download cannot be started.
+    """
+    click.echo(plan.summary())
+    if not plan.file_count:
+        click.echo("No files selected for download.")
+        return
+    click.confirm("Download these files?", default=False, abort=True)
+    results = repo.download(plan, approved=True, max_workers=max_workers,
+                            progress=True)
     _report_download_results(results)
 
 
-@click.group()
+@click.group(name="hm")
 @click.version_option()
 @click.pass_context
 def hallmark(ctx):
@@ -178,7 +135,7 @@ def hallmark(ctx):
     manage data products in a complex workflow.
     """
     # if the invoked subcommand is one of the commands that does not require a repo
-    if ctx.invoked_subcommand in [None, "init", "clone", "build"]:
+    if ctx.invoked_subcommand in [None, "init", "clone"]:
         # return early without attempting to open a repository
         return
     # attempt to open the hallmark repository in the current directory
@@ -186,19 +143,25 @@ def hallmark(ctx):
         ctx.obj = Repo(".")
 
 
-@hallmark.command(short_help="Initialize a hallmark repository.")
-@click.argument("path")
-def init(path):
-    """Initialize a hallmark repository at PATH.
+def _load_backend_options(path):
+    """Read a backend's configuration from a YAML mapping."""
+    if path is None:
+        return None
+    with Path(path).open(encoding="utf-8") as handle:
+        options = yaml.safe_load(handle)
+    if not isinstance(options, dict):
+        raise ValueError("Backend options file must contain a YAML mapping")
+    return options
 
-    If PATH ends with `.hm`, a bare repository is created.
-    Otherwise, a `.hm` directory is created inside PATH.
-    """
-    # attempt to initialize the hallmark repository at the specified path
+
+@hallmark.command(short_help="Initialize an empty local repository.")
+@click.argument("path", default=".")
+def init(path):
     with _translate_cli_errors(
-        GitError,
-        prefix=("Failed to initialize hallmark repository " f'at "{path}"')):
+        GitError, ValueError, OSError,
+        prefix=f'Failed to initialize hallmark repository at "{path}"'):
         Repo.init(path)
+    click.echo(f'Successfully initialized "{path}"')
 
 
 @hallmark.command(short_help="Show information of the current directory.")
@@ -228,8 +191,8 @@ def status(repo):
     worktree = snapshot["worktree"]
     untracked = snapshot["untracked"]
 
-    def emit_section(title, entries, fg):
-        if not entries:
+    def print_section(title, entries, fg):
+        if not any(paths for _, paths in entries):
             return
         click.echo("")
         click.secho(title, fg=fg)
@@ -237,7 +200,7 @@ def status(repo):
             for path in paths:
                 click.echo("  " + click.style(f"{label}:   {path}", fg=fg))
 
-    emit_section(
+    print_section(
         "Changes to be committed:",
         [
             ("state", staged["state"]),
@@ -247,7 +210,7 @@ def status(repo):
         ],
         "green",
     )
-    emit_section(
+    print_section(
         "Changes not staged for commit:",
         [
             ("modified", worktree["modified"]),
@@ -264,7 +227,10 @@ def status(repo):
     if not any((staged["state"], staged["added"], staged["modified"], staged["deleted"],
                 worktree["modified"], worktree["deleted"], untracked)):
         click.echo("")
-        click.echo("nothing to commit, working tree clean")
+        if snapshot.get("remote_catalog"):
+            click.echo("nothing to commit, remote catalog unchanged")
+        else:
+            click.echo("nothing to commit, working tree clean")
 
 
 @hallmark.command(short_help="Add files to hallmark index.")
@@ -275,22 +241,43 @@ def status(repo):
     default=False,
     show_default=True,
     help="Enable regex-based encoding rules from config.yml.")
+@click.option("--auth", help="Local SSH authentication profile.")
+@click.option("--backend", help="Registered remote data backend.")
+@click.option("--backend-options", type=click.Path(exists=True, dir_okay=False),
+              help="YAML mapping of backend-specific options.")
+@click.option("--filter", "filters", multiple=True, help="Select remote paths by glob.")
+@click.option("--fmt", "remote_fmt",
+              help="Remote filename format; otherwise use a URL pattern.")
 @click.argument("inputs", nargs=-1, required=True)
 @click.pass_obj
-def add(repo, encoding, inputs):
+def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmt):
     """Add files to the hallmark index.
 
-    `hallmark add [--regex] FORMAT` uses the branch format string workflow.
-    `hallmark add "."` rebuilds the manifest from current files that match
+    A remote URL or URL pattern stages a catalog without downloading files
+    or committing. Use --fmt and --filter to select remote paths.
+
+    `hm add [--regex] FORMAT` uses the branch format string workflow.
+    `hm add "."` rebuilds the manifest from current files that match
     the branch `fmt` in `config.yml`.
     Explicit path inputs such as shell-expanded `*` are not supported yet
     with the parameter-based manifest format.
     """
+    with _translate_cli_errors(ValueError, OSError, yaml.YAMLError):
+        options = _load_backend_options(backend_options)
+    remote_options = dict(auth=auth, backend=backend,
+                          backend_options=options,
+                          filter=filters or None, remote_fmt=remote_fmt)
+    if len(inputs) != 1 and any(value is not None for value in remote_options.values()):
+        raise ClickException("Remote add accepts one URL at a time")
     # attempt to add the specified files to the hallmark index, handling any errors
-    with _translate_cli_errors(RuntimeError, ValueError, FileNotFoundError):
+    with _translate_cli_errors(RuntimeError, ValueError, OSError, yaml.YAMLError):
         # if there is only one input, use the add method for a single input
         if len(inputs) == 1:
-            pf = repo.add(inputs[0], encoding)
+            remote = "://" in inputs[0]
+            if remote or any(value is not None for value in remote_options.values()):
+                pf = repo.add(inputs[0], encoding, progress=True, **remote_options)
+            else:
+                pf = repo.add(inputs[0], encoding)
         # oterhwise, use the add_paths method for multiple inputs
         else:
             pf = repo.add_paths(list(inputs))
@@ -306,13 +293,21 @@ def add(repo, encoding, inputs):
 @click.option("--fmt")
 @click.option("--remote-name")
 @click.option("--remote-url")
+@click.option("--remote-auth",
+              help="Local SSH profile name. An empty string removes the reference.")
+@click.option("--remote-backend", help="Registered data backend name.")
+@click.option("--remote-backend-options", type=click.Path(exists=True, dir_okay=False),
+              help="YAML mapping of backend-specific options.")
 @click.option("--encoding", "encodings", multiple=True)
 @click.pass_obj
-def set_config(repo, fmt, remote_name, remote_url, encodings):
+def set_config(repo, fmt, remote_name, remote_url, remote_auth, remote_backend,
+               remote_backend_options, encodings):
     """Update the current branch config.yml."""
     # if no config changes are requested, raise a ClickException to inform the user
     if (
-    fmt is None and remote_name is None and remote_url is None and not encodings):
+    fmt is None and remote_name is None and remote_url is None
+    and remote_auth is None and remote_backend is None
+    and remote_backend_options is None and not encodings):
         raise ClickException("No config changes requested.")
     encoding_updates = {}
     for item in encodings:
@@ -324,12 +319,16 @@ def set_config(repo, fmt, remote_name, remote_url, encodings):
         encoding_updates[field.strip()] = regex
 
     # use the _translate_cli_errors context manager to handle specific exceptions
-    with _translate_cli_errors(RuntimeError, ValueError, FileNotFoundError):
+    with _translate_cli_errors(RuntimeError, ValueError, OSError, yaml.YAMLError):
+        options = _load_backend_options(remote_backend_options)
         repo.set_config(
             fmt=fmt,
             remote_name=remote_name,
             remote_url=remote_url,
-            encoding_updates=encoding_updates or None)
+            encoding_updates=encoding_updates or None,
+            remote_auth=remote_auth,
+            remote_backend=remote_backend,
+            remote_backend_options=options)
 
     click.echo("Updated hallmark config.")
 
@@ -400,291 +399,105 @@ def checkout(repo, target_branch):
         click.echo(f'Switched to branch "{target_branch}".')
 
 
-@hallmark.command(
-    short_help="Download files from the configured data remote.")
+@hallmark.command(short_help="Download files from the configured data remote.")
 @click.argument("files", nargs=-1)
-@click.option(
-    "--tsv",
-    "tsv_names",
-    multiple=True,
-    help="Download every file represented by a configured TSV. "
-         "May be repeated.")
-@click.option(
-    "--all",
-    "download_all",
-    is_flag=True,
-    help="Download every configured TSV, static file, and metadata file.")
-@click.option(
-    "--remote",
-    "remote_name",
-    help="Name of the configured remote to use.")
-@click.option(
-    "--output",
-    type=click.Path(file_okay=False),
-    help="Output directory. Defaults to the repository worktree.")
-@click.option(
-    "--max-workers",
-    type=click.IntRange(min=1),
-    default=4,
-    show_default=True,
-    help="Number of concurrent downloads.")
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show the selected files without downloading them.")
-@click.option(
-    "-y",
-    "--yes",
-    is_flag=True,
-    help="Skip the bulk-download confirmation.")
+@click.option("--tsv", "tsv_names", multiple=True,
+              help="Select a catalog TSV. May be repeated.")
+@click.option("--all", "download_all", is_flag=True,
+              help="Select all cataloged files.")
+@click.option("--filter", "filters", multiple=True,
+              help="Select paths matching a glob. ** matches recursively. "
+                   "May be repeated.")
+@click.option("--fmt", help="Select paths matching a filename format.")
+@click.option("--remote", "remote_name",
+              help="Name of the configured data remote to use.")
+@click.option("--output", type=click.Path(file_okay=False),
+              help="Output directory. Defaults to the repository worktree.")
+@click.option("--max-workers", type=click.IntRange(min=1), default=4,
+              show_default=True)
+@click.option("--dry-run", is_flag=True,
+              help="Show the download plan using only local catalog metadata.")
 @click.pass_obj
-def download(repo, files, tsv_names, download_all, remote_name, output, max_workers,
-             dry_run, yes):
+def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
+             output, max_workers, dry_run):
     """
-    Download files from the configured data remote. Options allow for selecting
-    specific files, TSVs, or downloading all files. Supports concurrent downloads
-    and dry-run mode for previewing selected files.
+    Download selected files from a configured data remote.
 
-    Options:
-        --tsv: Download every file represented by a configured TSV. May be repeated.
-        --all: Download every configured TSV, static file, and metadata file.
-        --remote: Name of the configured remote to use.
-        --output: Output directory. Defaults to the repository worktree.
-        --max-workers: Number of concurrent downloads. Default is 4.
-        --dry-run: Show the selected files without downloading them.
-        -y, --yes: Skip the bulk-download confirmation.
-
-    Raises:
-        ClickException: If there are any issues with the provided arguments or
-            during the download process.
+    Preview the selection with --dry-run. Every nonempty download displays
+    its plan and asks for confirmation before transferring files.
     """
-    # do not allow --all to be combined with file paths or --tsv
     if download_all and (files or tsv_names):
         raise ClickException("--all cannot be combined with file paths or --tsv")
-    # require at least one of file paths, --tsv, or --all to be provided
-    if not files and not tsv_names and not download_all:
-        raise ClickException("Provide one or more file paths, --tsv, or --all")
-
-    # if an output directory is specified, use it; otherwise, use the repo worktree
-    if output:
-        output_path = Path(output).expanduser()
-    elif repo.worktree is not None:
-        output_path = Path(repo.worktree)
-    # output is required when downloading from a bare .hm repository
-    else:
-        raise ClickException(
-            "--output is required when downloading from a bare .hm repository")
-
-    # use the _translate_cli_errors context manager to handle DownloadError exceptions
-    with _translate_cli_errors(DownloadError):
-        selected_files = select_download_files(
-            repo,
-            file_paths=files,
-            tsv_names=tsv_names,
-            all_files=download_all)
-        click.echo(f"Selected {len(selected_files)} file(s) "f"for {output_path}")
-
-        # don't actually download the files if --dry-run is specified
+    if not files and not tsv_names and not download_all and not filters and not fmt:
+        raise ClickException("Provide file paths, --tsv, --all, --filter, or --fmt")
+    if repo.worktree is None and output is None:
+        raise ClickException("--output is required when downloading from a bare repo")
+    with _translate_cli_errors(DownloadError, ValueError):
+        plan = repo.plan_download(
+            output, file_paths=files, tsv_names=tsv_names, all_files=download_all,
+            filter=filters or None, fmt=fmt, remote_name=remote_name)
         if dry_run:
-            # limit the number of files to preview to avoid overwhelming the user
-            preview_limit = 20
-            # for each selected file, print its relative path to the user
-            for rel_path, _sha1 in selected_files[:preview_limit]:
-                click.echo(f"  {rel_path.as_posix()}")
-
-            remaining = len(selected_files) - preview_limit
-            # if there are more files than the preview limit
-            if remaining > 0:
-                # indicate how many more files are selected
-                click.echo(f"  ... {remaining} more file(s)")
-            # bail out of the function early since this is a dry run
+            click.echo(plan.summary())
+            for item in plan.items[:20]:
+                click.echo(f"  {item.relative_path.as_posix()}")
+            if plan.file_count > 20:
+                click.echo(f"  ... {plan.file_count - 20} more file(s)")
             return
-
-        if not selected_files:
-            click.echo("No files selected for download.")
-            # bail out of the function early since there are no files to download
-            return
-
-        # attempt to download the selected files, handling any errors
-        _run_download(
-            repo,
-            selected_files,
-            output_path,
-            max_workers=max_workers,
-            assume_yes=yes,
-            remote_name=remote_name)
+        _run_download(repo, plan, max_workers=max_workers)
 
 
-@hallmark.command(short_help="Clone a hallmark repository from a remote URL.")
+@hallmark.command(short_help="Clone an existing Hallmark catalog.")
 @click.argument("url")
 @click.argument("path")
-@click.option(
-    "--no-fetch-data",
-    is_flag=True,
-    help="Skip downloading remote data files after clone.")
-@click.option(
-    "--max-workers",
-    type=click.IntRange(min=1),
-    default=4,
-    show_default=True,
-    help="Number of concurrent downloads.")
-@click.option(
-    "-y",
-    "--yes",
-    is_flag=True,
-    help="Skip the bulk-download confirmation.")
-def clone(url, path, no_fetch_data, max_workers, yes):
+@click.option("--auth", help="Optional local SSH authentication profile.")
+@click.option("--filter", "filters", multiple=True,
+              help="Select paths matching a glob. ** matches recursively. "
+                   "May be repeated.")
+@click.option("--fmt",
+              help="Select downloads using a filename format; "
+                   "cannot be combined with --no-download.")
+@click.option("--source-type", default="auto", show_default=True,
+              type=click.Choice(["auto", "git", "catalog"]),
+              help="Override automatic source detection.")
+@click.option("--no-download", is_flag=True,
+              help="Clone only the catalog and history, without downloading data.")
+@click.option("--max-workers", type=click.IntRange(min=1), default=4,
+              show_default=True)
+def clone(url, path, auth, filters, fmt, source_type, no_download, max_workers):
     """
-    Clone a hallmark repository from a remote URL to the specified path.
+    Clone an existing Git catalog or published catalog snapshot at PATH.
 
-    Options:
-        --no-fetch-data: Skip downloading remote data files after clone.
-        --max-workers: Number of concurrent downloads. Default is 4.
-        -y, --yes: Skip the bulk-download confirmation.
-
-    Raises:
-        ClickException: If there are any issues with the provided arguments or
-            during the clone process, such as a destination already existing,
-            a clone error, or a download error.
+    By default, copy the catalog then ask before downloading dataset files.
+    Declining keeps the catalog and exits successfully. --no-download skips data
+    and the prompt; bare destinations require it. --filter and --fmt narrow the
+    download and cannot be combined with --no-download. The complete catalog and
+    Git history are preserved. Use init followed by add for raw datasets.
     """
-    # use context manager to handle DownloadError and GitError exceptions
-    with _translate_cli_errors(DownloadError, GitError):
+    if (filters or fmt is not None) and no_download:
+        raise ClickException("--filter and --fmt cannot be used with --no-download")
+    if not no_download and Repo.resolve_repo_paths(path)[1] is None:
+        raise ClickException("Bare clones require --no-download")
+
+    def approve(plan):
+        click.echo(plan.summary())
+        return click.confirm("Download these files?", default=False)
+
+    with _translate_cli_errors(DownloadError, GitError, ValueError):
+        path_matches("validation", filter=filters or None, fmt=fmt)
         try:
-            repo = Repo.clone(url, path, fetch_data=False)
-        # handle CloneError exceptions and provide a user-friendly error message
+            repo = Repo.clone(url, path, auth=auth,
+                              source_type=source_type, progress=True,
+                              download=not no_download, approve=approve,
+                              filter=filters or None, fmt=fmt,
+                              max_workers=max_workers)
         except CloneError as exc:
             click.echo(str(exc), err=True)
             raise SystemExit(1) from exc
         click.echo(f'Successfully cloned to "{path}"')
-        # if the user has not opted to skip data fetching
-        if not no_fetch_data:
-            # get the worktree path of the cloned repository
-            _, worktree_path = Repo.lwpaths(path)
-            if worktree_path is None:
-                click.echo(
-                    "Bare repository clone; skipping data download.")
-                # bail out of the function early since there is no worktree
-                return
-
-            # select the files to download from the cloned repository
-            selected_files = select_download_files(repo, all_files=True)
-            # if there are no selected files, inform the user and exit
-            if not selected_files:
-                click.echo("No remote data files are configured.")
-                return
-
-            # confirm with user if the num of selected files exceeds warning threshold
-            click.echo("Downloading remote data files...")
-            _run_download(
-                repo,
-                selected_files,
-                worktree_path,
-                max_workers=max_workers,
-                assume_yes=yes)
-
-
-@hallmark.command(short_help="Build a hallmark repository from a remote dataset.")
-@click.argument("directory")
-@click.argument("dataset_name")
-@click.option(
-    "--remote", "remotes", multiple=True,
-    help="Remote to record, as NAME=URL or just NAME. May be repeated "
-         "for multiple remotes.")
-@click.option(
-    "--config-file", "config_file",
-    type=click.Path(exists=True, dir_okay=True, file_okay=True),
-    help="Path to config.yml or a repository directory containing config.yml. "
-         "build_repo loads fmts (and remotes unless --remote is provided).")
-@click.option(
-    "--fmt", "fmts", multiple=True,
-    help="A fmt entry to use directly, as FMT=DB (e.g. "
-         "'a{a}_i{i}.h5=data.tsv'). May be repeated for multiple fmts; "
-         "skips the prompt entirely.")
-@click.option(
-    "--overwrite",
-    is_flag=True,
-    help="Replace the destination repository if it already exists.")
-def build(directory, dataset_name, remotes, config_file, fmts, overwrite):
-    """
-    Build a hallmark repository at DIRECTORY for the remote dataset DATASET_NAME.
-
-    The dataset is fetched from the remote index and stored in a new hallmark
-    repository at DIRECTORY. The remotes can be specified with
-    --remote NAME=URL or --remote NAME.
-    if no remotes are specified, the default remote from the dataset index will be used.
-    --config-file: Optional path to an existing config.yml to load fmts and remotes
-    --fmt: Optional fmt entries to use directly, specified as FMT=DB. May be repeated
-    for multiple fmts.
-    --overwrite: Optional flag to replace the destination repo if it already exists.
-
-    Arguments:
-
-        DIRECTORY: The file system path where the hallmark repository will be created.
-        DATASET_NAME: The name of the remote dataset to fetch.
-        --remote: Optional remote(s) to record, specified as NAME=URL or just NAME.
-        May be repeated for multiple remotes.
-        --config-file: Optional path to an existing config.yml to load fmts and remotes.
-        --fmt: Optional fmt entries to use directly, specified as FMT=DB.
-
-    Raises:
-        ClickException: If there is an error during the build process, such as
-        a network error, Git error, or invalid dataset name.
-
-    """
-    if config_file and fmts:
-        raise ClickException("Use only one of --config-file or --fmt, not both.")
-    # validate the dataset name to ensure it is a valid path component
-    with _translate_cli_errors(ValueError):
-        dataset_name = validate_path_component(dataset_name, label="dataset name")
-
-    repo_path = Path(directory) / f"{dataset_name}.hm"
-    parsed_remotes = []
-    for entry in remotes:
-        # if the remote entry contains an "=", it is in the form NAME=URL
-        if "=" in entry:
-            name, url = entry.split("=", 1)
-            parsed_remotes.append({"name": name, "url": url})
-        else:
-            parsed_remotes.append({"name": entry})
-
-    fmt_entries = None
-    if fmts:
-        fmt_entries = []
-        for entry in fmts:
-            # if the fmt entry does not contain an "=", it is invalid
-            if "=" not in entry:
-                raise ClickException(
-                    f"--fmt values must use FMT=DB, got {entry!r}.")
-            # split the fmt entry into its format and database name components
-            fmt, db = entry.rsplit("=", 1)
-            fmt = fmt.strip()
-            # Validate that the fmt is not empty or whitespace-only
-            if not fmt:
-                raise ClickException("--fmt must define a non-empty format")
-            # normalize the db name to ensure it is valid and ends with ".tsv"
-            try:
-                with _translate_cli_errors(*_BUILD_DATASET_ERRORS):
-                    db = normalize_tsv_name(db)
-            # handle any network-related exceptions raised
-            except requests.exceptions.RequestException as exc:
-                raise ClickException(
-                    f"Failed to reach dataset {dataset_name!r}: {exc}") from exc
-
-            # if the checks pass, append the fmt and db to the fmt_entries list
-            fmt_entries.append({"fmt": fmt, "db": db})
-
-    # build the hallmark repository with the specified parameters
-    try:
-        with _translate_cli_errors(*_BUILD_DATASET_ERRORS):
-            build_repo(
-                repo_path=repo_path,
-                dataset_name=dataset_name,
-                fmt_entries=fmt_entries,
-                config_file=config_file,
-                remotes=parsed_remotes or None,
-                overwrite=overwrite)
-    except requests.exceptions.RequestException as exc:
-        raise ClickException(
-            f"Failed to reach dataset {dataset_name!r}: {exc}") from exc
-
-    click.echo(f'Successfully built hallmark repository at "{repo_path}".')
+        if not no_download and repo.download_result is None:
+            click.echo(f'Skipped download; run hm download --all from "{path}" later.')
+        if repo.download_result is not None:
+            if repo.download_result["succeeded"] + repo.download_result["failed"] == 0:
+                click.echo("No files selected for download.")
+            else:
+                _report_download_results(repo.download_result)
