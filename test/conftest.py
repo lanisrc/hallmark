@@ -87,6 +87,7 @@ def hallmark_test_suite_dictionary(tmp_path_factory):
         "standard_pf": standard_pf,
         "encoded_pf": encoded_pf,
         "standard_files": Standard_files,
+        "catalog_files": Standard_files + [f"encoded/{name}" for name in Encoded_files],
         "encoded_files": Encoded_files,
         "standard_globbed_files": standard_globbed_files,
         "standard_glob_pattern": standard_glob_pattern,

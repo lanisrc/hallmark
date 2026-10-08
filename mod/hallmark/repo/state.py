@@ -36,9 +36,9 @@ def _prepare_file_rows(frame: pd.DataFrame) -> pd.DataFrame:
     Raises:
         ValueError: If the "sha1" column is missing from the provided DataFrame.
     """
-    # Identify the parameter columns by excluding "sha1" and "path"
+    # Identify the parameter columns by excluding "sha1"
     parameter_columns = [
-        column for column in frame.columns if column not in {"sha1", "path"}]
+        column for column in frame.columns if column != "sha1"]
     # collect the relevant columns for normalization
     columns = ["sha1", *parameter_columns]
     # if provided DataFrame is empty, return an empty DataFrame with the columns
@@ -100,18 +100,16 @@ class State:
         # Merge the incoming rows with the existing state.
         merged = pd.concat([self.data, incoming], ignore_index=True, sort=False)
 
-        key_columns = [column for column in merged.columns if column != "sha1"]
-        if key_columns:
-            # Remove duplicate entries while keeping the most recent row.
-            deduped = merged.drop_duplicates(subset=key_columns, keep="last")
-        else:
-            # If there are no key columns, keep only the last row.
-            deduped = merged.tail(1)
-
-        # reset the index of the deduplicated DataFrame
-        # retain only the "sha1" and key columns.
-        self.data = (
-            deduped.loc[:, ["sha1", *key_columns]].reset_index(drop=True))
+        # data columns are all columns except "sha1"
+        data_columns = [column for column in merged.columns if column != "sha1"]
+        # key columns are "path" if it exists, otherwise all data columns
+        key_columns = ["path"] if "path" in merged.columns else data_columns
+        # deduplicate the merged DataFrame based on the key columns,
+        # keeping the last occurrence of each unique key combination
+        deduped = (merged.drop_duplicates(subset=key_columns, keep="last")
+                   if key_columns else merged.tail(1))
+        # update the state data with the deduplicated and reindexed DataFrame
+        self.data = deduped.loc[:, ["sha1", *data_columns]].reset_index(drop=True)
 
     def replace(self, pf) -> None:
         """

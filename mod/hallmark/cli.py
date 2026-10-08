@@ -140,7 +140,16 @@ def hallmark(ctx):
         return
     # attempt to open the hallmark repository in the current directory
     with _translate_cli_errors(GitError, prefix="Failed to open hallmark repository"):
-        ctx.obj = Repo(".")
+        # cwd is the current working directory
+        cwd = Path.cwd()
+        # start with the current working directory as the default repository path
+        repo_path = cwd
+        if cwd.name != ".hm":
+            # search for the nearest parent directory containing a ".hm" folder
+            repo_path = next((path for path in (cwd, *cwd.parents)
+                              if (path / ".hm").exists()), cwd)
+        # ctx is the Click context object that holds the repository instance in ctx.obj
+        ctx.obj = Repo(repo_path)
 
 
 def _load_backend_options(path):
@@ -259,8 +268,7 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     `hm add [--regex] FORMAT` uses the branch format string workflow.
     `hm add "."` rebuilds the manifest from current files that match
     the branch `fmt` in `config.yml`.
-    Explicit path inputs such as shell-expanded `*` are not supported yet
-    with the parameter-based manifest format.
+    Files and directories are checked against the saved branch pattern.
     """
     with _translate_cli_errors(ValueError, OSError, yaml.YAMLError):
         options = _load_backend_options(backend_options)
@@ -280,13 +288,50 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
                 pf = repo.add(inputs[0], encoding)
         # oterhwise, use the add_paths method for multiple inputs
         else:
-            pf = repo.add_paths(list(inputs))
+            pf = repo.add_paths(list(inputs), encoding=encoding)
 
     if pf.empty:
         click.echo("No files matched the format string.")
     else:
         click.echo("Changes to be committed")
         click.echo(pf.path.to_string(index=False, header=False))
+
+    # display unmatched files that were skipped
+    unmatched = pf.attrs.get("unmatched", [])
+    if unmatched:
+        click.echo("Skipped files that do not match the branch pattern:")
+        # print each unmatched path
+        for path in unmatched:
+            click.echo(f"  {path}")
+
+
+@hallmark.command(short_help="Unstage paths without changing files.")
+@click.option("--staged", is_flag=True)
+@click.argument("paths", nargs=-1)
+@click.pass_obj
+def restore(repo, staged, paths):
+    """
+    Restore staged files to their state in the HEAD commit.
+    Only supports restoring staged files for now, will add other support later.
+
+    Args:
+        repo: Repository instance.
+        staged: Boolean flag indicating if the restore is for staged files.
+        paths: List of file paths to restore.
+
+    Raises:
+        ClickException: If the --staged flag is not provided or no paths are specified.
+    """
+    if not staged:
+        raise ClickException(
+            "Only hm restore --staged <path> works for now."
+        )
+    if not paths:
+        raise ClickException(
+            "Usage: hm restore --staged <path> [<path> ...]"
+        )
+    with _translate_cli_errors(*_REPO_READ_ERRORS, OSError):
+        repo.restore_staged(list(paths))
 
 
 @hallmark.command("set-config", short_help="Update hallmark branch config.")

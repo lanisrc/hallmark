@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 from __future__ import annotations
+import os
+import parse
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -34,18 +35,19 @@ from .history import (
 from ..error import DestinationExistsError
 from ..utils import (
     FILE_IO_CHUNK_SIZE,
-    use_working_directory,
     iter_repository_files,
     require_nonempty_string,
-    resolve_path_in_root)
-from .changes import (
-    filter_files_in_directory,
-    find_changed_and_missing_files)
+    resolve_path_in_root,
+    apply_regex_replacement,
+    try_numeric_conversion,
+    validate_relative_path)
+from .changes import find_changed_and_missing_files, working_directory_for_repo
 from .config import (
     branch_encodings,
     branch_filename_format,
     set_config,
-    single_data_format)
+    single_data_format,
+    filename_fields)
 
 @dataclass(init=False)
 class Repo:
@@ -169,6 +171,32 @@ class Repo:
         checksums = self.checksum_many(full_paths)
         # Populate the "sha1" column in the ParaFrame with the computed checksums
         pf["sha1"] = [checksums[path] for path in full_paths]
+
+
+    def _parse_local_files(self, fmt, encoding, paths=None):
+        root = Path(self.worktree).resolve()
+        encodings = branch_encodings(self) if encoding else None
+
+        if "/" in fmt:
+            return ParaFrame.parse(
+                fmt, base_path=root, encodings=encodings, encoding=encoding
+            )
+
+        if paths is None:
+            paths = (path.relative_to(root) for path in iter_repository_files(root))
+
+        rows = []
+        for parent in sorted({path.parent for path in paths}):
+            found = ParaFrame.parse(
+                fmt, base_path=root / parent,
+                encodings=encodings, encoding=encoding
+            )
+            for row in found.to_dict(orient="records"):
+                row["path"] = (parent / row["path"]).as_posix()
+                rows.append(row)
+
+        return ParaFrame(rows, base_path=root, encodings=encodings)
+
 
     @classmethod
     def init(cls, path: Union[Path, str] = ".") -> "Repo":
@@ -401,14 +429,143 @@ class Repo:
             # pair each path with its corresponding checksum and return as a dictionary
             return dict(zip(unique_paths, checksums))
 
-    def add_paths(self, paths: List[Union[Path, str]]) -> ParaFrame:
-        '''
-        Add explicit file paths to the repository index. Raises RuntimeError.
-        Operation not supported in Hallmark.
-        '''
-        raise RuntimeError(
-            'explicit path add is not supported while data.tsv ' \
-            'stores only sha1 plus fmt fields')
+
+    def add_paths(self, paths: List[Union[Path, str]], encoding: bool = False
+                  ) -> ParaFrame:
+
+        # if the repository is a remote catalog, adding local paths is not allowed
+        if is_remote_catalog(self.state):
+            raise ValueError("Use a remote URL to update this catalog")
+        # if the repository has no worktree, adding local paths is not possible
+        if self.worktree is None:
+            raise RuntimeError("cannot add files without a worktree")
+        # ensure that the provided paths are local and not empty
+        if not paths or any(
+            "://" in str(path) or filename_fields(str(path))
+            for path in paths
+        ):
+            raise ValueError("add_paths requires local file or directory paths")
+
+        # parse the branch filename format for the repository
+        try:
+            fmt = branch_filename_format(self)
+        # raise a ValueError if the branch filename does not have a valid format
+        except RuntimeError as exc:
+            raise ValueError(
+                'No file pattern set. Run hm add "PATTERN" or '
+                'hm set-config --fmt "PATTERN" first.'
+            ) from exc
+
+        # root is the absolute path to the repository's worktree
+        root = Path(self.worktree).resolve()
+        # base is the working directory for the repository
+        base = working_directory_for_repo(self)
+        # get the branch encodings if encoding is enabled
+        encodings = branch_encodings(self) if encoding else None
+        # find the encoding settings and parse format for the branch
+        yaml_encodings, parse_fmt = ParaFrame._find_encoding_settings(
+            fmt, encodings, encoding=encoding)
+        # compile the parse format into a parser object
+        parser = parse.compile(parse_fmt.lstrip("/"), case_sensitive=True)
+        matched = {}
+        unmatched = set()
+        add_all = False
+
+        for value in paths:
+            # raw is the string representation of the path to be added
+            raw = require_nonempty_string(str(value), label="add path")
+            # if the raw path is ".", it represents the root of the repo's worktree
+            if Path(raw) == Path("."):
+                candidate = root
+                add_all = True
+            # otherwise, the candidate path is resolved relative to the base directory
+            else:
+                candidate = Path(os.path.normpath(base / raw))
+
+            # check if the candidate path is within the repository's worktree
+            try:
+                relative = candidate.relative_to(root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"add path is outside the worktree: {raw!r}"
+                ) from exc
+
+            # full_path is the absolute path to the candidate within the worktree
+            full_path = (
+                root if relative == Path(".")
+                else self._resolve_worktree_path(relative, label="add path"))
+            # if the full path is a directory, iterate over all files within it
+            if full_path.is_dir():
+                files = iter_repository_files(full_path)
+                named_file = False
+            # if the path is a regular file, treat it as a single file to be added
+            elif full_path.is_file():
+                files = (full_path,)
+                named_file = True
+            # if the path does not exist, raise an error
+            elif not full_path.exists():
+                raise FileNotFoundError(f"add path not found: {raw!r}")
+            # if the path exists but is neither a file nor a directory, raise an error
+            else:
+                raise ValueError(f"add path is not a regular file: {raw!r}")
+
+            for path in files:
+                # get the relative path of the file with respect to the repository root
+                relative = path.relative_to(root).as_posix()
+                # if the relative path has already been matched, skip it
+                if relative in matched:
+                    continue
+                # if the path contains a dir separator, use the full relative path
+                # otherwise, use just the file name
+                target = relative if "/" in fmt else path.name
+                # apply encoding transformations to the target if specified
+                if encoding:
+                    target = apply_regex_replacement(target, yaml_encodings)
+
+                # parse the target using the branch format parser
+                match = parser.parse(target)
+                # if the target does not match the branch format, handle it accordingly
+                if match is None:
+                    # if the file was explicitly named and doesn't match, raise an error
+                    if named_file:
+                        raise ValueError(
+                            f"file does not match branch format {fmt!r}: "
+                            f"{relative!r}")
+                    # add the unmatched relative path to the set of unmatched paths
+                    unmatched.add(relative)
+                # if the target matches the format, add it to the matched dictionary
+                else:
+                    matched[relative] = {
+                        **match.named,
+                        "path": relative,
+                        "sha1": self.checksum(path)}
+
+        pf = ParaFrame(
+            [matched[path] for path in sorted(matched)],
+            columns=["path", "sha1", *filename_fields(fmt)],
+            base_path=root,
+            encodings=encodings,
+        )
+        for column in pf.columns:
+            if column not in {"path", "sha1"}:
+                pf[column] = try_numeric_conversion(pf[column])
+        # build the file table manifest based on the parsed files
+        manifest = build_file_table(pf, fmt)
+        # update the repository configuration with the current format
+        set_config(self, fmt=fmt)
+
+        # update the manifest in the repository state
+        if add_all:
+            self.state.replace(manifest)
+        else:
+            self.state.update(manifest)
+        self.dothm.save_state(self.state)
+
+        # return the result DataFrame without the "sha1" column
+        result = pf.drop(columns=["sha1"], errors="ignore")
+        # attach the list of unmatched paths as an attribute to the result DataFrame
+        result.attrs["unmatched"] = sorted(unmatched)
+        return result
 
     def set_config(
         self,
@@ -449,6 +606,7 @@ class Repo:
         self.dothm.save_state(self.state)
         return self.state.config
 
+
     def status(self) -> dict[str, object]:
         """
         Return repository status information. Includes staged changes,
@@ -464,14 +622,26 @@ class Repo:
             - worktree changes (dict)
             - untracked files (list[str])
         """
+        staged_state = self.dothm.load_state(staged=True)
         head_state = load_head_state(self)
         head_map = file_versions_by_path(head_state)
-        staged_map = file_versions_by_path(self.state)
-        state_changes = sorted({
-            diff.a_path or diff.b_path
-            for diff in self.dothm.index.diff("HEAD")
-            if diff.a_path or diff.b_path
-        })
+        staged_map = file_versions_by_path(staged_state)
+
+        if self.dothm.head.is_valid():
+            changed_paths = {
+                diff.a_path or diff.b_path
+                for diff in self.dothm.index.diff("HEAD")
+            }
+        else:
+            changed_paths = {
+                path for path, stage in self.dothm.index.entries
+            }
+
+        state_changes = sorted(
+            path for path in changed_paths
+            if path and path != "versions.yml"
+            and not path.startswith("versions/")
+        )
 
         staged_added = sorted(path for path in staged_map if path not in head_map)
         staged_deleted = sorted(path for path in head_map if path not in staged_map)
@@ -480,7 +650,7 @@ class Repo:
             if path in head_map and staged_map[path] != head_map[path]
         )
 
-        remote_catalog = is_remote_catalog(self.state)
+        remote_catalog = is_remote_catalog(staged_state)
         worktree_modified: list[str] = []
         worktree_deleted: list[str] = []
         staged_paths = set(staged_map)
@@ -501,6 +671,24 @@ class Repo:
         else:
             untracked = []
 
+        for diff in self.dothm.index.diff(None):
+            path = diff.a_path or diff.b_path
+            if not path or Path(path).parts[0] in {
+                "objects", "versions", "versions.yml"
+            }:
+                continue
+            if diff.deleted_file:
+                worktree_deleted.append(f".hm/{path}")
+            else:
+                worktree_modified.append(f".hm/{path}")
+
+        untracked.extend(
+            f".hm/{path}" for path in self.dothm.untracked_files
+            if Path(path).parts[0] not in {
+                "objects", "versions", "versions.yml"
+            }
+        )
+
         return {
             "branch": self.dothm.active_branch.name,
             "staged": {
@@ -513,7 +701,7 @@ class Repo:
                 "modified": sorted(worktree_modified),
                 "deleted": sorted(worktree_deleted),
             },
-            "untracked": untracked,
+            "untracked": sorted(untracked),
             "remote_catalog": remote_catalog,
         }
 
@@ -552,110 +740,144 @@ class Repo:
 
         # Normalize the format string to ensure it is a non-empty string
         fmt = require_nonempty_string(fmt, label="format")
-        # "." means rescan the whole worktree using the already-configured format
-        rescanning = fmt == "."
-        # use the current branch format; otherwise, use the provided format
-        if rescanning:
-            resolved_fmt = branch_filename_format(self)
-            previous_fmt = resolved_fmt
-        else:
-            resolved_fmt = fmt
-            try:
-                previous_fmt = branch_filename_format(self)
-            except RuntimeError:
-                previous_fmt = None
-        # with the working directory set to the worktree, parse files into a ParaFrame
-        with use_working_directory(self.worktree):
-            pf = ParaFrame.parse(
-                resolved_fmt,
-                base_path=self.worktree,
-                encodings=branch_encodings(self) if encoding else None,
-                encoding=encoding)
-        # if rescanning, filter to include only files that match the configured format
-        if rescanning:
-            pf = filter_files_in_directory(self, pf)
+        # if the format string has no filename fields, treat it as a literal path
+        if not filename_fields(fmt):
+            # return early since there are no filename fields to parse
+            return self.add_paths([fmt], encoding=encoding)
+        pf = self._parse_local_files(fmt, encoding)
+
         # Compute checksums for all files in the ParaFrame in parallel
         self._calculate_file_checksums(pf)
+        # Build the file table (manifest) from the ParaFrame using the resolved format
+        manifest = build_file_table(pf, fmt)
 
-        manifest = build_file_table(pf, resolved_fmt)
-        # if not rescanning, update the repository configuration with the new format
-        if not rescanning:
-            set_config(self, fmt=resolved_fmt)
-        # an explicit fmt replaces only if the format actually changed
-        if rescanning or previous_fmt != resolved_fmt:
-            self.state.replace(manifest)
-        # if the format is unchanged, update the existing state with new entries
-        else:
-            self.state.update(manifest)
+        # Update the repository configuration with the new format
+        set_config(self, fmt=fmt)
+        # Update the repository state with the new manifest
+        self.state.update(manifest)
+        # Save the updated repository state
         self.dothm.save_state(self.state)
-        # return a ParaFrame without the "sha1" column for display purposes
+        # Return the ParaFrame without the "sha1" column for display purposes
         return pf.drop(columns=["sha1"], errors="ignore")
 
+
     def commit(self, msg: str, allow_empty: bool = False) -> bool:
-        '''
-        Commit staged changes to the repository. Raises ValueError if commit
-        message is empty or invalid.
+        """
+        Commit the staged changes to the repository. Staged changes are those that have
+        been added to the index but not yet committed.
 
         Args:
-            msg (string): commit message.
-            allow_empty (boolean): Allow comitting even if no changes exists.
+            msg (str): The commit message.
+            allow_empty (bool): Whether to allow empty commits.
+
         Returns:
-            boolean: True if a commit was created, false otherwise.
-        '''
-        # Normalize the commit message to ensure it is a non-empty string
+            bool: True if a commit was made, False otherwise.
+        """
         msg = require_nonempty_string(msg, label="commit message")
-        # if allow_empty is False and there are no staged changes, return False
-        if (not allow_empty and not self.dothm.index.diff("HEAD")):
-            # return early since there are no changes to commit
+        changes = (
+            self.dothm.index.diff("HEAD")
+            if self.dothm.head.is_valid() else self.dothm.index.entries
+        )
+        if not allow_empty and not changes:
             return False
-        if is_remote_catalog(self.state) or self.state.data.empty:
+
+        staged_state = self.dothm.load_state(staged=True)
+        if is_remote_catalog(staged_state) or staged_state.data.empty:
             self.dothm.index.commit(msg)
             return True
-        # get the current format string and the HEAD state of the repository
-        current_fmt = branch_filename_format(self)
+
+        current_fmt = single_data_format(staged_state.config)
         head_state = load_head_state(self)
-        # get the format string of the HEAD state for comparison
         head_fmt = single_data_format(head_state.config)
-        # head entries are the set of (path, sha1) tuples from the HEAD state
-        head_entries: set[tuple[Path, str]] = set()
+        head_entries = set()
 
         if head_fmt == current_fmt:
-            # populate head_entries with the paths and checksums from the HEAD state
-            head_entries = {(relative_path, checksum.lower())
-                            for relative_path, checksum
-                            in iter_manifest_entries(head_state, fmt=head_fmt)}
+            head_entries = {
+                (relative_path, checksum.lower())
+                for relative_path, checksum
+                in iter_manifest_entries(head_state, fmt=head_fmt)
+            }
 
-        # list of tuples containing (full path, expected sha1) for stored files
-        files_to_store: list[tuple[Path, str]] = []
-        # for each entry in the current manifest
+        files_to_store = []
         for relative_path, checksum in iter_manifest_entries(
-                                        self.state, fmt=current_fmt):
-            # get the expected SHA1 checksum for the file
+            staged_state, fmt=current_fmt
+        ):
             expected_sha1 = checksum.lower()
-            # current_entry is a tuple of (relative path, expected sha1) for this file
-            current_entry = (relative_path, expected_sha1)
-            # if the manifest entry is not in the HEAD entries
-            # or the object store does not contain the expected SHA1
-            if (current_entry not in head_entries
-                 or not self.objects.contains(expected_sha1)):
-                # resolve the full path of the file in the worktree for storage
+            if (
+                (relative_path, expected_sha1) not in head_entries
+                or not self.objects.contains(expected_sha1)
+            ):
                 full_path = self._resolve_worktree_path(
-                    relative_path, label="tracked path")
-                # append the full path and expected SHA1 to the list of files to store
+                    relative_path, label="tracked path"
+                )
                 files_to_store.append((full_path, expected_sha1))
 
-        # Create list of full paths from tracked_files for checksum calculation
-        paths_to_hash = [path for path, _ in files_to_store]
-        # Compute SHA-1 checksums for all tracked files in parallel
-        actual_checksum_by_path = self.checksum_many(paths_to_hash)
-        # Store each tracked file in the object store, verifying checksums
+        actual_checksum_by_path = self.checksum_many(
+            [path for path, _ in files_to_store]
+        )
         for path, expected_sha1 in files_to_store:
-            self.objects.store(path, expected_sha1,
-                                actual_sha1=actual_checksum_by_path[path])
-        # Commit the changes to the repository index with the provided message
+            self.objects.store(
+                path, expected_sha1,
+                actual_sha1=actual_checksum_by_path[path],
+            )
+
         self.dothm.index.commit(msg)
-        # Return True to indicate that a commit was created
         return True
+
+    def restore_staged(self, paths: list[str]) -> None:
+        """
+        Restore the staged files for the specified paths.
+
+        Args:
+            paths (list[str]): List of file paths to restore from the staging area.
+
+        Raises:
+            ValueError: If no paths are provided or specified path is outside worktree.
+        """
+        if not paths:
+            raise ValueError("Usage: hm restore --staged <path> [<path> ...]")
+
+        root = (
+            Path(self.worktree).resolve()
+            if self.worktree is not None else self.dothm.path.resolve().parent
+        )
+        base = Path.cwd().resolve()
+        if not base.is_relative_to(root):
+            base = root
+
+        targets = []
+        for value in paths:
+            raw = require_nonempty_string(str(value), label="restore path")
+            candidate = root if Path(raw) == Path(".") else Path(
+                os.path.normpath(base / raw)
+            )
+            if not candidate.is_relative_to(root):
+                raise ValueError(
+                    f"restore path is outside the worktree: {raw!r}"
+                )
+
+            if candidate in (root, self.dothm.path):
+                targets.append(".")
+            elif candidate.is_relative_to(self.dothm.path):
+                relative = candidate.relative_to(self.dothm.path)
+                relative = validate_relative_path(
+                    relative, label="restore path"
+                )
+                if relative.parts[0] in {
+                    "objects", "versions", "versions.yml"
+                }:
+                    raise ValueError(
+                        "Use dataset paths to restore file versions"
+                    )
+                targets.append(relative.as_posix())
+            else:
+                relative = validate_relative_path(
+                    candidate.relative_to(root), label="restore path"
+                )
+                targets.append(f"versions/{relative.as_posix()}")
+
+        self.dothm.restore_index(targets)
+        self.state = self.dothm.load_state()
 
     def log(self) -> str:
         '''

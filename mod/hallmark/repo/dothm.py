@@ -18,16 +18,24 @@ from __future__ import annotations
 from functools import cached_property
 from pathlib import Path
 from typing import Optional, Union
+from io import BytesIO
+import json
+
 from git import Repo
 from git.exc import GitCommandError
+from tempfile import TemporaryFile
 
 import pandas as pd
 import yaml
 
 from ..error import CloneError, DothmError
-from ..utils import (
-    replace_file_on_success, load_yaml_file, validate_path_name)
+from ..utils import (replace_file_on_success,
+                     load_yaml_file,
+                     validate_path_name,
+                     resolve_path_in_root,
+                     load_yaml)
 from .state import State
+from .config import row_to_path, single_data_format
 
 
 class _HallmarkYamlDumper(yaml.Dumper):
@@ -109,6 +117,33 @@ class Dothm(Repo):
     @cached_property
     def path(self) -> Path:
         return Path(self.working_tree_dir)
+
+    def stage_file_version(self, record: dict) -> None:
+        """
+        Stage a version of a file in the repository.
+
+        Args:
+            record (dict): A dictionary containing the file version information.
+        """
+        # Get the relative path of the file within the repository
+        relative = Path(record["path"])
+        # create the path for storing the versioned file within the "versions" directory
+        entry_path = Path("versions") / relative
+        # resolve the full path of the versioned file within the repository's root
+        path = resolve_path_in_root(self.path, entry_path, label="version path")
+        # ensure the parent directory exists before writing the file
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # write the file content to a temporary file and replace the original on success
+        with replace_file_on_success(path) as temp_path:
+            # write the JSON representation of the record to the temporary file
+            temp_path.write_text(
+                json.dumps(
+                    {**record, "path": relative.as_posix()},
+                    sort_keys=True,
+                    default=str), encoding="utf-8")
+        # add the versioned file to the git index
+        self.index.add([entry_path.as_posix()])
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -195,17 +230,236 @@ remote:
             raise DothmError(f'Failed to link "{path}": {exc}')
         return Dothm(path)
 
-    def load_state(self) -> State:
-        return State(
-            config = self.read_yaml("config"),
-            meta = self.read_yaml("meta"),
-            data = self.read_tsv("data"))
+    def load_state(self, revision=None, *, staged=False) -> State:
+        if revision is None:
+            blobs = {
+                blob.path: blob
+                for stage, blob in self.index.iter_blobs()
+                if stage == 0
+            }
+        else:
+            blobs = {
+                blob.path: blob
+                for blob in self.commit(revision).tree.traverse()
+                if blob.type == "blob"
+            }
+
+        state = State()
+        for name in ("config", "meta"):
+            blob = blobs.get(f"{name}.yml")
+            value = load_yaml(blob.data_stream.read()) if blob is not None else {}
+            if revision is None and not staged:
+                path = self._storage_path(name, ".yml")
+                if path.is_file():
+                    value = self.read_yaml(name)
+            setattr(state, name, value)
+
+        if "versions.yml" in blobs:
+            schema = load_yaml(blobs["versions.yml"].data_stream.read())
+            records = []
+            for path, blob in sorted(blobs.items()):
+                if path.startswith("versions/"):
+                    record = json.loads(blob.data_stream.read())
+                    record["path"] = path.removeprefix("versions/")
+                    records.append(record)
+
+            data = pd.DataFrame(records)
+            columns = list(dict.fromkeys([
+                *schema.get("columns", ["sha1"]), *data.columns
+            ]))
+            state.data = data.reindex(columns=columns).fillna("").astype(str)
+
+        elif "data.tsv" in blobs:
+            content = blobs["data.tsv"].data_stream.read()
+            if content.strip():
+                state.data = pd.read_csv(
+                    BytesIO(content), sep="\t", dtype=str, keep_default_na=False
+                )
+
+        return state
+
+    def stage_text(self, path: str, text: str) -> None:
+        """
+        Stage a text string as a file in the Git index.
+
+        Args:
+            path (str): The path of the file to stage.
+            text (str): The text content to stage.
+        """
+        with TemporaryFile() as handle:
+            handle.write(text.encode("utf-8"))
+            handle.seek(0)
+            sha = self.git.hash_object("-w", "--stdin", istream=handle)
+        self.git.update_index("--add", "--cacheinfo", "100644", sha, path)
+
+
+    def restore_index(self, paths: list[str]) -> None:
+        """
+        Restore the Git index for the specified paths.
+
+        Args:
+            paths (list[str]): List of file paths to restore.
+
+        Raises:
+            ValueError: If no paths are provided or if a specified path does not exist
+              in the index or HEAD.
+        """
+        if not paths:
+            raise ValueError("Usage: hm restore --staged <path> [<path> ...]")
+
+        index = self.index
+        head = self.head.commit if self.head.is_valid() else None
+        head_paths = {
+            blob.path for blob in head.tree.traverse() if blob.type == "blob"
+        } if head is not None else set()
+        index_paths = {path for path, stage in index.entries if stage == 0}
+
+        if "." in paths:
+            if head is None:
+                index.entries.clear()
+                index.write()
+            else:
+                index.reset(head, working_tree=False)
+            return
+
+        old_head = {}
+        old_index = {}
+        for revision, known, records in (
+            ("HEAD", head_paths, old_head),
+            (None, index_paths, old_index),
+        ):
+            if "versions.yml" in known or (revision and head is None):
+                continue
+            state = self.load_state(revision, staged=True)
+            fmt = single_data_format(state.config)
+            for record in state.data.fillna("").to_dict(orient="records"):
+                record["path"] = row_to_path(record, fmt).as_posix()
+                records[f"versions/{record['path']}"] = record
+
+        known = head_paths | index_paths | old_head.keys() | old_index.keys()
+        selected = set()
+        for path in paths:
+            matches = {
+                name for name in known
+                if name == path or name.startswith(path + "/")
+            }
+            if not matches:
+                label = (
+                    path.removeprefix("versions/")
+                    if path.startswith("versions/") else f".hm/{path}"
+                )
+                raise ValueError(
+                    f"No staged or committed path matches {label!r}"
+                )
+            selected.update(matches)
+
+        versions_selected = any(
+            path.startswith("versions/") for path in selected
+        )
+        if versions_selected and "versions.yml" in head_paths:
+            changed = {
+                diff.a_path or diff.b_path for diff in index.diff(head)
+            }
+            versions_selected = any(
+                path.startswith("versions/") for path in selected & changed
+            )
+
+        original = index.entries.copy()
+        try:
+            if versions_selected and "versions.yml" not in index_paths:
+                columns = list(self.load_state(staged=True).data.columns)
+                for path, record in old_index.items():
+                    self.stage_text(
+                        path, json.dumps(record, sort_keys=True, default=str)
+                    )
+                self.stage_text(
+                    "versions.yml", yaml.safe_dump({"columns": columns})
+                )
+
+            index = self.index
+            if head is None:
+                for path in selected:
+                    index.entries.pop((path, 0), None)
+                index.write()
+            else:
+                index.reset(
+                    head, paths=sorted(selected), working_tree=False
+                )
+
+            if versions_selected:
+                for path in selected & old_head.keys():
+                    self.stage_text(
+                        path,
+                        json.dumps(
+                            old_head[path], sort_keys=True, default=str
+                        ),
+                    )
+
+                state = self.load_state(staged=True)
+                if "versions.yml" in head_paths:
+                    same_versions = not any(
+                        (diff.a_path or diff.b_path).startswith("versions/")
+                        for diff in self.index.diff(head)
+                    )
+                else:
+                    records = {
+                        f"versions/{record['path']}": record
+                        for record in state.data.to_dict(orient="records")
+                    }
+                    same_versions = records == old_head
+
+                if same_versions and "data.tsv" in head_paths:
+                    reset_paths = ["data.tsv", "versions.yml"]
+                    if "versions.yml" not in head_paths:
+                        reset_paths.extend(
+                            path for path, stage in self.index.entries
+                            if stage == 0 and path.startswith("versions/")
+                        )
+                    self.index.reset(
+                        head, paths=reset_paths, working_tree=False
+                    )
+                else:
+                    self.stage_text(
+                        "data.tsv",
+                        state.data.to_csv(
+                            sep="\t", index=False, lineterminator="\n"
+                        ),
+                    )
+        except Exception:
+            index = self.index
+            index.entries = original
+            index.write()
+            raise
+
 
     def save_state(self, state: State) -> None:
+        fmt = single_data_format(state.config)
+        paths = set()
+
+        for record in state.data.fillna("").to_dict(orient="records"):
+            record["path"] = row_to_path(record, fmt).as_posix()
+            self.stage_file_version(record)
+            paths.add(f"versions/{record['path']}")
+
+        for_deletion = [
+            path
+            for path, stage in self.index.entries
+            if stage == 0
+            and path.startswith("versions/")
+            and path not in paths
+        ]
+        if for_deletion:
+            self.index.remove(for_deletion, working_tree=False)
+
         self.write_yaml(state.config, "config")
-        self.write_yaml(state.meta,   "meta")
-        self.write_tsv(state.data,   "data")
-        self.index.add(["config.yml", "meta.yml", "data.tsv"])
+        self.write_yaml(state.meta, "meta")
+        self.write_tsv(state.data, "data")
+        self.write_yaml(
+            {"columns": list(state.data.columns)}, "versions"
+        )
+        self.index.add([
+            "config.yml", "meta.yml", "data.tsv", "versions.yml"
+        ])
 
     def read_yaml(self, stem: Union[Path, str]) -> dict:
         """

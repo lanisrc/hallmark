@@ -7,6 +7,9 @@ updating repository configuration values stored in ``config.yml``.
 
 from __future__ import annotations
 
+import pandas as pd
+import parse
+
 from copy import deepcopy
 from pathlib import Path
 from string import Formatter
@@ -360,15 +363,65 @@ def set_config(
 
     Returns:
         dict: The updated configuration.
+
+    Raises:
+        ValueError: If the new filename format is incompatible with existing data.
     """
     config = deepcopy(repo.state.config)
     # raise a ValueError if the provided config is not a dictionary
     if not isinstance(config, dict):
         raise ValueError("repository config must be a mapping")
 
-    # if a new format string is provided, validate that it is a non-empty string
+    # migrate existing data if the filename format has changed
+    migrated_data = None
     if fmt is not None:
+        # ensure the new format string is a nonempty string
         fmt = require_nonempty_string(fmt, label="fmt")
+        # retrieve the old filename format from the repository's configuration
+        old_fmt = single_data_format(repo.state.config)
+
+        # if the new format differs from the old one or the "path" column is missing
+        if "sha1" in repo.state.data.columns and (
+            fmt != old_fmt or "path" not in repo.state.data.columns):
+            # column for each field in the new filename format, plus "sha1" and "path"
+            columns = ["sha1", "path", *filename_fields(fmt)]
+            rows = []
+            incompatible = 0
+            # if there is existing data but no old format, we cannot verify the catalog
+            if not repo.state.data.empty and old_fmt is None:
+                raise ValueError("Cannot verify catalog without its saved pattern")
+
+            # parse the new filename format using the parse library
+            parser = parse.compile(fmt, case_sensitive=True)
+            # iterate over each record in the existing data as a dictionary
+            for record in repo.state.data.to_dict(orient="records"):
+                # convert the record to a path using the old filename format
+                old_path = row_to_path(record, old_fmt)
+                # if the new format contains a directory component, use the full path;
+                # otherwise, use just the filename
+                target = old_path.as_posix() if "/" in fmt else old_path.name
+                # match the target string against the new format
+                match = parser.parse(target)
+
+                # if it does not match the new format, it is considered incompatible
+                if match is None:
+                    incompatible += 1
+                    # skip this record as it is incompatible with the new format
+                    continue
+                # construct a new row for the migrated data based on the named groups
+                rows.append({
+                    "sha1": record["sha1"],
+                    **match.named,
+                    "path": old_path.as_posix()})
+
+            # if there are any incompatible records, raise an error
+            if incompatible:
+                raise ValueError(
+                    f"{incompatible} files in the catalog don't fit {fmt}.\n"
+                    "Remove them first, or use a new branch for the new pattern.")
+
+            # create a new DataFrame with the migrated rows and specified columns
+            migrated_data = pd.DataFrame(rows, columns=columns)
 
     # if encoding updates are provided
     if encoding_updates is not None:
@@ -444,6 +497,9 @@ def set_config(
                               remote_backend, remote_backend_options)
 
     repo.state.config = config
+    # if there is migrated data, replace the current state with it
+    if migrated_data is not None:
+        repo.state.replace(migrated_data)
     return config
 
 
@@ -529,6 +585,11 @@ def row_to_path(row, fmt: str) -> Path:
     Returns:
         Path: Path generated from the row values.
     """
+    stored_path = row.get("path")
+    # if the row already contains a valid "path" value, use it directly
+    if isinstance(stored_path, str) and stored_path:
+        return validate_relative_path(stored_path, label="formatted data path")
+
     values = {}
     for _, field_name, format_spec, _ in Formatter().parse(fmt):
         if field_name:

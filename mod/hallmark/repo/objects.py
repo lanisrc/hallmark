@@ -227,7 +227,8 @@ class Objects:
         if actual_sha1 != expected_sha1:
             raise ValueError(
                 f'File "{src}" changed after it was added: '
-                f"expected SHA-1 {expected_sha1}, got {actual_sha1}")
+                f"expected SHA-1 {expected_sha1}, got {actual_sha1}. "
+                "Run hm add again before committing.")
         # if the file already exists in the object store, return its path
         if stored.is_file():
             return stored

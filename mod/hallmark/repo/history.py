@@ -83,7 +83,6 @@ def _copy_current_state(repo, *, include_data: bool) -> State:
 
 def _load_revision_state(repo, revision: str) -> State:
     """
-    Used by load_head_state and load_branch_state.
     Load the state from a specific Git revision.
 
     Args:
@@ -93,14 +92,7 @@ def _load_revision_state(repo, revision: str) -> State:
     Returns:
         (State) The state loaded from the specified Git revision.
     """
-    # Load the data.tsv content from the specified revision
-    data_text = repo.dothm.git.show(f"{revision}:data.tsv")
-    # Load the config.yml and meta.yml content from the specified revision,
-    # falling back to current state if not found
-    return State(
-        config=_load_revision_yaml(repo, revision, "config.yml", repo.state.config),
-        meta=_load_revision_yaml(repo, revision, "meta.yml", repo.state.meta),
-        data=_parse_data_tsv(data_text))
+    return repo.dothm.load_state(revision)
 
 
 def load_branch_state(repo, branch: str) -> State:
@@ -133,25 +125,19 @@ def load_branch_state(repo, branch: str) -> State:
 
 
 def load_head_state(repo) -> State:
-    '''
-    Load the state stored at ``Head``.
+    """
+    Load the state associated with the HEAD revision of the repository.
 
     Args:
-        repo (Repo): Repository object.
+        repo: The repository object.
 
     Returns:
-        Result from ``_load_revision_state``, which is a ``State`` object containing
-        the contents of ``config.yml``, ``meta.yml``, and ``data.tsv`` at the current
-        ``HEAD`` revision. If the state can't be loaded, returns a
-        state with the current configuration and metadata and an empty data table.
-    '''
-    # attempt to load the state from the HEAD revision of the repository
-    try:
-        return _load_revision_state(repo, "HEAD")
-    # if the HEAD revision cannot be loaded (e.g., no commits), return a state
-    # with the current configuration and metadata and an empty data table
-    except GitCommandError:
-        return _copy_current_state(repo, include_data=False)
+        (State) The state loaded from the HEAD revision. If the HEAD is not valid,
+        returns an empty state.
+    """
+    if not repo.dothm.head.is_valid():
+        return State()
+    return _load_revision_state(repo, "HEAD")
 
 
 def find_remote_branch(repo, branch: str) -> str | None:

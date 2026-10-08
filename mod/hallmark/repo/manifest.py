@@ -8,7 +8,11 @@ from collections.abc import Iterator
 import pandas as pd
 
 from ..utils import string_or_none
-from .config import filename_fields, row_to_path, single_data_format
+from .config import (
+    filename_fields,
+    row_to_path,
+    single_data_format,
+    validate_relative_path)
 
 
 def build_file_table(pf, fmt: str) -> pd.DataFrame:
@@ -28,8 +32,8 @@ def build_file_table(pf, fmt: str) -> pd.DataFrame:
         parsed filename fields.
     """
     fields = filename_fields(fmt)
-    # The manifest table will have a "sha1" column followed by the extracted fields.
-    columns = ["sha1", *fields]
+    # The manifest table will have a column for checksum, path, and each field
+    columns = ["sha1", "path", *fields]
     # If the ParaFrame is empty, return an empty DataFrame with the appropriate columns.
     if pf.empty:
         return pd.DataFrame(columns=columns)
@@ -38,8 +42,9 @@ def build_file_table(pf, fmt: str) -> pd.DataFrame:
     rows = []
     # convert each record in the ParaFrame to a dictionary and build the manifest rows
     for record in pf.to_dict(orient="records"):
-        # Create a row dictionary with the "sha1" value and the extracted fields.
-        row = {"sha1": record["sha1"]}
+        # validate and normalize the relative file path
+        row = {"sha1": record["sha1"], "path": validate_relative_path(
+                                        record["path"], label="data path").as_posix()}
         # Update the row with the extracted fields
         row.update({field: (
             # use string_or_none to handle None and NaN values
@@ -78,9 +83,6 @@ def iter_manifest_entries(
     if fmt is None:
         # get the single data format from the repository configuration
         fmt = single_data_format(state.config)
-        # if the format is still None, return immediately
-        if fmt is None:
-            return
     # convert each record in the repository state to a dictionary
     for record in state.data.to_dict(orient="records"):
         # yield a tuple containing the relative file path and its SHA-1 checksum

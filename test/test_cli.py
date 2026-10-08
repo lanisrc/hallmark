@@ -250,7 +250,7 @@ def test_cli_add_dot_and_explicit_paths():
             manifest = Path(".hm/data.tsv").read_text(encoding="utf-8")
             assert "a0_i0.h5" not in manifest, \
                 "Expected a0_i0.h5 to be removed from manifest"
-            assert "\t1\t45" in manifest or ",1,45" not in manifest, \
+            assert "\ta1_i45.h5\t1\t45\n" in manifest, \
                 "Expected encoding information for a1_i45.h5 in manifest"
 
             Path("top1.h5").write_text("top1.h5\n", encoding="utf-8")
@@ -258,8 +258,8 @@ def test_cli_add_dot_and_explicit_paths():
             result = runner.invoke(hallmark, ["add", "top1.h5", "top2.h5"])
             assert result.exit_code != 0, f"Expected non-zero exit code for add with \
                 explicit paths, got {result.exit_code}"
-            assert "explicit path add is not supported" in result.output, \
-                f"Expected explicit path add error message, got: {result.output}"
+            assert "file does not match branch format 'a{a}_i{i}.h5': 'top1.h5'" \
+                in result.output
 
 
 def test_cli_add_regex_flag(monkeypatch):
@@ -359,7 +359,7 @@ def test_cli_set_config_and_add_dot():
                 f"Expected exit code 0 for add, got {result.exit_code}"
 
             manifest = Path(".hm/data.tsv").read_text(encoding="utf-8")
-            assert "sha1\ta\ti" in manifest, "Expected encoding information in manifest"
+            assert "sha1\tpath\ta\ti" in manifest
 
             config = Path(".hm/config.yml").read_text(encoding="utf-8")
             assert "fmt: b{a}_i{i}.h5" in config, "Expected fmt entry in config"

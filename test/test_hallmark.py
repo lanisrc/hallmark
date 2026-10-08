@@ -186,7 +186,8 @@ def test_repo_commit_succeeds(hallmark_test_suite_dictionary):
 
 def test_data_tsv_and_worktree_reconstruction(hallmark_test_suite_dictionary):
     repo = Repo(hallmark_test_suite_dictionary["repo_path"])
-    assert len(repo.state.data) == 12
+    assert sorted(repo.state.data["path"]) == sorted(
+        hallmark_test_suite_dictionary["catalog_files"])
     assert repo.worktree.stem == "repo"
 
 
@@ -199,13 +200,13 @@ def _write_files(root, names):
 
 def test_repo_add_result_has_expected_length(hallmark_test_suite_dictionary):
     result = hallmark_test_suite_dictionary["add_result"]
-    assert len(result) == 12
+    assert len(result) == len(hallmark_test_suite_dictionary["catalog_files"])
 
 
-def test_repo_add_result_paths_match_standard_files(hallmark_test_suite_dictionary):
+def test_repo_add_result_paths_match_recursive_files(hallmark_test_suite_dictionary):
     result = hallmark_test_suite_dictionary["add_result"]
     assert sorted(result["path"]) == sorted(
-        hallmark_test_suite_dictionary["standard_files"])
+        hallmark_test_suite_dictionary["catalog_files"])
 
 
 def test_repo_add_rejects_symlink_escape(tmp_path):
@@ -264,7 +265,7 @@ def test_repo_add_format_hashes_files_in_one_batch(monkeypatch, tmp_path):
         "Expected checksum_many to be called once with both files in one batch"
 
 
-def test_repo_add_persists_only_sha1_and_path(tmp_path):
+def test_repo_add_persists_sha1_path_and_parameters(tmp_path):
     repo = Repo.init(tmp_path / "repo")
     _write_files(repo.worktree, ["a0_i0.h5", "a0_i30.h5"])
 
@@ -273,10 +274,12 @@ def test_repo_add_persists_only_sha1_and_path(tmp_path):
     assert list(result.columns) == ["path", "a", "i"]
     persisted = repo.dothm.read_tsv("data")
     assert repo.state.config["data"] == [{"fmt": "a{a}_i{i}.h5", "encoding": None}]
-    assert list(persisted.columns) == ["sha1", "a", "i"]
+    assert list(persisted.columns) == ["sha1", "path", "a", "i"]
     assert persisted.to_dict(orient="records") == [
-        {"sha1": Repo.checksum(repo.worktree / "a0_i0.h5"), "a": "0", "i": "0"},
-        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"), "a": "0", "i": "30"}]
+        {"sha1": Repo.checksum(repo.worktree / "a0_i0.h5"),
+         "path": "a0_i0.h5", "a": "0", "i": "0"},
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
+         "path": "a0_i30.h5", "a": "0", "i": "30"}]
 
 
 def test_repo_add_dot_replaces_manifest_with_current_tree(tmp_path):
@@ -289,9 +292,12 @@ def test_repo_add_dot_replaces_manifest_with_current_tree(tmp_path):
     assert sorted(result["path"]) == ["a0_i0.h5", "a0_i30.h5", "a1_i45.h5"]
     persisted = repo.dothm.read_tsv("data")
     assert persisted.to_dict(orient="records") == [
-        {"sha1": Repo.checksum(repo.worktree / "a0_i0.h5"), "a": "0", "i": "0"},
-        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"), "a": "0", "i": "30"},
-        {"sha1": Repo.checksum(repo.worktree / "a1_i45.h5"), "a": "1", "i": "45"}]
+        {"sha1": Repo.checksum(repo.worktree / "a0_i0.h5"),
+         "path": "a0_i0.h5", "a": "0", "i": "0"},
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
+         "path": "a0_i30.h5", "a": "0", "i": "30"},
+        {"sha1": Repo.checksum(repo.worktree / "a1_i45.h5"),
+         "path": "a1_i45.h5", "a": "1", "i": "45"}]
 
 
 def test_repo_add_dot_removes_deleted_files_from_manifest(tmp_path):
@@ -302,36 +308,25 @@ def test_repo_add_dot_removes_deleted_files_from_manifest(tmp_path):
     repo.add(".")
 
     assert repo.state.data.to_dict(orient="records") == [
-        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"), "a": "0", "i": "30"}]
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
+         "path": "a0_i30.h5", "a": "0", "i": "30"}]
 
 
-def test_repo_add_dot_from_nested_directory_uses_path_components(monkeypatch, tmp_path):
-    """
-    Test that adding files from a nested directory correctly uses the relative path
-    components in the ParaFrame. This test creates a repository with a nested directory,
-    adds files to it, and then changes the current working directory to the nested
-    directory. It then calls the add() method with "." and checks that the resulting
-    ParaFrame contains the correct relative paths.
-
-    Args:
-        monkeypatch: pytest fixture that allows for monkeypatching.
-        tmp_path: pytest fixture that provides a temporary directory for the test.
-    """
+def test_repo_add_dot_from_nested_directory_adds_whole_tree(monkeypatch, tmp_path):
+    """Dot includes sibling directories and retains their relative paths."""
     repo = Repo.init(tmp_path / "repo")
     nested = repo.worktree / "nested"
     similarly_named = repo.worktree / "nested-other"
     nested.mkdir()
     similarly_named.mkdir()
     (nested / "data_1.txt").write_text("included\n", encoding="utf-8")
-    (similarly_named / "data_2.txt").write_text("excluded\n", encoding="utf-8")
+    (similarly_named / "data_2.txt").write_text("included too\n", encoding="utf-8")
     repo.set_config(fmt="{folder}/data_{number}.txt")
     monkeypatch.chdir(nested)
     result = repo.add(".")
 
-    assert result["path"].tolist() == ["nested/data_1.txt"], f"Expected only the file \
-        in the nested directory to be added, got {result['path'].tolist()}"
-    assert repo.state.data["number"].tolist() == ["1"], f"Expected 'number' column to \
-        contain only '1', got {repo.state.data['number'].tolist()}"
+    assert sorted(result["path"]) == ["nested-other/data_2.txt", "nested/data_1.txt"]
+    assert sorted(repo.state.data["number"]) == ["1", "2"]
 
 
 def test_repo_add_pattern_keeps_deleted_manifest_rows(tmp_path):
@@ -347,37 +342,33 @@ def test_repo_add_pattern_keeps_deleted_manifest_rows(tmp_path):
     repo.add("a{a}_i{i}.h5")
 
     assert repo.state.data.to_dict(orient="records") == [
-        {"sha1": original_sha, "a": "0", "i": "0"},
-        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"), "a": "0", "i": "30"},
+        {"sha1": original_sha, "path": "a0_i0.h5", "a": "0", "i": "0"},
+        {"sha1": Repo.checksum(repo.worktree / "a0_i30.h5"),
+         "path": "a0_i30.h5", "a": "0", "i": "30"},
     ]
 
 
-def test_repo_add_pattern_replaces_manifest_when_fmt_changes(tmp_path):
+def test_repo_add_pattern_rejects_incompatible_catalog_on_new_branch(tmp_path):
     repo = Repo.init(tmp_path / "repo")
     _write_files(repo.worktree, ["a0.4_i30_w3.h5", "b0.4_i30_w3.h5"])
 
     repo.add("a{a}_i{i}_w{w}.h5")
     repo.commit("main a data")
     repo.checkout("experiment")
-    repo.add("b{a}_i{i}_w{w}.h5")
-
-    assert repo.state.config["data"] == [{"fmt": "b{a}_i{i}_w{w}.h5", "encoding": None}]
-    assert repo.state.data.to_dict(orient="records") == [
-        {
-            "sha1": Repo.checksum(repo.worktree / "b0.4_i30_w3.h5"),
-            "a": "0.4",
-            "i": "30",
-            "w": "3",
-        }
-    ]
+    before = repo.state.data.copy(deep=True)
+    with pytest.raises(ValueError, match="1 files in the catalog don't fit"):
+        repo.add("b{a}_i{i}_w{w}.h5")
+    assert repo.state.config["data"][0]["fmt"] == "a{a}_i{i}_w{w}.h5"
+    pd.testing.assert_frame_equal(repo.state.data, before)
+    assert not repo.status()["staged"]["state"]
 
 
-def test_repo_add_paths_is_not_supported_yet(tmp_path):
+def test_repo_add_paths_rejects_nonmatching_file(tmp_path):
     repo = Repo.init(tmp_path / "repo")
     _write_files(repo.worktree, ["a0_i0.h5", "a0_i30.h5", "b0_i45.h5"])
     repo.add("a{a}_i{i}.h5")
 
-    with pytest.raises(RuntimeError, match="explicit path add is not supported"):
+    with pytest.raises(ValueError, match="file does not match branch format"):
         repo.add_paths(["b0_i45.h5"])
 
 
@@ -410,6 +401,7 @@ def test_repo_add_parse_failure_preserves_existing_format(monkeypatch, tmp_path)
     """
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(fmt="old_{number}.txt")
+    _write_files(repo.worktree, ["new_1.txt"])
     def fail_parse(*args, **kwargs):
         """Simulate a failure in ParaFrame.parse()
         by raising a ValueError."""
@@ -868,8 +860,8 @@ def test_repo_status_does_not_walk_dothm_directory(monkeypatch, tmp_path):
     monkeypatch.setattr("hallmark.utils.os.walk", recording_walk)
     snapshot = repo.status()
 
-    assert snapshot["untracked"] == ["visible.txt"], "Expected only visible.txt to be \
-        reported as untracked, but got: " f"{snapshot['untracked']}"
+    assert snapshot["untracked"] == [
+        ".hm/status-test/internal.txt", "visible.txt"]
     assert not any(
         path == repo.dothm.path or repo.dothm.path in path.parents
         for path in walked_directories), \
@@ -942,6 +934,8 @@ def test_checkout_rebuilds_worktree_for_branch_specific_nested_fmt(tmp_path):
     repo.commit("main data")
 
     repo.checkout("experiment")
+    (repo.worktree / "main/a0_i0.h5").unlink()
+    repo.add(".")
     (repo.worktree / "exp" / "run1").mkdir(parents=True)
     _write_files(repo.worktree, ["exp/run1/b0_i0.h5"])
     repo.add("exp/run{run}/b{a}_i{i}.h5")
@@ -1002,6 +996,8 @@ def test_checkout_allows_return_to_branch_when_target_files_already_match(tmp_pa
     repo.commit("main data")
 
     repo.checkout("experiment")
+    (repo.worktree / "a0_i0.h5").unlink()
+    repo.add(".")
     repo.add("b{a}_i{i}.h5")
     repo.commit("experiment data")
 
@@ -1032,6 +1028,7 @@ def test_checkout_rejects_symlink_destination_escape(tmp_path):
     repo.commit("main data")
     repo.checkout("experiment")
     (repo.worktree / "main/a0_i0.h5").unlink()
+    repo.add(".")
     (repo.worktree / "exp").mkdir()
     _write_files(repo.worktree, ["exp/a1_i45.h5"])
     repo.add("exp/a{a}_i{i}.h5")
@@ -1167,6 +1164,7 @@ def test_checkout_rejects_directory_at_target_file_path(tmp_path):
     repo.commit("main data")
     repo.checkout("experiment")
     data_path.unlink()
+    repo.add(".")
     experiment_path = (repo.worktree / "experiment_1.txt")
     experiment_path.write_text("experiment\n", encoding="utf-8")
     repo.add("experiment_{number}.txt")
@@ -2379,24 +2377,18 @@ def test_state_replace_empty_uses_incoming_schema():
     state.replace(replacement)
 
     assert state.data.empty, "Expected state.data to be empty after replacement"
-    assert list(state.data.columns) == ["sha1", "new_parameter"], \
-        f"Expected columns ['sha1', 'new_parameter'], got {list(state.data.columns)}"
+    assert list(state.data.columns) == ["sha1", "path", "new_parameter"]
 
 
-def test_state_update_static_format_keeps_only_latest_row():
-    """
-    Test that State.update() with a static format keeps only the latest row for each
-    unique identifier. This test creates a State object with an initial row, then
-    updates it with a new row having the same unique identifier.
-    It checks that the resulting state contains only the latest row.
-    """
-    state = State(data=pd.DataFrame([{"sha1": "a" * 40}]))
-    replacement = pd.DataFrame([{"sha1": "b" * 40, "path": "README.txt"}])
+@pytest.mark.parametrize("identity", [{}, {"path": "README.txt"}])
+def test_state_update_static_format_keeps_only_latest_row(identity):
+    state = State(data=pd.DataFrame([{"sha1": "a" * 40, **identity}]))
+    replacement = pd.DataFrame([{"sha1": "b" * 40, **identity}])
+
     state.update(replacement)
     state.update(replacement)
 
-    assert state.data.to_dict("records") == [{"sha1": "b" * 40}], \
-        f"Expected only the latest row to be kept, got {state.data.to_dict('records')}"
+    assert state.data.to_dict("records") == [{"sha1": "b" * 40, **identity}]
 
 
 def test_state_normalizes_missing_parameters_to_blank_strings():
@@ -2460,7 +2452,8 @@ def test_state_update_and_replace_share_data_normalization():
     updated.update(incoming)
     replaced = State()
     replaced.replace(incoming)
-    expected = pd.DataFrame({"sha1": ["abc123"], "number": ["1"]})
+    expected = pd.DataFrame({
+        "sha1": ["abc123"], "path": ["item_1.dat"], "number": ["1"]})
 
     pd.testing.assert_frame_equal(updated.data, expected, check_dtype=False)
     pd.testing.assert_frame_equal(replaced.data, expected, check_dtype=False)
@@ -2477,6 +2470,7 @@ def test_manifest_frame_normalizes_missing_and_integral_float_values():
     """
     frame = pd.DataFrame({
             "sha1": ["first", "second", "third"],
+            "path": ["missing.dat", "1.dat", "inf.dat"],
             "value": [pd.NA, 1.0, float("inf")]})
     result = build_file_table(frame, "{value}.dat")
     values = result["value"].tolist()
@@ -2539,6 +2533,25 @@ def test_manifest_map_uses_explicit_fmt_override():
         f"Expected explicit fmt override mapping, got {actual}"
 
 
+@pytest.mark.parametrize("fmt", [None, "a{a}_i{i}.h5"])
+def test_manifest_entries_preserve_stored_relative_paths(fmt):
+    state = State(
+        data=pd.DataFrame({
+            "sha1": ["ABC123", "ABC123"],
+            "path": ["s1/a0_i30.h5", "s2/a0_i30.h5"],
+        })
+    )
+
+    assert list(iter_manifest_entries(state, fmt=fmt)) == [
+        (Path("s1/a0_i30.h5"), "ABC123"),
+        (Path("s2/a0_i30.h5"), "ABC123"),
+    ]
+    assert file_versions_by_path(state, fmt=fmt) == {
+        "s1/a0_i30.h5": "ABC123",
+        "s2/a0_i30.h5": "ABC123",
+    }
+
+
 ### repo.changes tests ###
 
 def test_worktree_changes_accepts_uppercase_expected_checksum(tmp_path):
@@ -2590,28 +2603,55 @@ def test_parse_data_tsv_empty_text_returns_empty_state_schema():
         f"Expected canonical columns ['sha1'], got {list(frame.columns)}"
 
 
-def test_load_head_state_without_commits_uses_current_config_and_empty_data(tmp_path):
-    """
-    With no commits in .hm, load_head_state should return a copy of current config/meta
-    and an empty data table.
-    """
+def test_load_head_state_without_commits_is_empty(tmp_path):
     repo = Repo.init(tmp_path / "repo")
-    repo.state.config = {"data": [{"fmt": "data_{number}.txt"}]}
-    repo.state.meta = {"nested": {"value": "original"}}
-    repo.state.data = pd.DataFrame({"sha1": ["abc123"], "number": ["1"]})
-    head_state = load_head_state(repo)
-    head_state.config["data"][0]["fmt"] = "changed"
-    head_state.meta["nested"]["value"] = "changed"
+    repo.dothm.git.update_ref("-d", repo.dothm.head.reference.path)
+    assert not repo.dothm.head.is_valid()
 
-    assert head_state.data.empty, \
-        f"Expected empty data for no-commit HEAD fallback, got {head_state.data}"
-    assert list(head_state.data.columns) == ["sha1"], \
-        f"Expected canonical columns ['sha1'], got {list(head_state.data.columns)}"
-    assert repo.state.config["data"][0]["fmt"] == "data_{number}.txt", \
-        f"Expected original repo config to remain unchanged, \
-            got {repo.state.config['data'][0]['fmt']}"
-    assert repo.state.meta["nested"]["value"] == "original", f"Expected original repo \
-        meta to remain unchanged, got {repo.state.meta['nested']['value']}"
+    repo.state.config = {"data": [{"fmt": "data_{number}.txt"}]}
+    repo.state.meta = {"nested": {"value": "working"}}
+    repo.state.data = pd.DataFrame({"sha1": ["abc123"], "number": ["1"]})
+
+    head_state = load_head_state(repo)
+
+    assert head_state.config == {}
+    assert head_state.meta == {}
+    assert head_state.data.empty
+    assert list(head_state.data.columns) == ["sha1"]
+    assert repo.state.config == {"data": [{"fmt": "data_{number}.txt"}]}
+    assert repo.state.meta == {"nested": {"value": "working"}}
+    pd.testing.assert_frame_equal(
+        repo.state.data,
+        pd.DataFrame({"sha1": ["abc123"], "number": ["1"]}),
+    )
+
+def test_load_head_state_reads_committed_versions_and_metadata(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    path = repo.worktree / "a0_i30.h5"
+    path.write_text("original\n", encoding="utf-8")
+    checksum = repo.checksum(path)
+    repo.state.meta = {"nested": {"value": "committed"}}
+    repo.add("a{a}_i{i}.h5")
+    committed_config = repo.dothm.read_yaml("config")
+
+    data_path = repo.dothm.path / "data.tsv"
+    data_path.write_text("unrelated file contents\n", encoding="utf-8")
+    repo.dothm.index.add(["data.tsv"])
+    repo.commit("Committed versions")
+
+    path.write_text("changed\n", encoding="utf-8")
+    repo.state.config["working_only"] = True
+    repo.state.meta = {"nested": {"value": "staged"}}
+    repo.add(".")
+
+    head_state = load_head_state(repo)
+
+    assert head_state.config == committed_config
+    assert head_state.meta == {"nested": {"value": "committed"}}
+    assert file_versions_by_path(head_state) == {"a0_i30.h5": checksum}
+    assert file_versions_by_path(repo.dothm.load_state(staged=True)) == {
+        "a0_i30.h5": repo.checksum(path)
+    }
 
 
 def test_new_branch_state_is_independent_from_current_state(tmp_path):
@@ -2792,6 +2832,7 @@ def test_checkout_remote_branch(tmp_path):
     )
 
     # Configure the repository's data format and commit the initial state.
+    source.set_config(fmt="{name}.txt")
     source.add("data.txt")
     source.commit("Initial commit")
 
