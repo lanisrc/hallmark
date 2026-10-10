@@ -29,6 +29,7 @@
 * If the implementation of a feature or fix is less clear than the desired outcome, write unit or end-to-end tests first to define the expected functionality. Then write the code to make those tests pass.
 * If the implementation is as clear as (or clearer than) the goal, implement the solution first. Then write tests to ensure the solution covers edge cases and realistic user scenarios. The tests may reveal places where the implementation needs to be fixed, expanded, or simplified.
 * Run `pytest --cov` to see which lines the tests miss, or `pytest --cov --cov-report=html` for a browsable report in `htmlcov/`. CI runs the whole suite, including the loopback SSH tests, on every supported Python version, combines coverage from every job, and fails if the total drops below the floor set in `.github/workflows/ci.yml`. Codecov comments on each pull request with the coverage of its changed lines; those comments are informational.
+* Each week, and on pull requests that change `pyproject.toml`, `.github/workflows/dependencies.yml` runs the suite against the oldest dependency versions `pyproject.toml` allows (on Python 3.9) and against the newest releases including pre-releases (on the two newest Python versions). If you start using a newer feature of a dependency, raise its lower bound in `pyproject.toml`.
 
 ## Data Management
 

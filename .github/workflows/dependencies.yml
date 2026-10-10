@@ -1,0 +1,84 @@
+# Tests the oldest dependency versions pyproject.toml allows, and the newest
+# releases including pre-releases.
+
+name: Dependencies
+
+on:
+  schedule:
+  - cron: "17 7 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+    - pyproject.toml
+    - .github/workflows/dependencies.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependencies-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lowest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@v7
+      with:
+        python-version: "3.9"
+    - name: Install the OpenSSH server
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends openssh-server
+    # Resolved separately so the test tools are not held at their oldest versions.
+    - name: Install the oldest allowed dependencies
+      run: |
+        python -m pip install --upgrade pip uv
+        uv pip compile --python-version 3.9 --resolution lowest-direct --no-header pyproject.toml -o "$RUNNER_TEMP/minimum.txt"
+        python -m pip install -r "$RUNNER_TEMP/minimum.txt" -e . --group dev
+        python -m pip check
+        {
+          echo "### Oldest allowed dependencies"
+          echo '```'
+          grep -v '^ *#' "$RUNNER_TEMP/minimum.txt"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: Test with pytest
+      env:
+        HALLMARK_RUN_SSH_TESTS: "1"
+      run: python -m pytest --timeout=600 -ra
+
+  pre-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.14", "3.15"]
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@v7
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install the OpenSSH server
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends openssh-server
+    - name: Install the newest dependencies, including pre-releases
+      env:
+        PYTHON_VERSION: ${{ matrix.python-version }}
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install --upgrade --pre -e . --group dev
+        {
+          echo "### Installed on Python $PYTHON_VERSION"
+          echo '```'
+          python -m pip list --format=freeze --exclude-editable
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: Test with pytest
+      env:
+        HALLMARK_RUN_SSH_TESTS: "1"
+      run: python -m pytest --timeout=600 -ra
