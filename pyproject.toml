@@ -10,14 +10,14 @@ readme = "README.rst"
 requires-python = ">=3.9"
 
 dependencies =[
-    "click",
-    "GitPython",
-    "numpy",
-    "pandas",
-    "parse",
-    "pyyaml",
-    "requests",
-    "tqdm",
+    "click>=8.1",
+    "GitPython>=3.1.30",
+    "numpy>=1.21",
+    "pandas>=1.5",
+    "parse>=1.19",
+    "pyyaml>=5.4",
+    "requests>=2.26",
+    "tqdm>=4.60",
 ]
 
 authors = [
