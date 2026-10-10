@@ -28,7 +28,9 @@ authors = [
     {name = "Ram Adithya"},
     {name = "Hayden Foote"},
     {name = "Samuel Jacobs"},
-    {name = "Yaqing Su"}
+    {name = "Yaqing Su"},
+    {name = "Tianrui (Dennis) Wu"},
+    {name = "Arshia Akhtarkavan"}
 ]
 
 [project.scripts]
