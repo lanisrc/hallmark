@@ -78,14 +78,11 @@ jobs:
         if-no-files-found: error
         retention-days: 7
 
-  # Combines coverage from every test job. Some branches only run on one
-  # Python version or operating system, so no single job sees the total.
   coverage:
     needs: test
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      # Lets Codecov verify uploads with OIDC instead of a stored token.
       id-token: write
     steps:
     - uses: actions/checkout@v7
@@ -114,18 +111,15 @@ jobs:
         path: |
           coverage.xml
           htmlcov/
-    # Codecov needs its GitHub App installed on the organization. Until then
-    # the upload fails without failing CI; the floor below is the gate.
-    # Pull requests from forks cannot request OIDC tokens and upload tokenless.
     - name: Upload coverage to Codecov
+      continue-on-error: true
       uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
       with:
         files: coverage.xml
         disable_search: true
-        fail_ci_if_error: false
+        fail_ci_if_error: true
         use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
-    # The floor lives here rather than in pyproject.toml because pytest-cov
-    # would apply it to each partial run.
+        use_pypi: true
     - name: Enforce the coverage floor
       run: coverage report --fail-under=90
 
