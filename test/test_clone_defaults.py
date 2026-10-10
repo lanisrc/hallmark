@@ -6,6 +6,7 @@ from click.testing import CliRunner
 
 from hallmark import Repo
 from hallmark.cli import hallmark
+from hallmark.error import CloneError, DestinationExistsError
 from hallmark.transport.base import DownloadError
 from mock_server import MockServer
 
@@ -190,6 +191,35 @@ def test_clone_download_failure_keeps_catalog_and_valid_files(
 
 @pytest.mark.parametrize('cli', [False, True])
 @pytest.mark.parametrize('download', [False, True])
+def test_clone_rejects_local_files(tmp_path, cli, download):
+    source = Repo.init(tmp_path / 'source')
+    (source.worktree / 'item1.txt').write_bytes(b'science')
+    source.add('item{item:d}.txt')
+    source.commit('Local measurements')
+    target = tmp_path / 'new-parent' / 'copy'
+    expected = (
+        "This repository tracks local files. "
+        "Their contents aren't included in a clone.\n"
+        "To share data, put it on a server and catalog it with hm add URL, "
+        "or copy the data folder yourself.")
+    if cli:
+        args = ['clone', str(source.dothm.path), str(target)]
+        if not download:
+            args.append('--no-download')
+        result = CliRunner().invoke(hallmark, args)
+        assert result.exit_code == 1, result.output
+        assert expected in result.output
+        assert 'Download these files?' not in result.output
+    else:
+        with pytest.raises(CloneError) as error:
+            Repo.clone(str(source.dothm.path), target, download=download)
+        assert str(error.value) == expected
+    assert not target.parent.exists()
+    assert (source.worktree / 'item1.txt').read_bytes() == b'science'
+
+
+@pytest.mark.parametrize('cli', [False, True])
+@pytest.mark.parametrize('download', [False, True])
 @pytest.mark.parametrize('committed', [False, True])
 def test_clone_empty_repository(tmp_path, cli, download, committed):
     source = Repo.init(tmp_path / 'source')
@@ -209,3 +239,38 @@ def test_clone_empty_repository(tmp_path, cli, download, committed):
     assert repo.state.data.empty
     assert repo.dothm.head.commit.hexsha == source.dothm.head.commit.hexsha
     assert sorted(path.name for path in target.iterdir()) == ['.hm']
+
+
+def test_clone_copy_failure_removes_destination(clone_source, tmp_path, monkeypatch):
+    source, calls, _ = clone_source
+    target = tmp_path / 'copy'
+
+    def fail_copy(staged, destination, **kwargs):
+        (destination / 'partial').write_text('incomplete')
+        raise OSError('Copy failed')
+
+    monkeypatch.setattr('hallmark.remote.clone.copytree', fail_copy)
+    with pytest.raises(OSError, match='Copy failed'):
+        Repo.clone(str(source.dothm.path), target, download=False)
+    assert not target.exists()
+    assert calls == []
+
+
+def test_clone_preserves_destination_created_during_source_read(
+        clone_source, tmp_path, monkeypatch):
+    source, calls, _ = clone_source
+    target = tmp_path / 'copy'
+    from hallmark.repo.dothm import Dothm
+    original_clone = Dothm.clone
+
+    def clone(*args, **kwargs):
+        catalog = original_clone(*args, **kwargs)
+        target.mkdir()
+        (target / 'keep').write_text('keep')
+        return catalog
+
+    monkeypatch.setattr(Dothm, 'clone', clone)
+    with pytest.raises(DestinationExistsError):
+        Repo.clone(str(source.dothm.path), target, download=False)
+    assert (target / 'keep').read_text() == 'keep'
+    assert calls == []

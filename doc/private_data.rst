@@ -161,8 +161,11 @@ Declining keeps the catalog available; an empty selection needs no approval:
    hm commit -m "Record remote catalog"
    hm download --all
 
-An existing catalog can be cloned from a local path, a Git endpoint, or an
-HTTP/SFTP directory containing its metadata. For example, copy this catalog:
+An existing server-backed catalog can be cloned from a local path, a Git
+endpoint, or an HTTP/SFTP directory containing its metadata. Repositories
+tracking local files without a data server are rejected before the destination
+is created, including with ``--no-download``. Empty repositories can be cloned.
+For example, copy this catalog:
 
 .. code-block:: bash
 

@@ -2797,11 +2797,8 @@ def test_checkout_remote_branch(tmp_path):
 
 
     # Clone the source while it only has the main branch.
-    clone = Repo.clone(
-        str(source.dothm.path),
-        tmp_path / "clone",
-        download=False,
-    )
+    Dothm.clone(str(source.dothm.path), tmp_path / "clone" / ".hm")
+    clone = Repo(tmp_path / "clone")
 
     # The cloned repository should have the tracked file in its worktree.
     (clone.worktree / "data.txt").write_text(

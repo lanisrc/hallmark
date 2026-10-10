@@ -244,6 +244,8 @@ class Repo:
         start new local history. Dataset files download by default after
         catalog creation, without prompting unless an approval callback is supplied.
         Declining approval leaves the catalog available without dataset files.
+        Nonempty catalogs without a data server are rejected before creating
+        the destination. Empty repositories can be cloned.
 
         Args:
             url (str): Existing Git catalog or published snapshot location.
