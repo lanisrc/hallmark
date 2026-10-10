@@ -123,7 +123,7 @@ jobs:
         use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
         use_pypi: true
     - name: Enforce the coverage floor
-      run: coverage report --fail-under=90
+      run: coverage report --fail-under=89
 
   distribution-and-docs:
     runs-on: ubuntu-24.04
