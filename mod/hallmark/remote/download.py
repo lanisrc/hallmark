@@ -526,7 +526,8 @@ def _download_and_verify_file(
         destination = resolve_path_in_root(
             context.output_root, relative_path, label="download destination")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with replace_file_on_success(destination, suffix=".part") as temp_path:
+        with replace_file_on_success(
+                destination, suffix=".part", overwrite=False) as temp_path:
             context.transport.fetch(relative_path.as_posix(), temp_path,
                                     chunk_size=chunk_size)
             _verify_file_checksum(temp_path, validated_checksum, chunk_size)
@@ -737,6 +738,43 @@ def _parse_file_size(value) -> Optional[int]:
     return int(size)
 
 
+def _check_existing_files(items, output_root):
+    pending = []
+    skipped = []
+    conflicts = []
+    for item in items:
+        try:
+            destination = resolve_path_in_root(
+                output_root, item.relative_path, label="download destination")
+            blocked_parent = False
+            for parent in destination.parents:
+                if parent == output_root:
+                    break
+                if parent.exists() and not parent.is_dir():
+                    blocked_parent = True
+                    break
+            if blocked_parent:
+                conflicts.append(item.relative_path.as_posix())
+            elif not destination.exists():
+                pending.append(item)
+            else:
+                checksum = _validate_expected_checksum(item.checksum)
+                if (destination.is_file() and checksum is not None
+                        and calculate_file_checksum(destination, algorithm=checksum[0])
+                        .lower() == checksum[1]):
+                    skipped.append(item)
+                else:
+                    conflicts.append(item.relative_path.as_posix())
+        except (OSError, ValueError) as exc:
+            raise DownloadError(str(exc)) from exc
+    if conflicts:
+        raise DownloadError(
+            "Existing paths conflict with the catalog or cannot be verified:\n"
+            + "\n".join(conflicts)
+            + "\nNothing downloaded. Delete these paths first to replace them.")
+    return pending, skipped
+
+
 def plan_download(
     repo,
     output_path: Optional[Union[Path, str]] = None,
@@ -754,7 +792,8 @@ def plan_download(
 
     No network requests are made. With no explicit paths or TSVs, select
     the complete catalog before applying filters. Missing sizes remain unknown.
-    Folder paths select catalogued descendants. Unknown paths raise an error.
+    Folder paths select catalogued descendants. Existing checksum matches are
+    skipped, and unknown paths or conflicting existing files raise an error.
 
     Args:
         repo: The hallmark repository object.
@@ -809,18 +848,13 @@ def plan_download(
         source = RemoteSpec.from_url(
             remote["url"], remote.get("auth"), backend=remote.get("backend"),
             backend_options=remote.get("backend_options"))
-    for item in items:
-        try:
-            resolve_path_in_root(output_root, item.relative_path,
-                                   label="download destination")
-        except ValueError as exc:
-            raise DownloadError(str(exc)) from exc
+    items, skipped = _check_existing_files(items, output_root)
     return DownloadPlan(
         tuple(items), remote.get("url"), output_root,
         remote_auth=remote.get("auth"), remote_name=remote.get("name"),
         estimated_bytes_per_second=estimated_bytes_per_second,
         remote_backend=source.backend if source is not None else None,
-        backend_options=remote.get("backend_options"))
+        backend_options=remote.get("backend_options"), skipped_items=tuple(skipped))
 
 
 def execute_download_plan(
@@ -860,14 +894,24 @@ def execute_download_plan(
         return {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
     if plan.output_path.resolve() != plan.output_path:
         raise DownloadError("Download destination changed since planning")
+    items, skipped = _check_existing_files(plan.items, plan.output_path)
+    results = {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
+    if skipped:
+        results["skipped"] = [item.relative_path.as_posix() for item in skipped]
+    if not items:
+        return results
     remote = RemoteSpec.from_url(
         plan.remote_url, plan.remote_auth, backend=plan.remote_backend,
         backend_options=plan.backend_options)
-    return _download_selected(
+    total_bytes = None
+    if all(item.size_bytes is not None for item in items):
+        total_bytes = sum(item.size_bytes for item in items)
+    results.update(_download_selected(
         remote, plan.output_path,
-        [(item.relative_path, item.checksum) for item in plan.items],
+        [(item.relative_path, item.checksum) for item in items],
         max_workers=max_workers, show_progress=show_progress,
-        total_bytes=plan.total_bytes)
+        total_bytes=total_bytes))
+    return results
 
 
 def _download_selected(

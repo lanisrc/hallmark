@@ -472,10 +472,10 @@ def test_partial_failure_preserves_destination(monkeypatch, fake_process, tmp_pa
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url="ssh://unused/data")
     destination = repo.worktree / "data.bin"
-    destination.write_bytes(b"original")
     monkeypatch.setattr(SshBackend, "prepare", lambda self: None)
 
     def fetch(self, path, destination, **kwargs):
+        (repo.worktree / "data.bin").write_bytes(b"original")
         self._run_ssh_command(fake_process + ["partial", str(destination)], timeout=5)
 
     monkeypatch.setattr(SshBackend, "fetch", fetch)
@@ -489,11 +489,12 @@ def test_checksum_failure_is_atomic(monkeypatch, tmp_path):
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url="ssh://unused/data")
     destination = repo.worktree / "data.bin"
-    destination.write_bytes(b"original")
     monkeypatch.setattr(SshBackend, "prepare", lambda self: None)
-    monkeypatch.setattr(
-        SshBackend, "fetch", lambda self, path, dest, **kw: dest.write_bytes(b"wrong")
-    )
+    def fetch(self, path, dest, **kwargs):
+        destination.write_bytes(b"original")
+        dest.write_bytes(b"wrong")
+
+    monkeypatch.setattr(SshBackend, "fetch", fetch)
     result = download_selection(
         repo,
         repo.worktree,
@@ -507,10 +508,10 @@ def test_cancel_before_publish(monkeypatch, tmp_path):
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url="ssh://unused/data")
     destination = repo.worktree / "item"
-    destination.write_bytes(b"original")
     monkeypatch.setattr(SshBackend, "prepare", lambda self: None)
 
     def fetch(self, path, dest, **kwargs):
+        destination.write_bytes(b"original")
         dest.write_bytes(b"complete")
         self.context.cancel()
 
