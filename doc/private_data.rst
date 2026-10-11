@@ -136,10 +136,12 @@ Choose a scope from inside ``lab``:
    hm download --filter 'runs/run_00[12].h5' --dry-run
    hm download --all --output ./payload
 
-Explicit paths use their recorded catalog checksums when available, just like
-``--tsv`` and ``--all``. A path absent from the catalog can be requested, but
-its size and checksum are unknown. Files without a usable publisher checksum
-can be downloaded, but their contents cannot be checked against the catalog.
+Explicit paths must be catalogued files or folders containing catalogued files.
+A folder selects all catalogued files below it, including subfolders. Unknown
+paths and folders without catalogued files are reported before any server request.
+Explicit selections retain their recorded checksums, just like ``--tsv`` and
+``--all``. Files without a usable publisher checksum can be downloaded, but
+their contents cannot be checked against the catalog.
 
 ``--tsv`` can be repeated and combined with explicit paths; overlapping entries
 are deduplicated. ``--all`` cannot be combined with either selection mode.

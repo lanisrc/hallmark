@@ -555,6 +555,9 @@ def test_cli_dry_run_does_not_resolve_auth_or_start_clients(monkeypatch, tmp_pat
 
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url="ssh://campus/data", remote_auth="missing")
+    (repo.worktree / "item.dat").write_bytes(b"science")
+    repo.add("{name}.dat")
+    (repo.worktree / "item.dat").unlink()
     monkeypatch.chdir(repo.worktree)
 
     def fail(*args, **kwargs):

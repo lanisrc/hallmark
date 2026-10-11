@@ -175,7 +175,8 @@ reference unchanged.
 
 ``Repo.download`` returns a dictionary containing ``succeeded``,
 ``failed``, ``total_bytes``, and ``errors``. Check ``failed`` and ``errors``
-for individual transfer failures. Configuration errors and failed SSH
+for individual transfer failures. Unknown catalog paths raise ``DownloadError``
+before transfer. Configuration errors and failed SSH
 connection checks raise ``DownloadError`` before downloads begin.
 HTTP, SSH, and SFTP downloads use the same rules for destination paths
 and checksum verification.

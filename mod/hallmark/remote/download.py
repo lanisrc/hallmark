@@ -569,15 +569,28 @@ def _select_download_items(
     selected: dict[str, tuple[Path, Optional[ChecksumSpec]]] = {}
     metadata = {}
     explicit_paths = {validate_remote_path(path).as_posix() for path in file_paths}
+    folder_paths = {validate_remote_path(path).as_posix() for path in file_paths
+                    if str(path).endswith("/")}
+    matched_paths = set()
 
     def add_file(
             value: Union[str, Path],
             expected_checksum: Optional[ChecksumSpec] = None,
             row=None,
+            *, explicit_only=False,
             ) -> None:
         """Add a file and its catalog metadata, checking for conflicting records."""
         # Resolve the input value to a safe relative path
         relative_path = validate_remote_path(value)
+        matched = False
+        name = relative_path.as_posix()
+        for requested in explicit_paths:
+            if ((name == requested and requested not in folder_paths)
+                    or name.startswith(requested + "/")):
+                matched_paths.add(requested)
+                matched = True
+        if explicit_only and not matched:
+            return
         # Merge the selected file into the dictionary of selected files, ensuring no
         # conflicting checksums exist.
         _merge_selected_file(selected, relative_path, expected_checksum)
@@ -609,12 +622,9 @@ def _select_download_items(
             row = dict(zip(columns, values))
             # add the resolved remote path and its checksum to the selected files
             relative_path = validate_remote_path(_resolve_remote_path(row, fmt_entries))
-            if not explicit_only or relative_path.as_posix() in explicit_paths:
-                add_file(relative_path, _checksum_from_row(row), row)
+            add_file(relative_path, _checksum_from_row(row), row,
+                     explicit_only=explicit_only)
 
-    # Add explicitly requested file paths to the selected files.
-    for file_path in file_paths:
-        add_file(file_path)
     # Organize data configuration entries by their TSV names for easier access.
     entries_by_tsv: dict[str, list[dict]] = {}
     for entry in data_config:
@@ -689,11 +699,9 @@ def _select_download_items(
                 # get the file path from the entry, if it exists
                 file_path = entry.get("file")
                 # if a file path is specified in the entry, add it to the selected files
-                if file_path and (
-                    all_files
-                    or validate_remote_path(file_path).as_posix() in explicit_paths
-                ):
-                    add_file(file_path, _checksum_from_config(entry), entry)
+                if file_path:
+                    add_file(file_path, _checksum_from_config(entry), entry,
+                             explicit_only=not all_files)
 
     # Determine whether to use legacy data formats based on the presence of file paths,
     # TSV names, and all_files flag.
@@ -707,6 +715,11 @@ def _select_download_items(
     elif explicit_paths and not entries_by_tsv:
         add_frame(repo.state.data, data_config, explicit_only=True)
 
+    unknown_paths = sorted(explicit_paths - matched_paths)
+    if unknown_paths:
+        raise DownloadError(
+            "Paths not in the catalog, or folders with no catalogued files:\n"
+            + "\n".join(unknown_paths))
     return [DownloadItem(path, checksum, *metadata.get(path.as_posix(), (None, None)))
             for path, checksum in selected.values()]
 
@@ -741,6 +754,7 @@ def plan_download(
 
     No network requests are made. With no explicit paths or TSVs, select
     the complete catalog before applying filters. Missing sizes remain unknown.
+    Folder paths select catalogued descendants. Unknown paths raise an error.
 
     Args:
         repo: The hallmark repository object.
