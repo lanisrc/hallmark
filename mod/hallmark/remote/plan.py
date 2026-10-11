@@ -68,6 +68,7 @@ class DownloadPlan:
             by the caller for duration estimates.
         remote_backend (str, optional): Registered backend selected for transfer.
         backend_options (mapping): Immutable backend configuration snapshot.
+        skipped_items (tuple[DownloadItem]): Existing files matching their checksums.
     """
 
     items: tuple[DownloadItem, ...]
@@ -78,13 +79,16 @@ class DownloadPlan:
     estimated_bytes_per_second: Optional[float] = None
     remote_backend: Optional[str] = None
     backend_options: Mapping = field(default_factory=dict, repr=False, hash=False)
+    skipped_items: tuple[DownloadItem, ...] = ()
 
     def __post_init__(self) -> None:
         """Copy the selection and validate the source fields and rate."""
         object.__setattr__(self, "items", tuple(self.items))
+        object.__setattr__(self, "skipped_items", tuple(self.skipped_items))
         object.__setattr__(
             self, "output_path", Path(self.output_path).expanduser().absolute())
-        if any(not isinstance(item, DownloadItem) for item in self.items):
+        if any(not isinstance(item, DownloadItem)
+               for item in self.items + self.skipped_items):
             raise TypeError("items must contain DownloadItem values")
         if any(value is not None and not isinstance(value, str) for value in
                (self.remote_url, self.remote_auth, self.remote_name,
@@ -147,6 +151,9 @@ class DownloadPlan:
             source = urlunsplit(parsed._replace(
                 netloc=parsed.netloc.rsplit("@", 1)[-1], query="", fragment=""))
         backend = f"\nBackend: {self.remote_backend}" if self.remote_backend else ""
+        skipped = ""
+        for item in self.skipped_items:
+            skipped += f"\nAlready downloaded: {item.relative_path.as_posix()}"
         return (f"{self.file_count} file(s); {size}; estimated duration: {duration}"
                 f"\nSource: {source}{backend}"
-                f"\nDestination: {self.output_path}")
+                f"\nDestination: {self.output_path}{skipped}")

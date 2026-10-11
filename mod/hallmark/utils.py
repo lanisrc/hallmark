@@ -187,7 +187,7 @@ def use_working_directory(path):
 
 # use contextmanager to create a temporary file path for atomic writes
 @contextmanager
-def replace_file_on_success(path: Path, *, suffix: str = ".tmp"):
+def replace_file_on_success(path: Path, *, suffix: str = ".tmp", overwrite=True):
     """
     Used in repo.dothm by write_yaml and write_tsv, remote.download by
     _download_and_verify_file,
@@ -199,6 +199,7 @@ def replace_file_on_success(path: Path, *, suffix: str = ".tmp"):
     Args:
         path: Path to the target file.
         suffix: Suffix for the temporary file (default: ".tmp").
+        overwrite: Replace an existing target if True, otherwise fail if it exists.
 
     Yields:
         A temporary Path object for writing.
@@ -217,7 +218,10 @@ def replace_file_on_success(path: Path, *, suffix: str = ".tmp"):
     try:
         yield temp_path
         # replace the target path with the temporary file atomically
-        temp_path.replace(path)
+        if overwrite:
+            temp_path.replace(path)
+        else:
+            os.link(temp_path, path)
     # always clean up the temporary file if an exception occurs or after replacement
     finally:
         temp_path.unlink(missing_ok=True)

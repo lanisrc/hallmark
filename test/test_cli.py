@@ -183,8 +183,8 @@ def test_cli():
                 f"Expected exit code 0 for commit, got {result.exit_code}"
             assert "Committed staged state changes." in result.output
 
-            runner.invoke(hallmark, ["branch", "experiment"])
-            result = runner.invoke(hallmark, ["checkout", "experiment"])
+            result = runner.invoke(hallmark, ["branch", "experiment"])
+            assert result.exit_code == 0, result.output
             result = runner.invoke(hallmark, ["checkout", "experiment"])
             assert result.exit_code == 0, \
                 f"Expected exit code 0 for checkout, got {result.exit_code}"
@@ -223,44 +223,6 @@ def test_cli():
                 with uncommitted changes, got {result.exit_code}"
             assert "has uncommitted changes" in result.output, \
                 f"Expected uncommitted changes message, got: {result.output}"
-
-
-def test_cli_add_dot_and_explicit_paths():
-    """
-    Test the hallmark CLI 'add' command with '.' and explicit paths.
-    This test initializes a hallmark repository, adds files using both '.'
-    and explicit paths, and verifies the behavior of the add command.
-    """
-    runner = CliRunner()
-    with runner.isolated_filesystem():
-        runner.invoke(hallmark, ["init", "repo"])
-        with use_working_directory("repo"):
-            Path("a0_i0.h5").write_text("a0_i0.h5\n", encoding="utf-8")
-            Path("a0_i30.h5").write_text("a0_i30.h5\n", encoding="utf-8")
-
-            result = runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
-            assert result.exit_code == 0, \
-                f"Expected exit code 0 for add, got {result.exit_code}"
-
-            Path("a0_i0.h5").unlink()
-            Path("a1_i45.h5").write_text("a1_i45.h5\n", encoding="utf-8")
-            result = runner.invoke(hallmark, ["add", "."])
-            assert result.exit_code == 0, \
-                f"Expected exit code 0 for add with '.', got {result.exit_code}"
-
-            manifest = Path(".hm/data.tsv").read_text(encoding="utf-8")
-            assert "a0_i0.h5" not in manifest, \
-                "Expected a0_i0.h5 to be removed from manifest"
-            assert "\t1\t45" in manifest or ",1,45" not in manifest, \
-                "Expected encoding information for a1_i45.h5 in manifest"
-
-            Path("top1.h5").write_text("top1.h5\n", encoding="utf-8")
-            Path("top2.h5").write_text("top2.h5\n", encoding="utf-8")
-            result = runner.invoke(hallmark, ["add", "top1.h5", "top2.h5"])
-            assert result.exit_code != 0, f"Expected non-zero exit code for add with \
-                explicit paths, got {result.exit_code}"
-            assert "explicit path add is not supported" in result.output, \
-                f"Expected explicit path add error message, got: {result.output}"
 
 
 def test_cli_add_regex_flag(monkeypatch):
@@ -325,50 +287,6 @@ def test_cli_status():
                 message in status output, got: {result.output}"
             assert "untracked.h5" in result.output, f"Expected untracked file \
                 untracked.h5 in status output, got: {result.output}"
-
-
-def test_cli_set_config_and_add_dot():
-    """
-    Test the hallmark CLI 'set-config' command and subsequent 'add' command.
-    This test initializes a hallmark repository, sets configuration options, adds files,
-    and verifies that the configuration is correctly updated and that the files are
-    added to the repository.
-    """
-    runner = CliRunner()
-    with runner.isolated_filesystem():
-        runner.invoke(hallmark, ["init", "repo"])
-        with use_working_directory("repo"):
-            result = runner.invoke(
-                hallmark,
-                [
-                    "set-config",
-                    "--fmt", "b{a}_i{i}.h5",
-                    "--remote-name", "origin",
-                    "--remote-url", "https://example.com/path",
-                    "--encoding", r"aspin=m([0-9]+(\.[0-9]+)?|\.[0-9]+)",
-                ],
-            )
-            assert result.exit_code == 0, f"Expected exit code 0 for set-config, \
-                got {result.exit_code}"
-            assert "Updated hallmark config." in result.output, \
-                f"Expected config update message, got: {result.output}"
-
-            Path("b0_i0.h5").write_text("b0_i0.h5\n", encoding="utf-8")
-            Path("b0_i30.h5").write_text("b0_i30.h5\n", encoding="utf-8")
-            result = runner.invoke(hallmark, ["add", "."])
-            assert result.exit_code == 0, \
-                f"Expected exit code 0 for add, got {result.exit_code}"
-
-            manifest = Path(".hm/data.tsv").read_text(encoding="utf-8")
-            assert "sha1\ta\ti" in manifest, "Expected encoding information in manifest"
-
-            config = Path(".hm/config.yml").read_text(encoding="utf-8")
-            assert "fmt: b{a}_i{i}.h5" in config, "Expected fmt entry in config"
-            assert "name: origin" in config, "Expected remote name in config"
-            assert "url: https://example.com/path" in config, \
-                "Expected remote URL in config"
-            assert r"aspin: m([0-9]+(\.[0-9]+)?|\.[0-9]+)" in config, \
-                "Expected encoding regex in config"
 
 
 def test_cli_set_config_validates_explicit_empty_format():
@@ -1263,7 +1181,7 @@ def test_add_then_download_requires_confirmation(monkeypatch, tmp_path, answer):
 
 # Staging-specific coverage from sam/add-restore. Existing tests above remain.
 
-def test_cli_add_dot_and_explicit_paths_with_staging():
+def test_cli_add_dot_and_explicit_paths():
     """
     Test the hallmark CLI 'add' command with '.' and explicit paths.
     This test initializes a hallmark repository, adds files using both '.'
@@ -1286,11 +1204,10 @@ def test_cli_add_dot_and_explicit_paths_with_staging():
             assert result.exit_code == 0, \
                 f"Expected exit code 0 for add with '.', got {result.exit_code}"
 
-            manifest = Path(".hm/data.tsv").read_text(encoding="utf-8")
-            assert "a0_i0.h5" not in manifest, \
-                "Expected a0_i0.h5 to be removed from manifest"
-            assert "\ta1_i45.h5\t1\t45\n" in manifest, \
-                "Expected encoding information for a1_i45.h5 in manifest"
+            catalog = Repo(".").state.data
+            assert catalog["path"].tolist() == ["a0_i30.h5", "a1_i45.h5"]
+            assert catalog["a"].tolist() == ["0", "1"]
+            assert catalog["i"].tolist() == ["30", "45"]
 
             Path("top1.h5").write_text("top1.h5\n", encoding="utf-8")
             Path("top2.h5").write_text("top2.h5\n", encoding="utf-8")
@@ -1301,7 +1218,7 @@ def test_cli_add_dot_and_explicit_paths_with_staging():
                 in result.output
 
 
-def test_cli_set_config_and_add_dot_with_staging():
+def test_cli_set_config_and_add_dot():
     """
     Test the hallmark CLI 'set-config' command and subsequent 'add' command.
     This test initializes a hallmark repository, sets configuration options, adds files,
@@ -1333,8 +1250,11 @@ def test_cli_set_config_and_add_dot_with_staging():
             assert result.exit_code == 0, \
                 f"Expected exit code 0 for add, got {result.exit_code}"
 
-            manifest = Path(".hm/data.tsv").read_text(encoding="utf-8")
-            assert "sha1\tpath\ta\ti" in manifest
+            catalog = Repo(".").state.data
+            assert list(catalog.columns) == ["sha1", "path", "a", "i"]
+            assert catalog["path"].tolist() == ["b0_i0.h5", "b0_i30.h5"]
+            assert catalog["a"].tolist() == ["0", "0"]
+            assert catalog["i"].tolist() == ["0", "30"]
 
             config = Path(".hm/config.yml").read_text(encoding="utf-8")
             assert "fmt: b{a}_i{i}.h5" in config, "Expected fmt entry in config"

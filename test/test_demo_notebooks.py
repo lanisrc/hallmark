@@ -1,6 +1,7 @@
 """Run both demo workflows with a disposable HTTP dataset instead of private SSH."""
 
 from functools import partial
+from hashlib import sha256
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -27,10 +28,14 @@ class _QuietHandler(SimpleHTTPRequestHandler):
 def demo_dataset(tmp_path):
     root = tmp_path / "server"
     root.mkdir()
+    checksums = []
     for source in ("M87", "SgrA"):
         for day in (1, 2):
             name = f"{source}_{day:03d}.txt"
-            (root / name).write_text(f"demo data for {name}\n", encoding="utf-8")
+            path = root / name
+            path.write_text(f"demo data for {name}\n", encoding="utf-8")
+            checksums.append(f"{sha256(path.read_bytes()).hexdigest()}  {name}")
+    (root / "sha256sums").write_text("\n".join(checksums) + "\n")
     handler = partial(_QuietHandler, directory=str(root))
     with ThreadingHTTPServer(("127.0.0.1", 0), handler) as server:
         thread = Thread(target=server.serve_forever, daemon=True)

@@ -273,6 +273,8 @@ class Repo:
         start new local history. Dataset files download by default after
         catalog creation, without prompting unless an approval callback is supplied.
         Declining approval leaves the catalog available without dataset files.
+        Nonempty catalogs without a data server are rejected before creating
+        the destination. Empty repositories can be cloned.
 
         Args:
             url (str): Existing Git catalog or published snapshot location.
@@ -682,13 +684,6 @@ class Repo:
                 worktree_deleted.append(f".hm/{path}")
             else:
                 worktree_modified.append(f".hm/{path}")
-
-        untracked.extend(
-            f".hm/{path}" for path in self.dothm.untracked_files
-            if Path(path).parts[0] not in {
-                "objects", "versions", "versions.yml"
-            }
-        )
 
         return {
             "branch": current_branch(self),

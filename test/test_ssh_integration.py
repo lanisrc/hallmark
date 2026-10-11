@@ -171,11 +171,12 @@ def test_explicit_endpoint_and_missing_file(ssh_server, tmp_path):
     url = f"sftp://{getpass.getuser()}@127.0.0.1:{server['port']}{server['root']}/"
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url=url)
-    output = repo.worktree / "missing"
+    output = repo.worktree / "keep"
     output.write_bytes(b"keep")
     result = download_selection(repo, repo.worktree, [(Path('missing'), None)])
     assert result["failed"] == 1
     assert output.read_bytes() == b"keep"
+    assert not (repo.worktree / "missing").exists()
     assert not list(Path(repo.worktree).glob("*.part"))
 
 
@@ -398,12 +399,13 @@ def test_permission_denied_preserves_existing_file(ssh_server, tmp_path):
     source.chmod(0)
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url=ssh_server["url"])
-    destination = repo.worktree / "private"
+    destination = repo.worktree / "keep"
     destination.write_bytes(b"original")
     try:
         result = download_selection(repo, repo.worktree, [(Path('private'), None)])
         assert result["failed"] == 1
         assert destination.read_bytes() == b"original"
+        assert not (repo.worktree / "private").exists()
         assert not list(Path(repo.worktree).glob("*.part"))
     finally:
         source.chmod(0o600)
@@ -415,7 +417,6 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url=ssh_server["url"])
     destination = repo.worktree / "large"
-    destination.write_bytes(b"original")
     transports = []
     prepare = SshBackend.prepare
 
@@ -437,6 +438,7 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
             [(Path("large"), None)])
         try:
             _wait_for_partial_file(repo.worktree, "*.part", len(payload), task)
+            destination.write_bytes(b"original")
             assert len(transports) == 1
             transports[0]._master.terminate()
             result = task.result(timeout=5)

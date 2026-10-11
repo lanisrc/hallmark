@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 from io import StringIO
 from pathlib import Path
-from shutil import rmtree
+from shutil import copytree, rmtree
+from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 
 import pandas as pd
@@ -170,7 +171,8 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
     Clone an existing Git catalog or published HTTP/SFTP catalog snapshot.
 
     Existing destinations are rejected before source access. An incomplete
-    destination created by this call is removed on failure. Dataset discovery
+    destination created by this call is removed on failure. Local-file catalogs
+    without a data server are rejected before destination creation. Dataset discovery
     belongs to ``Repo.add(URL)``.
 
     Args:
@@ -189,42 +191,64 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
         ValueError: If source options are invalid.
         DownloadError: If remote metadata cannot be read or validated.
     """
-    if source_type not in {"auto", "git", "catalog"}:
-        raise ValueError("source_type must be auto, git, or catalog")
-    url = str(url)
     destination = Path(path).expanduser().absolute()
     if destination.exists() or destination.is_symlink():
         raise DestinationExistsError(
             f"fatal: destination path '{path}' already exists and is not empty.")
+    with TemporaryDirectory(prefix="hallmark-clone-") as temporary:
+        staged = Path(temporary) / destination.name
+        repo = _prepare_catalog(cls, url, staged, path, auth=auth,
+                                source_type=source_type)
+        try:
+            remotes = normalize_remotes(repo.state.config.get("remote"))
+            has_data_server = any(remote.get("url") for remote in remotes)
+            if not repo.state.data.empty and not has_data_server:
+                raise CloneError(
+                    "This repository tracks local files. "
+                    "Their contents aren't included in a clone.\n"
+                    "To share data, put it on a server and catalog it with "
+                    "hm add URL, or copy the data folder yourself.")
+        finally:
+            repo.dothm.close()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            destination.mkdir()
+        except FileExistsError as exc:
+            raise DestinationExistsError(
+                f"Destination already exists: {path}") from exc
+        try:
+            copytree(staged, destination, dirs_exist_ok=True, symlinks=True)
+            return cls(destination)
+        except BaseException:
+            rmtree(destination, ignore_errors=True)
+            raise
+
+
+def _prepare_catalog(cls, url, path, display_path, *, auth, source_type):
+    if source_type not in {"auto", "git", "catalog"}:
+        raise ValueError("source_type must be auto, git, or catalog")
+    url = str(url)
+    destination = Path(path)
     is_git = _is_git_source(url, source_type)
     if is_git and auth is not None:
         raise ValueError("Git cloning uses Git/SSH authentication, not auth profiles")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        destination.mkdir()
-    except FileExistsError as exc:
-        raise DestinationExistsError(f"Destination already exists: {path}") from exc
-    try:
-        if is_git:
-            return _clone_git(cls, url, destination, path, auth)
-        source = RemoteSpec.from_url(url, auth)
-        with OperationContext(source) as context:
+    if is_git:
+        return _clone_git(cls, url, destination, display_path, auth)
+    source = RemoteSpec.from_url(url, auth)
+    with OperationContext(source) as context:
+        snapshot = _read_catalog_snapshot(context)
+    if snapshot is None and not source.root.rstrip("/").endswith(".hm"):
+        nested = RemoteSpec.from_url(url.rstrip("/") + "/.hm/", auth)
+        with OperationContext(nested) as context:
             snapshot = _read_catalog_snapshot(context)
-        if snapshot is None and not source.root.rstrip("/").endswith(".hm"):
-            nested = RemoteSpec.from_url(url.rstrip("/") + "/.hm/", auth)
-            with OperationContext(nested) as context:
-                snapshot = _read_catalog_snapshot(context)
-        if snapshot is None:
-            if source_type == "auto" and source.scheme in {"http", "https"}:
-                return _clone_git(cls, url, destination, path, auth)
-            raise CloneError("No published Hallmark catalog at this URL; "
-                             "use hm init PATH, then hm add URL "
-                             "for a raw dataset")
-        repo = cls.init(destination)
-        for name, contents in snapshot.items():
-            (repo.dothm.path / name).write_text(contents, encoding="utf-8")
-        _commit_catalog_metadata(repo, snapshot, "Import published catalog snapshot")
-        return repo
-    except BaseException:
-        rmtree(destination, ignore_errors=True)
-        raise
+    if snapshot is None:
+        if source_type == "auto" and source.scheme in {"http", "https"}:
+            return _clone_git(cls, url, destination, display_path, auth)
+        raise CloneError("No published Hallmark catalog at this URL; "
+                         "use hm init PATH, then hm add URL "
+                         "for a raw dataset")
+    repo = cls.init(destination)
+    for name, contents in snapshot.items():
+        (repo.dothm.path / name).write_text(contents, encoding="utf-8")
+    _commit_catalog_metadata(repo, snapshot, "Import published catalog snapshot")
+    return repo

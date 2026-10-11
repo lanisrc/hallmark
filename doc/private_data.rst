@@ -136,18 +136,23 @@ Choose a scope from inside ``lab``:
    hm download --filter 'runs/run_00[12].h5' --dry-run
    hm download --all --output ./payload
 
-Explicit paths use their recorded catalog checksums when available, just like
-``--tsv`` and ``--all``. A path absent from the catalog can be requested, but
-its size and checksum are unknown. Files without a usable publisher checksum
-can be downloaded, but their contents cannot be checked against the catalog.
+Explicit paths must be catalogued files or folders containing catalogued files.
+A folder selects all catalogued files below it, including subfolders. Unknown
+paths and folders without catalogued files are reported before any server request.
+Explicit selections retain their recorded checksums, just like ``--tsv`` and
+``--all``. Files without a usable publisher checksum can be downloaded to new
+paths, but their contents cannot be checked against the catalog.
 
 ``--tsv`` can be repeated and combined with explicit paths; overlapping entries
 are deduplicated. ``--all`` cannot be combined with either selection mode.
 Relative output paths are relative to the current directory. Without
 ``--output``, downloads go to the repository worktree; bare ``.hm`` repositories
-require an explicit output directory. Repeating a download transfers the
-selection again and replaces destinations only after successful transfer and
-any recorded checksum verification.
+require an explicit output directory. Existing files with matching checksums
+are listed as already downloaded and skipped. Different contents, directories
+blocking file paths, and existing files without a usable catalog checksum stop
+the whole selection before transfer. Delete conflicting paths yourself before
+retrying. There is no overwrite option. ``--dry-run`` performs the same local
+checks without downloading or creating files.
 
 After committing the catalog, use ``download`` to review and approve a transfer.
 Declining keeps the catalog available; an empty selection needs no approval:
@@ -161,8 +166,11 @@ Declining keeps the catalog available; an empty selection needs no approval:
    hm commit -m "Record remote catalog"
    hm download --all
 
-An existing catalog can be cloned from a local path, a Git endpoint, or an
-HTTP/SFTP directory containing its metadata. For example, copy this catalog:
+An existing server-backed catalog can be cloned from a local path, a Git
+endpoint, or an HTTP/SFTP directory containing its metadata. Repositories
+tracking local files without a data server are rejected before the destination
+is created, including with ``--no-download``. Empty repositories can be cloned.
+For example, copy this catalog:
 
 .. code-block:: bash
 
@@ -426,8 +434,9 @@ Download behavior and troubleshooting
 -------------------------------------
 
 Files are downloaded to temporary paths and published atomically after transfer
-and any recorded checksum verification. A failed transfer preserves an existing
-destination and removes its temporary file. Successful files remain available
+and any recorded checksum verification. Publication fails if the destination
+appeared during transfer, preserving that file. A failed transfer removes its
+temporary file. Successful files remain available
 when another file fails; a multi-file download is not a single transaction.
 The CLI exits nonzero on transfer failures. Cancellation stops the active
 operation and closes the SSH connections and processes it started.

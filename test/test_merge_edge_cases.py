@@ -25,9 +25,7 @@ def _committed_repo(tmp_path, names=("data_1.txt", "data_2.txt")):
 
 
 @pytest.mark.parametrize("stored_path", [
-    pytest.param(None, marks=pytest.mark.xfail(
-        strict=True, raises=TypeError,
-        reason="Legacy rows without a path or pattern crash path formatting")),
+    None,
     "nested/data_1.txt",
 ])
 def test_manifest_without_format_handles_legacy_and_explicit_paths(stored_path):
@@ -42,9 +40,6 @@ def test_manifest_without_format_handles_legacy_and_explicit_paths(stored_path):
         path.as_posix(): checksum for path, checksum in expected}
 
 
-@pytest.mark.xfail(
-    strict=True, raises=TypeError,
-    reason="Mixed legacy and explicit-path rows need a missing-pattern fallback")
 @pytest.mark.parametrize("explicit_first", [False, True])
 def test_manifest_without_format_keeps_explicit_rows_among_legacy_rows(
         explicit_first):
@@ -62,12 +57,8 @@ def test_manifest_without_format_keeps_explicit_rows_among_legacy_rows(
 
 
 @pytest.mark.parametrize("direction", [
-    pytest.param("file_to_directory", marks=pytest.mark.xfail(
-        strict=True, raises=FileExistsError,
-        reason="Old version metadata blocks staging a nested replacement file")),
-    pytest.param("directory_to_file", marks=pytest.mark.xfail(
-        strict=True, raises=IsADirectoryError,
-        reason="Old version metadata directory blocks staging its parent path")),
+    "file_to_directory",
+    "directory_to_file",
 ])
 def test_rescan_handles_file_directory_transitions(tmp_path, direction):
     repo = Repo.init(tmp_path / "repo")

@@ -85,6 +85,8 @@ def iter_manifest_entries(
         fmt = single_data_format(state.config)
     # convert each record in the repository state to a dictionary
     for record in state.data.to_dict(orient="records"):
+        if not fmt and not string_or_none(record.get("path")):
+            continue
         # yield a tuple containing the relative file path and its SHA-1 checksum
         yield row_to_path(record, fmt), str(record["sha1"])
 

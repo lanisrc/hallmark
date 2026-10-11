@@ -76,6 +76,8 @@ def _report_download_results(results: dict) -> None:
             failed files and providing error messages.
     """
     # Report the results of the download operation to the user.
+    for path in results.get("skipped", []):
+        click.echo(f"Already downloaded: {path}")
     succeeded = results["succeeded"]
     failed = results["failed"]
     total_mb = results["total_bytes"] / (1024 * 1024)

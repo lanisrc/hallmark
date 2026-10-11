@@ -390,3 +390,16 @@ def test_snapshot_download_uses_independent_payload_server(
     assert all(url.startswith(catalog_url) for url in metadata_server[1])
     assert (repo.worktree / "a.fits").read_bytes() == b"fits"
     assert repo.download_result["succeeded"] == 1
+
+
+@pytest.mark.parametrize("download", [False, True])
+def test_published_local_catalog_is_rejected(tmp_path, metadata_server, download):
+    pages, _ = metadata_server
+    root = "https://example.test/local/"
+    pages[root + "config.yml"] = "data:\n- fmt: 'item{i}.txt'\n"
+    pages[root + "meta.yml"] = "{}\n"
+    pages[root + "data.tsv"] = "sha1\ti\n" + "a" * 40 + "\t1\n"
+    target = tmp_path / "copy"
+    with pytest.raises(CloneError, match="This repository tracks local files"):
+        Repo.clone(root, target, download=download)
+    assert not target.exists()

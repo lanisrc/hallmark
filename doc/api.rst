@@ -175,7 +175,11 @@ reference unchanged.
 
 ``Repo.download`` returns a dictionary containing ``succeeded``,
 ``failed``, ``total_bytes``, and ``errors``. Check ``failed`` and ``errors``
-for individual transfer failures. Configuration errors and failed SSH
+for individual transfer failures. ``plan.skipped_items`` lists existing files
+whose checksums match. Execution checks destinations again before connecting.
+Its result also includes ``skipped`` paths when more files match at execution.
+Unknown catalog paths and existing-file conflicts raise ``DownloadError``
+before transfer. Configuration errors and failed SSH
 connection checks raise ``DownloadError`` before downloads begin.
 HTTP, SSH, and SFTP downloads use the same rules for destination paths
 and checksum verification.

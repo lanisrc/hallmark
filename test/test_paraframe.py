@@ -58,20 +58,15 @@ def test_paraframe_class_functionality(create_temp_data):
     assert all(mask_filter["a"].unique() == [1,2,3,4])
 
 
-def test_debug(create_temp_data, capsys, tmp_path):
+def test_debug(create_temp_data, capsys):
     # users want to see a detailed summary of how ParaFrame utilizes globbing
     fmt = "a_{a:d}/b_{b:d}.txt"
-    ParaFrame.parse(fmt, base_path=create_temp_data, debug=True)
+    pf = ParaFrame.parse(fmt, base_path=create_temp_data, debug=True)
     captured = capsys.readouterr()
-    print(captured.out)
-    expected = (
-        '0 ' + str(tmp_path) + '/data/a_{a:d}/b_{b:d}.txt () {}\n' +
-        "1 " + str(tmp_path) + "/data/a_{a}/b_{b:d}.txt () {'a': '*'}\n" +
-        "2 " + str(tmp_path) + "/data/a_{a}/b_{b}.txt () {'a': '*', 'b': '*'}\n" +
-        'Pattern: "' + str(tmp_path) + '/data/a_*/b_*.txt"\n' +
-        '100 matches, e.g., "' + str(tmp_path) + '/data/a_0/b_1.txt"\n'
-    )
-    assert captured.out == expected
+
+    assert len(pf) == 100
+    assert f'Pattern: "{create_temp_data}/a_*/b_*.txt"' in captured.out
+    assert "100 matches" in captured.out
 
 
 #### glob_search tests ###

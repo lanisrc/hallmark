@@ -55,7 +55,7 @@ def test_plan_reads_path_catalog_offline_and_preserves_unknown_sizes(
 
 
 def test_explicit_paths_retain_catalog_checksums_and_metadata(catalog):
-    plan = plan_download(catalog, file_paths=["nested/a.fits", "unlisted.bin"])
+    plan = plan_download(catalog, file_paths=["nested/a.fits", "b.txt"])
     assert plan.file_count == 2
     assert plan.items[0].checksum == ("sha256", sha256(b"abcdef").hexdigest())
     assert plan.items[0].size_bytes == 6

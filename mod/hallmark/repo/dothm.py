@@ -206,6 +206,17 @@ remote:
             super().clone_from(url, str(to_path))
             dothm = cls(str(to_path))
 
+            commit = dothm.head.commit
+            initial_message = "Initial commit: local `.hm` repository"
+            if (not commit.parents
+                    and commit.message.strip() == initial_message
+                    and {item.path for item in commit.tree} == {"README.md"}):
+                (dothm.path / "config.yml").write_text(
+                    cls.config_template(), encoding="utf-8")
+                dothm.write_yaml({}, "meta")
+                dothm.write_tsv(State().data, "data")
+                dothm.index.add(["config.yml", "meta.yml", "data.tsv"])
+
             required_files = ["config.yml", "meta.yml", "data.tsv"]
             for file in required_files:
                 if not (dothm.path / file).exists():
@@ -463,10 +474,10 @@ remote:
     def save_state(self, state: State) -> None:
         fmt = single_data_format(state.config)
         paths = set()
+        records = state.data.fillna("").to_dict(orient="records")
 
-        for record in state.data.fillna("").to_dict(orient="records"):
+        for record in records:
             record["path"] = row_to_path(record, fmt).as_posix()
-            self.stage_file_version(record)
             paths.add(f"versions/{record['path']}")
 
         for_deletion = [
@@ -480,6 +491,17 @@ remote:
             # These are generated metadata files. Leaving them on disk makes
             # Git treat them as untracked blockers when another branch has them.
             self.index.remove(for_deletion, working_tree=True, force=True)
+            for path in for_deletion:
+                parent = (self.path / path).parent
+                while parent != self.path / "versions":
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        break
+                    parent = parent.parent
+
+        for record in records:
+            self.stage_file_version(record)
 
         self.write_yaml(state.config, "config")
         self.write_yaml(state.meta, "meta")
