@@ -59,12 +59,20 @@ def test_remote_add_does_not_require_filename_inference(tmp_path, metadata_serve
     assert repo.plan_download().file_count == 1
 
 
-def test_empty_filtered_add_is_valid(tmp_path, metadata_server):
+def test_empty_filtered_add_is_an_error_and_keeps_catalog(tmp_path, metadata_server):
     pages, _ = metadata_server
     root = "https://example.test/data/"
     pages[root] = '<h1>Index of data</h1><a href="notes.txt">notes.txt</a>'
     repo = Repo.init(tmp_path / "clone")
-    repo.add(root, remote_fmt="run{run:d}.h5")
+    before = {name: (repo.dothm.path / name).read_bytes()
+              for name in ("config.yml", "data.tsv", ".git/index")}
+    with pytest.raises(ValueError) as error:
+        repo.add(root, remote_fmt="run{run:d}.h5")
+    message = str(error.value)
+    assert "No remote files matched" in message
+    assert "run{run:d}.h5" in message and root in message
+    assert "previous catalogue kept" in message
+    assert before == {name: (repo.dothm.path / name).read_bytes() for name in before}
     assert repo.state.data.empty
     assert repo.plan_download().file_count == 0
 
