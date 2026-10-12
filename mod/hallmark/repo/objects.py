@@ -27,15 +27,16 @@ class Objects:
     their SHA-1 checksum, allowing them to be efficiently retrieved and
     restored.
     """
-    def __init__(self, path: Union[Path, str]):
+    def __init__(self, path: Union[Path, str], name: str = "objects"):
         """
         Initialize the object store.
 
         Args:
             path (Path or str): Path to the Hallmark repository. The object
-                store is located in the ``objects`` subdirectory.
+                store is located in the ``name`` subdirectory.
+            name (str): Store directory; ``objects`` for committed files.
         """
-        self.root = Path(path) / "objects"
+        self.root = Path(path) / name
 
     @staticmethod
     def _copy_and_verify_file(
@@ -44,6 +45,7 @@ class Objects:
         *,
         expected_sha1: str,
         chunk_size: int = FILE_IO_CHUNK_SIZE,
+        overwrite: bool = True,
         ) -> Path:
         """
         Used by store and restore.
@@ -54,6 +56,8 @@ class Objects:
             dest (Path): Destination file path.
             expected_sha1 (str): Expected SHA-1 checksum of the source file.
             chunk_size (int): Size of chunks to read at a time.
+            overwrite (bool): Replace an existing destination; otherwise
+                fail with FileExistsError.
 
         Returns:
             Path: Path to the copied file.
@@ -72,7 +76,7 @@ class Objects:
         digest = hashlib.sha1()
 
         # Use replace_file_on_success to create a temporary file for the copy operation
-        with replace_file_on_success(dest) as temp_path:
+        with replace_file_on_success(dest, overwrite=overwrite) as temp_path:
             # read the source file in binary mode and write to the temporary file
             with src.open("rb") as source, temp_path.open("wb") as target:
                 while True:
