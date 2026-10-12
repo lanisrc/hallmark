@@ -99,10 +99,51 @@ catalogs, publish an immutable export with a SHA-256 manifest, for example
 ``<digest>  runs/run_001.h5`` records in ``SHA256SUMS``.
 
 The generated data remote is named ``origin`` and points to the source URL.
+Each ``add`` records a *source*: the remote, the folder beneath it, and the
+pattern and filters that selected its files. Its rows carry the source name.
 The destination may already contain files, provided it has no ``.hm``;
 initialization preserves those files. An existing ``.hm`` is rejected before
 network access. ``hm init PATH`` always creates an empty local repository.
 Use ``add URL`` inside it to discover remote data.
+
+Several sources in one catalog
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A catalog can combine selections from several folders and servers:
+
+.. code-block:: bash
+
+   hm add 'ssh://lab-data/srv/exports/lab/runs/run_{run:03d}.h5'
+   hm add 'ssh://lab-data/srv/exports/lab/' --filter 'notes/*.txt'
+   hm add 'https://archive.example.org/eht/m87/' --prefix archive
+   hm commit -m "Record three sources"
+
+A URL inside an existing remote's folder reuses that remote, and paths stay
+relative to its URL, so ``runs/run_001.h5`` above downloads to
+``runs/run_001.h5``. A URL on another server adds a remote named after its
+host. Downloaded files mirror each server, so two sources cannot catalog the
+same path; ``add`` lists the clashing paths and asks for ``--prefix DIR``,
+which places that source's files in a local folder. Use ``--remote NAME`` to
+name a new remote or pick an existing one, and ``--source NAME`` to name the
+source.
+
+Repeating an ``add`` with the same URL, pattern and filters updates its
+source: new files are added, files gone from the server are removed, and
+``add`` lists the removals. A bare URL updates the single source of that
+folder. A different pattern in the same folder adds another source; to change
+an existing source's pattern instead, run ``add`` with ``--source NAME``.
+A new pattern must still match every catalogued file of that source, so a
+narrower selection belongs on a new branch. ``set-config --fmt`` does not
+apply to remote catalogs.
+
+``download`` fetches each file from the remote of the source that cataloged
+it, opening one connection per remote; the plan lists every remote and its file
+count. ``download --source NAME`` selects one source's files, and
+``download --remote NAME`` fetches every selected file from that remote
+instead, at the same path beneath its URL, which suits a mirror.
+
+Catalogs created before sources existed keep working and record their single
+source on the next ``add``.
 
 Select a built-in backend with ``--backend http``, ``ssh``, or ``cyverse``, or
 name an installed plugin. Without an explicit choice, Hallmark selects a

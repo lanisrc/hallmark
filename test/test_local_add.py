@@ -568,7 +568,7 @@ def test_pattern_change_is_case_sensitive_and_atomic(local_repo, command):
     _assert_status(repo)
 
 
-def test_remote_format_update_preserves_catalog_without_sha1(
+def test_remote_format_update_is_refused_without_changes(
         local_repo, monkeypatch):
     repo = local_repo
     reads = []
@@ -586,34 +586,20 @@ def test_remote_format_update_preserves_catalog_without_sha1(
     before = Repo(repo.worktree)
     assert "sha1" not in before.state.data.columns
 
-    _invoke("set-config", "--fmt", "{name}.fits")
+    # The pattern belongs to the remote source, not the branch data spec.
+    output = _invoke("set-config", "--fmt", "{name}.fits", exit_code=1)
+    assert "--source" in output
 
     saved = Repo(repo.worktree)
     pd.testing.assert_frame_equal(saved.state.data, before.state.data)
-    assert saved.state.meta == before.state.meta
-    assert saved.state.config["remote"] == before.state.config["remote"]
-    assert saved.state.config["data"][0]["fmt"] == "{name}.fits"
-    assert saved.status() == {
-        "branch": "main",
-        "commit": saved.dothm.head.commit.hexsha[:7],
-        "staged": {
-            "state": ["config.yml"],
-            "added": [],
-            "modified": [],
-            "deleted": [],
-        },
-        "worktree": {"modified": [], "deleted": []},
-        "untracked": [],
-        "remote_catalog": True,
-    }
-    assert _invoke("status") == (
-        "On branch main\n\nChanges to be committed:\n"
-        "  state:   config.yml\n"
-    )
+    assert saved.state.config == before.state.config
+    assert saved.state.config["sources"] == [
+        {"name": "origin", "remote": "origin", "fmt": "{src}_{day:03d}.fits"}]
+    assert saved.dothm.index.diff("HEAD") == []
     assert reads == [""]
     assert not saved.objects.root.exists()
     assert not any((repo.worktree / path).exists()
-                   for path in saved.state.data["path"])
+                   for path in ("M87_001.fits", "M87_002.fits"))
 
 
 def test_overlapping_add_paths_hash_each_matching_file_once(

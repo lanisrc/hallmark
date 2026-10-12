@@ -881,7 +881,8 @@ def test_clone_rejects_nonpositive_max_workers(max_workers):
 @pytest.mark.parametrize(
     "arguments, message",
     [
-        (["download"], "Provide file paths, --tsv, --all, --filter, or --fmt"),
+        (["download"],
+         "Provide file paths, --tsv, --all, --source, --filter, or --fmt"),
         (["download", "file.dat", "--all"], "--all cannot be combined"),
         (["download", "--tsv", "data", "--all"], "--all cannot be combined")])
 def test_download_cli_rejects_invalid_selection_combinations(
@@ -996,7 +997,8 @@ def test_download_cli_passes_selection_and_options_to_downloader(monkeypatch):
     assert "Successfully downloaded 1 files (1.0 MB)" in result.output
     assert captured["plan"] == (None, {
         "file_paths": ("nested/file.dat",), "tsv_names": (), "all_files": False,
-        "filter": ("**/*.dat",), "fmt": "nested/{name}.dat", "remote_name": "mirror"})
+        "filter": ("**/*.dat",), "fmt": "nested/{name}.dat", "remote_name": "mirror",
+        "sources": None})
     assert captured["download"][0] is plan
     assert captured["download"][1] == {
         "max_workers": 2, "progress": True, "approved": True}

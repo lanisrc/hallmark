@@ -18,20 +18,30 @@ class DownloadItem:
     A file and its catalog metadata at the time a download is planned.
 
     Attributes:
-        relative_path (Path): File path relative to the data remote.
+        relative_path (Path): Catalogue path, relative to the destination.
         checksum (str | tuple, optional): Digest or (algorithm, digest) pair.
         size_bytes (int, optional): Recorded file size; None if unknown.
         mtime (str, optional): Recorded modification time; None if unknown.
+        remote (str, optional): Name of the plan remote serving the file;
+            None for the plan's single remote.
+        remote_path (Path, optional): Path beneath that remote's URL when it
+            differs from ``relative_path``, as for a source with a prefix.
     """
 
     relative_path: Path
     checksum: Optional[Union[str, tuple[str, str]]] = None
     size_bytes: Optional[int] = None
     mtime: Optional[str] = None
+    remote: Optional[str] = None
+    remote_path: Optional[Path] = None
 
     def __post_init__(self) -> None:
         """Normalize the path and validate optional file metadata."""
         object.__setattr__(self, "relative_path", Path(self.relative_path))
+        if self.remote_path is not None:
+            object.__setattr__(self, "remote_path", Path(self.remote_path))
+        if self.remote is not None and not isinstance(self.remote, str):
+            raise ValueError("remote must be a remote name or None")
         if isinstance(self.checksum, list):
             object.__setattr__(self, "checksum", tuple(self.checksum))
         if self.checksum is not None and not (
@@ -48,6 +58,11 @@ class DownloadItem:
             raise ValueError("size_bytes must be a nonnegative integer or None")
         if self.mtime is not None and not isinstance(self.mtime, str):
             raise ValueError("mtime must be a string or None")
+
+    @property
+    def source_path(self) -> Path:
+        """Path of the file beneath its remote's URL."""
+        return self.remote_path if self.remote_path is not None else self.relative_path
 
 
 @dataclass(frozen=True)
@@ -69,6 +84,9 @@ class DownloadPlan:
         remote_backend (str, optional): Registered backend selected for transfer.
         backend_options (mapping): Immutable backend configuration snapshot.
         skipped_items (tuple[DownloadItem]): Existing files matching their checksums.
+        remotes (mapping): Every remote the items name, by name, with its
+            ``url``, ``auth``, ``backend`` and ``backend_options`` pinned. The
+            ``remote_*`` fields describe the remote when there is only one.
     """
 
     items: tuple[DownloadItem, ...]
@@ -80,6 +98,7 @@ class DownloadPlan:
     remote_backend: Optional[str] = None
     backend_options: Mapping = field(default_factory=dict, repr=False, hash=False)
     skipped_items: tuple[DownloadItem, ...] = ()
+    remotes: Mapping = field(default_factory=dict, repr=False, hash=False)
 
     def __post_init__(self) -> None:
         """Copy the selection and validate the source fields and rate."""
@@ -98,6 +117,18 @@ class DownloadPlan:
             validate_backend_name(self.remote_backend)
         object.__setattr__(self, "backend_options",
                            readonly_backend_options(self.backend_options))
+        remotes = readonly_backend_options(self.remotes)
+        for name, remote in remotes.items():
+            if (not isinstance(remote, Mapping)
+                    or not isinstance(remote.get("url"), str)):
+                raise TypeError(f"Plan remote {name!r} must record its URL")
+            if remote.get("backend") is not None:
+                validate_backend_name(remote["backend"])
+        object.__setattr__(self, "remotes", remotes)
+        unknown = {item.remote for item in self.items + self.skipped_items
+                   if item.remote is not None} - set(remotes)
+        if unknown:
+            raise ValueError("Items refer to remotes the plan does not record")
         rate = self.estimated_bytes_per_second
         if rate is not None and (
             isinstance(rate, bool) or not isinstance(rate, (int, float))
@@ -145,15 +176,29 @@ class DownloadPlan:
             size += f" known; {self.unknown_size_count} file(s) with unknown size"
         duration = ("unknown" if self.estimated_seconds is None
                     else f"about {self.estimated_seconds:.1f} seconds")
-        source = "<none>"
+        source = "Source: <none>"
         if self.remote_url:
-            parsed = urlsplit(self.remote_url)
-            source = urlunsplit(parsed._replace(
-                netloc=parsed.netloc.rsplit("@", 1)[-1], query="", fragment=""))
-        backend = f"\nBackend: {self.remote_backend}" if self.remote_backend else ""
+            source = f"Source: {_display_url(self.remote_url)}"
+        if self.remote_backend:
+            source += f"\nBackend: {self.remote_backend}"
+        if len(self.remotes) > 1:
+            counts = {}
+            for item in self.items:
+                counts[item.remote] = counts.get(item.remote, 0) + 1
+            source = "Sources:" + "".join(
+                f"\n  {name}: {_display_url(remote['url'])} "
+                f"({counts.get(name, 0)} file(s))"
+                for name, remote in self.remotes.items())
         skipped = ""
         for item in self.skipped_items:
             skipped += f"\nAlready downloaded: {item.relative_path.as_posix()}"
         return (f"{self.file_count} file(s); {size}; estimated duration: {duration}"
-                f"\nSource: {source}{backend}"
+                f"\n{source}"
                 f"\nDestination: {self.output_path}{skipped}")
+
+
+def _display_url(url: str) -> str:
+    """Return a URL without user information, query or fragment."""
+    parsed = urlsplit(url)
+    return urlunsplit(parsed._replace(
+        netloc=parsed.netloc.rsplit("@", 1)[-1], query="", fragment=""))

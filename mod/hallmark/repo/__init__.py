@@ -328,7 +328,7 @@ class Repo:
 
     def plan_download(self, output_path=None, *, file_paths=None, tsv_names=None,
                       all_files=False, filter=None, fmt=None, remote_name=None,
-                      estimated_bytes_per_second=None):
+                      estimated_bytes_per_second=None, sources=None):
         """
         Plan a download using the local catalog without contacting a server.
 
@@ -348,6 +348,8 @@ class Repo:
             remote_name (str, optional): Configured data remote to use.
             estimated_bytes_per_second (float, optional): Positive transfer
                 rate for duration estimates. No rate is measured while planning.
+            sources (sequence[str], optional): Keep only files of these
+                catalogue sources.
 
         Returns:
             DownloadPlan: Immutable selection with its source, destination,
@@ -363,7 +365,7 @@ class Repo:
         return plan_download(
             self, output_path, file_paths=file_paths, tsv_names=tsv_names,
             all_files=all_files, filter=filter, fmt=fmt, remote_name=remote_name,
-            estimated_bytes_per_second=estimated_bytes_per_second)
+            estimated_bytes_per_second=estimated_bytes_per_second, sources=sources)
 
     def download(self, plan, *, approved=False, max_workers=4, progress=False):
         """
@@ -704,9 +706,13 @@ class Repo:
 
     def add(self, fmt: str, encoding: bool = False, *, filter=None,
             remote_fmt=None, auth=None, backend=None, backend_options=None,
+            remote=None, source=None, prefix=None,
             progress=False) -> ParaFrame:
         '''
         Stage local file metadata or discover a remote catalog without downloading.
+
+        A remote URL adds or updates one source of the catalogue; see
+        ``hallmark.remote.add.add_remote``.
 
         Args:
             fmt (string): Local filename format, "." to rescan, or remote URL.
@@ -716,6 +722,9 @@ class Repo:
             auth (string, optional): Local profile for remote authentication.
             backend (string, optional): Registered data backend name.
             backend_options (dict, optional): Backend configuration.
+            remote (string, optional): Data remote to use or create.
+            source (string, optional): Catalogue source to update or create.
+            prefix (string, optional): Local folder for the source's files.
             progress (boolean): Show remote discovery progress.
         Returns:
             ParaFrame: Local parameters without checksums, or remote catalog rows.
@@ -725,9 +734,11 @@ class Repo:
                 raise ValueError("--regex is only supported for local data")
             return add_remote(self, fmt, fmt=remote_fmt, filter=filter, auth=auth,
                               backend=backend, backend_options=backend_options,
+                              remote=remote, source=source, prefix=prefix,
                               progress=progress)
         if any(value is not None for value in
-               (filter, remote_fmt, auth, backend, backend_options)):
+               (filter, remote_fmt, auth, backend, backend_options, remote,
+                source, prefix)):
             raise ValueError("Remote options require a remote URL")
         if is_remote_catalog(self.state):
             raise ValueError("Use a remote URL to update this catalog")

@@ -262,14 +262,26 @@ def status(repo):
 @click.option("--filter", "filters", multiple=True, help="Select remote paths by glob.")
 @click.option("--fmt", "remote_fmt",
               help="Remote filename format; otherwise use a URL pattern.")
+@click.option("--remote", "remote_name",
+              help="Data remote to catalog under; matched by URL by default.")
+@click.option("--source", help="Catalog source to update or create.")
+@click.option("--prefix", help="Local folder for this source's files.")
 @click.argument("inputs", nargs=-1, required=True)
 @click.pass_obj
-def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmt):
+def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmt,
+        remote_name, source, prefix):
     """Add files to the hallmark index.
 
     A remote URL or URL pattern stages a catalog without downloading files
     or committing. Use --fmt and --filter to select remote paths. A scan that
     fails or matches no files keeps the previously staged catalog.
+
+    Each remote selection is a source of the catalog. Adding the same URL and
+    pattern again updates its source: new files are added and files gone from
+    the server are removed. A different pattern adds another source; use
+    --source NAME to change an existing source's pattern instead. Files from
+    another server keep their paths beneath its URL; use --prefix DIR when
+    those paths are already catalogued.
 
     `hm add [--regex] FORMAT` uses the branch format string workflow.
     `hm add "."` rebuilds the manifest from current files that match
@@ -280,7 +292,8 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
         options = _load_backend_options(backend_options)
     remote_options = dict(auth=auth, backend=backend,
                           backend_options=options,
-                          filter=filters or None, remote_fmt=remote_fmt)
+                          filter=filters or None, remote_fmt=remote_fmt,
+                          remote=remote_name, source=source, prefix=prefix)
     if len(inputs) != 1 and any(value is not None for value in remote_options.values()):
         raise ClickException("Remote add accepts one URL at a time")
     # attempt to add the specified files to the hallmark index, handling any errors
@@ -301,6 +314,11 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     else:
         click.echo("Changes to be committed")
         click.echo(pf.path.to_string(index=False, header=False))
+    removed = pf.attrs.get("removed", [])
+    if removed:
+        click.echo("Removed from the catalog (no longer on the server):")
+        for path in removed:
+            click.echo(f"  {path}")
 
     # display unmatched files that were skipped
     unmatched = pf.attrs.get("unmatched", [])
@@ -519,7 +537,10 @@ def checkout(repo, target_branch):
                    "May be repeated.")
 @click.option("--fmt", help="Select paths matching a filename format.")
 @click.option("--remote", "remote_name",
-              help="Name of the configured data remote to use.")
+              help="Download every selected file from this data remote, "
+                   "instead of each source's own remote.")
+@click.option("--source", "sources", multiple=True,
+              help="Select the files of a catalog source. May be repeated.")
 @click.option("--output", type=click.Path(file_okay=False),
               help="Output directory. Defaults to the repository worktree.")
 @click.option("--max-workers", type=click.IntRange(min=1), default=4,
@@ -528,23 +549,27 @@ def checkout(repo, target_branch):
               help="Show the download plan using only local catalog metadata.")
 @click.pass_obj
 def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
-             output, max_workers, dry_run):
+             sources, output, max_workers, dry_run):
     """
-    Download selected files from a configured data remote.
+    Download selected files from the catalog's data remotes.
 
+    Each file comes from the remote of the source that cataloged it.
     Preview the selection with --dry-run. Every nonempty download displays
     its plan and asks for confirmation before transferring files.
     """
     if download_all and (files or tsv_names):
         raise ClickException("--all cannot be combined with file paths or --tsv")
-    if not files and not tsv_names and not download_all and not filters and not fmt:
-        raise ClickException("Provide file paths, --tsv, --all, --filter, or --fmt")
+    if (not files and not tsv_names and not download_all and not filters
+            and not fmt and not sources):
+        raise ClickException(
+            "Provide file paths, --tsv, --all, --source, --filter, or --fmt")
     if repo.worktree is None and output is None:
         raise ClickException("--output is required when downloading from a bare repo")
     with _translate_cli_errors(DownloadError, ValueError):
         plan = repo.plan_download(
             output, file_paths=files, tsv_names=tsv_names, all_files=download_all,
-            filter=filters or None, fmt=fmt, remote_name=remote_name)
+            filter=filters or None, fmt=fmt, remote_name=remote_name,
+            sources=sources or None)
         if dry_run:
             click.echo(plan.summary())
             for item in plan.items[:20]:

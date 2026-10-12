@@ -101,7 +101,12 @@ def _update_remote_config(
                 "Multiple remotes are configured; specify --remote-name")
 
     if remote_name is not None:
+        previous_name = selected.get("name") or "origin"
         selected["name"] = remote_name
+        # Sources refer to their remote by name.
+        for source in config.get("sources") or []:
+            if isinstance(source, dict) and source.get("remote") == previous_name:
+                source["remote"] = remote_name
     if remote_url is not None:
         selected["url"] = remote_url
     if remote_auth == "":
@@ -378,6 +383,10 @@ def set_config(
     if fmt is not None:
         # ensure the new format string is a nonempty string
         fmt = require_nonempty_string(fmt, label="fmt")
+        if config.get("sources"):
+            raise ValueError(
+                "Each remote source keeps its own pattern; change it with "
+                "hm add URL --fmt PATTERN --source NAME")
         # retrieve the old filename format from the repository's configuration
         old_fmt = single_data_format(repo.state.config)
 

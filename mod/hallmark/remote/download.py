@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from threading import Lock
@@ -14,6 +15,7 @@ import pandas as pd
 from ..transport import OperationContext, RemoteSpec
 from ..transport.base import DownloadError, validate_remote_path
 from .plan import DownloadItem, DownloadPlan
+from .sources import effective_sources
 from ..utils import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
     SUPPORTED_CHECKSUM_ALGORITHMS,
@@ -508,9 +510,9 @@ def _download_and_verify_file(
 
     Args:
         context (OperationContext): Transport and destination for this download.
-        relative_path (Path): Literal path relative to the dataset root.
-        destination (Path): Destination used for error reporting before
-            resolving the path against the context's output root.
+        relative_path (Path): Literal path beneath the remote URL.
+        destination (Path): Destination file inside the context's output root;
+            it is resolved again before writing and before publishing.
         expected_checksum: Optional digest or (algorithm, digest) pair.
         chunk_size (int): Bytes per read when downloading or verifying.
 
@@ -521,10 +523,13 @@ def _download_and_verify_file(
         DownloadError: If the transfer, checksum, or destination is invalid.
     """
     validated_checksum = _validate_expected_checksum(expected_checksum)
+    destination = Path(destination)
     try:
+        local_path = (destination.relative_to(context.output_root)
+                      if destination.is_absolute() else destination)
         context.check_cancelled()
         destination = resolve_path_in_root(
-            context.output_root, relative_path, label="download destination")
+            context.output_root, local_path, label="download destination")
         destination.parent.mkdir(parents=True, exist_ok=True)
         with replace_file_on_success(
                 destination, suffix=".part", overwrite=False) as temp_path:
@@ -534,7 +539,7 @@ def _download_and_verify_file(
             size = temp_path.stat().st_size
             # Recheck for symlink changes before replacing the destination.
             # Another process can still change the path after this check.
-            resolve_path_in_root(context.output_root, relative_path,
+            resolve_path_in_root(context.output_root, local_path,
                                    label="download destination")
             context.check_cancelled()
         return size
@@ -775,6 +780,78 @@ def _check_existing_files(items, output_root):
     return pending, skipped
 
 
+def _remote_summary(remote: dict) -> dict:
+    """Pin the parts of a remote configuration a transfer depends on."""
+    spec = RemoteSpec.from_url(
+        remote["url"], remote.get("auth"), backend=remote.get("backend"),
+        backend_options=remote.get("backend_options"))
+    return {"url": remote["url"], "auth": remote.get("auth"),
+            "backend": spec.backend,
+            "backend_options": remote.get("backend_options") or {}}
+
+
+def _route_items(repo, items, remote_name, source_names=None):
+    """
+    Attach each item's remote and its path beneath that remote's URL.
+
+    Rows follow their source's remote. An explicit remote name serves every
+    item instead, keeping each path beneath its source's remote, as for a
+    mirror. Files outside any source use the default remote. With
+    ``source_names``, only rows of those sources are kept.
+
+    Returns:
+        tuple[list[DownloadItem], dict[str, dict]]: Routed items and the
+        configuration of each remote they use, by name.
+    """
+    try:
+        sources = effective_sources(repo.state)
+        configured = {remote.get("name") or "origin": remote for remote in
+                      normalize_remotes(_repository_config(repo).get("remote"))}
+    except ValueError as exc:
+        raise DownloadError(str(exc)) from exc
+    by_name = {source.name: source for source in sources}
+    if source_names is not None:
+        unknown = sorted(set(source_names) - set(by_name))
+        if unknown:
+            raise DownloadError(
+                f"Unknown source(s): {', '.join(unknown)}. Catalog sources: "
+                + (", ".join(by_name) or "<none>"))
+    data = repo.state.data
+    owners = (dict(zip(data["path"].astype(str), data["source"].astype(str)))
+              if {"path", "source"} <= set(data.columns) else {})
+    override = (_select_remote_config(repo, remote_name)
+                if remote_name is not None else None)
+    default = None
+    routed, used = [], {}
+    for item in items:
+        path = item.relative_path.as_posix()
+        source = by_name.get(owners.get(path)) or (
+            sources[0] if len(sources) == 1 else None)
+        if source_names is not None and (source is None
+                                         or source.name not in source_names):
+            continue
+        if override is not None:
+            remote = override
+        elif source is not None:
+            remote = configured.get(source.remote)
+            if remote is None:
+                raise DownloadError(
+                    f"Source {source.name!r} uses unconfigured remote "
+                    f"{source.remote!r}")
+        else:
+            default = default or _select_remote_config(repo)
+            remote = default
+        if remote is None or not remote.get("url"):
+            raise DownloadError("No remote URL is configured in config.yml")
+        name = remote.get("name") or "origin"
+        used[name] = remote
+        remote_path = source.remote_path(path) if source is not None else path
+        routed.append(replace(
+            item, remote=name,
+            remote_path=Path(remote_path) if remote_path != path else None))
+    return routed, used
+
+
 def plan_download(
     repo,
     output_path: Optional[Union[Path, str]] = None,
@@ -786,6 +863,7 @@ def plan_download(
     fmt: Optional[str] = None,
     remote_name: Optional[str] = None,
     estimated_bytes_per_second: Optional[float] = None,
+    sources: Optional[Sequence[str]] = None,
 ) -> DownloadPlan:
     """
     Plan a download using local catalog metadata.
@@ -808,6 +886,8 @@ def plan_download(
         remote_name (str, optional): Configured data remote to use.
         estimated_bytes_per_second (float, optional): Positive rate used
             to estimate duration when every file size is known.
+        sources (sequence[str], optional): Keep only files of these
+            catalogue sources.
 
     Returns:
         DownloadPlan: Immutable files, source, destination, and metadata
@@ -839,22 +919,27 @@ def plan_download(
         from .discovery import path_matches
         items = [item for item in items if path_matches(
             item.relative_path.as_posix(), filter=filter, fmt=fmt)]
-    remote = _select_remote_config(repo, remote_name)
-    if items and (remote is None or not remote.get("url")):
-        raise DownloadError("No remote URL is configured in config.yml")
-    remote = remote or {}
-    source = None
-    if remote.get("url"):
-        source = RemoteSpec.from_url(
-            remote["url"], remote.get("auth"), backend=remote.get("backend"),
-            backend_options=remote.get("backend_options"))
+    if isinstance(sources, str):
+        sources = (sources,)
+    items, used = _route_items(
+        repo, items, remote_name,
+        source_names=set(sources) if sources is not None else None)
+    if len(used) == 1:
+        remote = next(iter(used.values()))
+    elif not used:
+        remote = _select_remote_config(repo, remote_name) or {}
+    else:
+        remote = {}
+    remotes = {name: _remote_summary(config) for name, config in used.items()}
+    pinned = _remote_summary(remote) if remote.get("url") else {}
     items, skipped = _check_existing_files(items, output_root)
     return DownloadPlan(
         tuple(items), remote.get("url"), output_root,
         remote_auth=remote.get("auth"), remote_name=remote.get("name"),
         estimated_bytes_per_second=estimated_bytes_per_second,
-        remote_backend=source.backend if source is not None else None,
-        backend_options=remote.get("backend_options"), skipped_items=tuple(skipped))
+        remote_backend=pinned.get("backend"),
+        backend_options=remote.get("backend_options"), skipped_items=tuple(skipped),
+        remotes=remotes)
 
 
 def execute_download_plan(
@@ -900,17 +985,31 @@ def execute_download_plan(
         results["skipped"] = [item.relative_path.as_posix() for item in skipped]
     if not items:
         return results
-    remote = RemoteSpec.from_url(
-        plan.remote_url, plan.remote_auth, backend=plan.remote_backend,
-        backend_options=plan.backend_options)
-    total_bytes = None
-    if all(item.size_bytes is not None for item in items):
-        total_bytes = sum(item.size_bytes for item in items)
-    results.update(_download_selected(
-        remote, plan.output_path,
-        [(item.relative_path, item.checksum) for item in items],
-        max_workers=max_workers, show_progress=show_progress,
-        total_bytes=total_bytes))
+    groups: dict[Optional[str], list[DownloadItem]] = {}
+    for item in items:
+        groups.setdefault(item.remote if item.remote in plan.remotes else None,
+                          []).append(item)
+    for name, group in groups.items():
+        if name is None:
+            remote = RemoteSpec.from_url(
+                plan.remote_url, plan.remote_auth, backend=plan.remote_backend,
+                backend_options=plan.backend_options)
+        else:
+            pinned = plan.remotes[name]
+            remote = RemoteSpec.from_url(
+                pinned["url"], pinned.get("auth"), backend=pinned.get("backend"),
+                backend_options=pinned.get("backend_options"))
+        total_bytes = None
+        if all(item.size_bytes is not None for item in group):
+            total_bytes = sum(item.size_bytes for item in group)
+        outcome = _download_selected(
+            remote, plan.output_path,
+            [(item.relative_path, item.checksum, item.remote_path) for item in group],
+            max_workers=max_workers, show_progress=show_progress,
+            total_bytes=total_bytes)
+        for key in ("succeeded", "failed", "total_bytes"):
+            results[key] += outcome[key]
+        results["errors"].extend(outcome["errors"])
     return results
 
 
@@ -935,12 +1034,17 @@ def _download_selected(
 
     # Normalize selected files into a dictionary to ensure unique paths and checksums.
     normalized_selection: dict[str, tuple[Path, Optional[ChecksumSpec]]] = {}
-    for relative_path, expected_checksum in selected_files:
+    # Paths beneath the remote URL, when they differ from the local path.
+    source_paths: dict[str, Path] = {}
+    for relative_path, expected_checksum, *source_path in selected_files:
         # Validate and convert the relative path to a safe Path object
         relative_path = validate_remote_path(relative_path)
         # Merge the selected file into the normalized selection,
         # ensuring no conflicting checksums exist.
         _merge_selected_file(normalized_selection, relative_path, expected_checksum)
+        if source_path and source_path[0] is not None:
+            source_paths[relative_path.as_posix()] = validate_remote_path(
+                source_path[0])
 
     files_to_download = []
     # for each unique relative path and expected checksum in the normalized selection
@@ -956,7 +1060,9 @@ def _download_selected(
         except ValueError as exc:
             raise DownloadError(str(exc)) from exc
 
-        files_to_download.append((relative_path, destination, expected_checksum))
+        files_to_download.append((
+            source_paths.get(relative_path.as_posix(), relative_path),
+            destination, expected_checksum))
 
     # track transferred bytes
     progress = tqdm(

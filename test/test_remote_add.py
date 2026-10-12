@@ -7,7 +7,7 @@ from hallmark import Repo
 from hallmark.cli import hallmark
 from hallmark.error import CheckoutError, DestinationExistsError
 from hallmark.transport import OperationContext
-from hallmark.transport.base import RemoteObjectMissing
+from hallmark.transport.base import DownloadError, RemoteObjectMissing
 
 
 @pytest.fixture
@@ -126,14 +126,28 @@ def test_failed_remote_add_preserves_staged_state(tmp_path, remote_listing):
     assert before == {name: (repo.dothm.path / name).read_bytes() for name in before}
 
 
-def test_remote_add_rejects_different_root_and_local_data_before_network(
-        tmp_path, remote_listing):
+def test_second_server_needs_its_own_paths(tmp_path, remote_listing):
     repo = Repo.init(tmp_path / "remote")
     repo.add("https://example.test/data/")
-    remote_listing[1].clear()
-    with pytest.raises(ValueError, match="one dataset root"):
+    before = (repo.dothm.path / "config.yml").read_bytes()
+    with pytest.raises(ValueError, match="--prefix DIR") as error:
         repo.add("https://different.test/data/")
-    assert remote_listing[1] == []
+    assert "M87_001.fits" in str(error.value)
+    assert (repo.dothm.path / "config.yml").read_bytes() == before
+    repo.add("https://different.test/data/", prefix="mirror")
+    config = repo.state.config
+    assert [r["name"] for r in config["remote"]] == ["origin", "different-test"]
+    assert config["sources"] == [
+        {"name": "origin", "remote": "origin"},
+        {"name": "different-test", "remote": "different-test",
+         "prefix": "mirror/"}]
+    assert repo.state.data.path.tolist() == [
+        "M87_001.fits", "M87_002.fits", "mirror/M87_001.fits",
+        "mirror/M87_002.fits", "mirror/notes.txt", "notes.txt"]
+    assert set(repo.state.data.source) == {"origin", "different-test"}
+
+
+def test_remote_add_rejects_local_data_before_network(tmp_path, remote_listing):
     local = Repo.init(tmp_path / "local")
     (local.worktree / "run1.txt").write_text("one")
     local.add("run{run:d}.txt")
@@ -232,13 +246,14 @@ def test_add_cli_forwards_backend_and_selection(monkeypatch, tmp_path):
     result = CliRunner().invoke(hallmark, [
         "add", "ssh://lab-data/export/", "--auth", "lab", "--backend", "ssh",
         "--backend-options", str(options), "--filter", "**/*.fits",
-        "--filter", "README*", "--fmt", "{name}.fits"])
+        "--filter", "README*", "--fmt", "{name}.fits", "--remote", "lab",
+        "--source", "fits", "--prefix", "lab/"])
     assert result.exit_code == 0, result.output
     assert captured == {
         "value": "ssh://lab-data/export/", "encoding": False,
         "auth": "lab", "backend": "ssh", "backend_options": {"collection": "latest"},
         "filter": ("**/*.fits", "README*"), "remote_fmt": "{name}.fits",
-        "progress": True}
+        "remote": "lab", "source": "fits", "prefix": "lab/", "progress": True}
 
 
 @pytest.mark.parametrize("arguments", [
@@ -396,3 +411,245 @@ def test_failed_remote_scan_is_explained_and_keeps_previous_catalog(
         "Cannot establish connection to https://example.test")
     assert _state_bytes(repo) == before
     assert repo.state.data.path.tolist() == ["M87_001.fits", "M87_002.fits"]
+
+
+ROOT = "https://example.test/data/"
+
+
+def _listing(*names, sizes=None):
+    sizes = sizes or {}
+    links = "".join(
+        f'<a href="{name}"' + (f' data-size="{sizes[name]}"' if name in sizes else "")
+        + f">{name}</a>" for name in names)
+    return "<h1>Index of data</h1>" + links
+
+
+def test_nested_folder_reuses_its_remote_as_a_new_source(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*001.fits")
+    repo.add(ROOT + "sub/", filter="*.txt")
+    config = repo.state.config
+    assert config["remote"] == [{"name": "origin", "url": ROOT, "backend": "http"}]
+    assert config["sources"] == [
+        {"name": "origin", "remote": "origin", "filter": ["*001.fits"]},
+        {"name": "origin-sub", "remote": "origin", "root": "sub/",
+         "filter": ["*.txt"]}]
+    rows = repo.state.data.set_index("path")["source"].to_dict()
+    assert rows == {"M87_001.fits": "origin", "sub/notes.txt": "origin-sub"}
+    plan = repo.plan_download(all_files=True)
+    assert sorted(item.relative_path.as_posix() for item in plan.items) == [
+        "M87_001.fits", "sub/notes.txt"]
+
+
+def test_two_patterns_in_one_folder_are_two_sources(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT + "{src}_{day:03d}.fits")
+    repo.add(ROOT, filter="*.txt")
+    assert [s["name"] for s in repo.state.config["sources"]] == ["origin", "origin-2"]
+    data = repo.state.data.set_index("path")
+    assert data.loc["M87_002.fits", "day"] == "2"
+    assert data.loc["notes.txt", "source"] == "origin-2"
+    assert data.loc["notes.txt", "day"] == ""
+    with pytest.raises(ValueError, match="choose one with --source"):
+        repo.add(ROOT)
+    # Repeating a selection updates its own source.
+    repo.add(ROOT, filter="*.txt")
+    assert len(repo.state.config["sources"]) == 2
+
+
+def test_changing_a_pattern_names_the_source(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT + "{src}_{day:03d}.fits")
+    repo.commit("Catalogue")
+    with pytest.raises(ValueError, match="--source origin"):
+        repo.add(ROOT + "{name}.fits")
+    with pytest.raises(ValueError, match="do not fit"):
+        repo.add(ROOT + "{src}_001.fits", source="origin")
+    assert repo.dothm.index.diff("HEAD") == []
+    repo.add(ROOT + "{name}.fits", source="origin")
+    assert repo.state.config["sources"] == [
+        {"name": "origin", "remote": "origin", "fmt": "{name}.fits"}]
+    assert repo.state.data["name"].tolist() == ["M87_001", "M87_002"]
+    assert "day" not in repo.state.data.columns
+    with pytest.raises(ValueError, match="keeps its prefix"):
+        repo.add(ROOT + "{name}.fits", prefix="elsewhere")
+
+
+def test_readding_a_source_prunes_files_gone_from_the_server(
+        tmp_path, remote_listing, monkeypatch):
+    pages, _ = remote_listing
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    repo.commit("Catalogue")
+    pages[""] = _listing("M87_002.fits", "M87_003.fits")
+    result = repo.add(ROOT, filter="*.fits")
+    assert result.attrs["removed"] == ["M87_001.fits"]
+    assert repo.state.data.path.tolist() == ["M87_002.fits", "M87_003.fits"]
+    status = repo.status()["staged"]
+    assert (status["added"], status["deleted"]) == (["M87_003.fits"],
+                                                   ["M87_001.fits"])
+    monkeypatch.chdir(repo.worktree)
+    pages[""] = _listing("M87_003.fits")
+    output = CliRunner().invoke(hallmark, ["add", ROOT, "--filter", "*.fits"])
+    assert output.exit_code == 0, output.output
+    assert "no longer on the server" in output.output
+    assert "  M87_002.fits" in output.output
+
+
+def test_known_sha1_is_kept_only_for_unchanged_files(tmp_path, remote_listing):
+    pages, _ = remote_listing
+    pages[""] = _listing("a.fits", "b.fits", sizes={"a.fits": 4, "b.fits": 5})
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT)
+    # Downloads record content hashes this way.
+    repo.state.data["sha1"] = ["1" * 40, "2" * 40]
+    repo.dothm.save_state(repo.state)
+    pages[""] = _listing("a.fits", "b.fits", sizes={"a.fits": 4, "b.fits": 6})
+    repo.add(ROOT)
+    assert repo.state.data.set_index("path")["sha1"].to_dict() == {
+        "a.fits": "1" * 40, "b.fits": ""}
+    assert repo.state.data.set_index("path")["size_bytes"].to_dict() == {
+        "a.fits": "4", "b.fits": "6"}
+
+
+def test_remote_name_selects_or_creates_a_remote(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    with pytest.raises(ValueError, match="not inside remote 'origin'"):
+        repo.add("https://other.test/data/", remote="origin")
+    with pytest.raises(ValueError, match="Source names"):
+        repo.add("https://other.test/data/", remote="bad name")
+    repo.add("https://other.test/data/", remote="mirror", source="copy",
+             prefix="mirror", filter="*.txt")
+    assert repo.state.config["remote"][1] == {
+        "name": "mirror", "url": "https://other.test/data/", "backend": "http"}
+    assert repo.state.config["sources"][1] == {
+        "name": "copy", "remote": "mirror", "prefix": "mirror/",
+        "filter": ["*.txt"]}
+    assert "mirror/notes.txt" in repo.state.data.path.tolist()
+
+
+def test_legacy_catalogue_gains_sources_on_its_next_add(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    rows = repo.add(ROOT + "{src}_{day:03d}.fits").drop(
+        columns=["source", "checksum_source"])
+    # A catalogue as written before sources existed.
+    repo.state.config = {"data": [{"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"}],
+                         "remote": [{"name": "origin", "url": ROOT,
+                                     "backend": "http"}]}
+    repo.state.data = rows
+    repo.dothm.save_state(repo.state)
+    repo.commit("Legacy catalogue")
+    legacy = Repo(repo.worktree)
+    assert "sources" not in legacy.state.config
+    assert legacy.plan_download(all_files=True).file_count == 2
+    legacy.add(ROOT, filter="*.txt")
+    assert legacy.state.config["sources"] == [
+        {"name": "origin", "remote": "origin", "fmt": "{src}_{day:03d}.fits"},
+        {"name": "origin-2", "remote": "origin", "filter": ["*.txt"]}]
+    assert legacy.state.config["data"] == [{"db": "data.tsv"}]
+    assert legacy.state.data.set_index("path")["source"].to_dict() == {
+        "M87_001.fits": "origin", "M87_002.fits": "origin",
+        "notes.txt": "origin-2"}
+
+
+def test_renaming_a_remote_keeps_its_sources(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    repo.add(ROOT + "sub/", filter="*.txt")
+    repo.set_config(remote_name="archive")
+    repo.dothm.save_state(repo.state)
+    reopened = Repo(repo.worktree).state.config
+    assert reopened["remote"][0]["name"] == "archive"
+    assert [s["remote"] for s in reopened["sources"]] == ["archive", "archive"]
+    repo.add(ROOT, filter="*.fits")
+    assert [s["name"] for s in repo.state.config["sources"]] == [
+        "origin", "origin-sub"]
+
+
+@pytest.fixture
+def fetched(monkeypatch):
+    """Record HTTP fetches and write each file's URL as its content."""
+    from hallmark.transport.http import HttpBackend
+
+    calls = []
+
+    def fetch(self, relative_path, destination, *, chunk_size=8192):
+        url = self.context.remote.file_url(relative_path)
+        calls.append(url)
+        Path(destination).write_text(url)
+
+    monkeypatch.setattr(HttpBackend, "fetch", fetch)
+    return calls
+
+
+def test_download_fetches_each_source_from_its_remote(
+        tmp_path, remote_listing, fetched):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    repo.add(ROOT + "sub/", filter="*.txt")
+    repo.add("https://other.test/data/", filter="*.txt", prefix="mirror")
+    repo.commit("Three sources")
+    plan = repo.plan_download(all_files=True)
+    assert set(plan.remotes) == {"origin", "other-test"}
+    assert plan.remote_url is None
+    summary = plan.summary()
+    assert "Sources:\n  origin: https://example.test/data/ (3 file(s))" in summary
+    assert "other-test: https://other.test/data/ (1 file(s))" in summary
+    # The plan pins its remotes; later configuration changes do not apply.
+    repo.set_config(remote_name="origin", remote_url="https://moved.test/data/")
+    result = repo.download(plan, approved=True)
+    assert (result["succeeded"], result["failed"]) == (4, 0)
+    assert sorted(fetched) == [
+        ROOT + "M87_001.fits", ROOT + "M87_002.fits", ROOT + "sub/notes.txt",
+        "https://other.test/data/notes.txt"]
+    assert (repo.worktree / "mirror/notes.txt").read_text() == (
+        "https://other.test/data/notes.txt")
+    assert (repo.worktree / "sub/notes.txt").read_text() == ROOT + "sub/notes.txt"
+
+
+def test_named_remote_serves_every_file_at_its_remote_path(
+        tmp_path, remote_listing, fetched):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*001.fits")
+    repo.add("https://other.test/data/", filter="*.txt", prefix="mirror")
+    plan = repo.plan_download(all_files=True, remote_name="other-test")
+    assert list(plan.remotes) == ["other-test"]
+    assert plan.remote_url == "https://other.test/data/"
+    assert [(item.relative_path.as_posix(), item.source_path.as_posix())
+            for item in plan.items] == [("M87_001.fits", "M87_001.fits"),
+                                        ("mirror/notes.txt", "notes.txt")]
+    repo.download(plan, approved=True)
+    assert sorted(fetched) == ["https://other.test/data/M87_001.fits",
+                               "https://other.test/data/notes.txt"]
+
+
+def test_plans_reject_items_naming_unrecorded_remotes(tmp_path):
+    from hallmark.remote.plan import DownloadItem, DownloadPlan
+
+    with pytest.raises(ValueError, match="does not record"):
+        DownloadPlan((DownloadItem("a", remote="mirror"),), None, tmp_path)
+    with pytest.raises(TypeError, match="URL"):
+        DownloadPlan((), None, tmp_path, remotes={"mirror": {"auth": None}})
+    plan = DownloadPlan(
+        (DownloadItem("a", remote="mirror", remote_path="b"),), None, tmp_path,
+        remotes={"mirror": {"url": "https://m.test/", "backend": "http"}})
+    assert plan.items[0].source_path == Path("b")
+    with pytest.raises(TypeError):
+        plan.remotes["mirror"]["url"] = "https://elsewhere.test/"
+
+
+def test_download_selects_files_by_source(tmp_path, remote_listing, monkeypatch):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    repo.add(ROOT + "sub/", filter="*.txt")
+    plan = repo.plan_download(sources=["origin-sub"])
+    assert [item.relative_path.as_posix() for item in plan.items] == ["sub/notes.txt"]
+    with pytest.raises(DownloadError, match="Unknown source.*origin, origin-sub"):
+        repo.plan_download(sources=["missing"])
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["download", "--source", "origin",
+                                           "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "2 file(s)" in result.output
+    assert "  M87_001.fits" in result.output

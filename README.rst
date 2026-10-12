@@ -121,8 +121,9 @@ Examples and configuration details are described in
 Current limits
 --------------
 
-Remote ``add`` supports one dataset root and one ``data.tsv`` table per
-repository. Keep remote catalogs separate from locally versioned files.
+Remote ``add`` catalogs one or more remote selections (sources), possibly on
+different servers, in one ``data.tsv`` table per repository. Keep remote
+catalogs separate from locally versioned files.
 Local ``add`` selects files by filename format; ``commit`` stores their
 contents in ``.hm/objects``. Clone copies catalog history and downloads from
 its configured data remote; transfer of a local object store is not implemented.
