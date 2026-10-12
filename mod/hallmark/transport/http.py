@@ -1,25 +1,91 @@
-"""HTTP transport using Requests with its normal .netrc and environment settings."""
+"""
+HTTP transport using Requests.
+
+Without an auth profile, Requests' own .netrc and environment settings apply.
+With one, its basic or bearer credentials are sent only to the profile's hosts.
+"""
 
 from __future__ import annotations
 
+import base64
 from collections import deque
+from threading import Lock
 from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
+from requests.auth import AuthBase
 
 from ..utils import REMOTE_REQUEST_TIMEOUT
 from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
                    RemoteObjectMissing, DataBackend, reject_control_characters)
 from .index import _parse_directory_listing, _redirected_directory
 
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+class HostBoundAuth(AuthBase):
+    """
+    Attach a profile's credentials to requests for its own hosts only.
+
+    The secret is read once, on first use. Requests drops the header when a
+    redirect leaves the host, as for signed download links elsewhere.
+
+    Args:
+        settings (HttpSettings): Profile settings with secret references.
+    """
+
+    def __init__(self, settings):
+        self.settings = settings
+        self._header = None
+        self._lock = Lock()
+
+    def resolve(self) -> None:
+        """Read the profile's secrets; raises if one is unavailable."""
+        with self._lock:
+            if self._header is not None:
+                return
+            settings = self.settings
+            if settings.scheme == "bearer":
+                self._header = "Bearer " + settings.token.resolve().reveal()
+                return
+            username = settings.username
+            if not isinstance(username, str):
+                username = username.resolve().reveal()
+            pair = f"{username}:{settings.password.resolve().reveal()}"
+            self._header = "Basic " + base64.b64encode(pair.encode()).decode()
+
+    def __call__(self, request):
+        target = urlsplit(request.url)
+        host = (target.hostname or "").lower()
+        if host in self.settings.hosts and (
+                target.scheme == "https" or host in LOOPBACK_HOSTS):
+            self.resolve()
+            request.headers["Authorization"] = self._header
+        return request
+
 
 class HttpBackend(DataBackend):
     """Transfer files and metadata using reusable Requests sessions."""
+
+    auth_type = "http"
+
     def __init__(self, context):
         super().__init__(context)
         if context.remote.scheme not in {"http", "https"}:
             raise RemoteConfigurationError("HTTP backends require an HTTP(S) URL")
         self.text_urls = {}
+        # None leaves Requests to use .netrc and its environment settings.
+        settings = getattr(context, "auth", None)
+        self.auth = HostBoundAuth(settings) if settings is not None else None
+
+    def prepare(self):
+        """Read profile secrets once, before any request is made."""
+        if self.auth is not None:
+            self.auth.resolve()
+
+    def _auth_option(self):
+        # Without a profile, call Requests exactly as before.
+        return {"auth": self.auth} if self.auth is not None else {}
 
     def _parse_directory_listing(self, text, directory):
         """Read generic indexes and recognize the CyVerse dialect automatically."""
@@ -61,6 +127,7 @@ class HttpBackend(DataBackend):
             self.context.remote.file_url(path),
             stream=True,
             timeout=REMOTE_REQUEST_TIMEOUT,
+            **self._auth_option(),
         )
 
     def _download_error(self, exc):
@@ -69,6 +136,10 @@ class HttpBackend(DataBackend):
         status = getattr(getattr(exc, "response", None), "status_code", None)
         cls = RemoteObjectMissing if status == 404 else DownloadError
         detail = f"HTTP {status}" if isinstance(status, int) else type(exc).__name__
+        if status in {401, 403}:
+            detail += (f"; check auth profile {self.context.remote.auth!r}"
+                       if self.auth is not None else
+                       "; name an auth profile with --auth, or use ~/.netrc")
         return cls(f"Failed to download from {self.context.remote.display}: {detail}")
 
     def _open_metadata_response(self, relative_path):
@@ -99,7 +170,7 @@ class HttpBackend(DataBackend):
                 raise DownloadError("Invalid metadata redirect URL") from None
             response = self.context.session().get(
                 url, stream=True, timeout=REMOTE_REQUEST_TIMEOUT,
-                allow_redirects=False,
+                allow_redirects=False, **self._auth_option(),
             )
             if response.status_code not in {301, 302, 303, 307, 308}:
                 return response, url

@@ -347,9 +347,59 @@ concurrency is the smaller of ``--max-workers`` and local ``max_sessions``
 of an OpenSSH server. The connection is closed after about
 ``server_alive_interval`` times ``server_alive_count_max`` seconds without a
 reply from the server; raise them if transfers over a congested link are
-dropped. Set ``compression: true`` for text-like data over slow links. Unset ``compression`` follows SSH
-configuration. These tuning fields may also appear under ``defaults`` to
-apply to every host.
+dropped. Set ``compression: true`` for text-like data over slow links. Unset
+``compression`` follows SSH configuration. These tuning fields may also appear
+under ``defaults`` to apply to every host.
+
+HTTP(S) profiles and secrets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A ``version: 2`` file adds a ``type`` to each profile: ``ssh`` (the fields
+above), ``http`` or ``s3``. Secrets are never written in the file. Each secret
+field names where its value comes from instead: an environment variable
+(``env``), the operating system keyring (``keyring``, after
+``pip install hallmark[keyring]``), or a command such as a password manager
+that prints it (``command``):
+
+.. code-block:: yaml
+
+   version: 2
+   profiles:
+     lab:
+       type: ssh
+       hosts: [lab-data]
+       user: researcher
+     cyverse:
+       type: http
+       hosts: [data.cyverse.org]
+       scheme: basic
+       username: alice
+       password: {env: CYVERSE_PASSWORD}
+     archive:
+       type: http
+       hosts: [archive.example.org]
+       scheme: bearer
+       token: {command: [pass, show, archive/token]}
+     zenodo:
+       type: http
+       hosts: [zenodo.org]
+       scheme: bearer
+       token: {keyring: {service: hallmark, username: zenodo}}
+
+Then name the profile when adding the remote, as for SSH:
+
+.. code-block:: bash
+
+   export CYVERSE_PASSWORD=...
+   hm add 'https://data.cyverse.org/dav/iplant/home/alice/eht/' --auth cyverse
+
+Secrets are read when a transfer starts, never during ``--dry-run``, and are
+never shown in messages; a helper command's error output is discarded. An HTTP
+profile sends its credentials only to its ``hosts``, and only over HTTPS (or to
+this computer). A redirect to another server, such as a signed download link,
+does not carry them. Without a profile, HTTP downloads use ``~/.netrc`` as
+before. Because a version 2 file can run commands, Hallmark refuses one that
+another account owns or can write to; ``chmod 600`` keeps it private.
 
 5. Use the Python API
 ---------------------

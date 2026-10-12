@@ -96,8 +96,10 @@ all discoverable files beneath the supplied URL.
 Every nonempty CLI transfer asks for confirmation. For separate Python
 downloads, callers can inspect
 ``repo.plan_download()`` and then execute ``repo.download(plan, approved=True)``.
-Optional authentication profiles remain local and can be selected with
-``add --auth PROFILE`` or ``set-config --remote-auth PROFILE``.
+Optional authentication profiles for SSH and HTTP(S) remain local and can be
+selected with ``add --auth PROFILE`` or ``set-config --remote-auth PROFILE``.
+Profiles name where each secret comes from (an environment variable, the
+system keyring or a password-manager command); no secret is stored.
 The obsolete ``build`` and remote initialization interfaces have been removed.
 Use ``init``, ``add`` and ``commit`` for new remote catalogs.
 
