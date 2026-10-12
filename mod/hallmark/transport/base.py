@@ -440,6 +440,22 @@ class DataBackend:
         """
         raise CapabilityError("Recursive listing is unsupported by this transport")
 
+    def server_checksums(self, relative_paths, algorithm):
+        """
+        Have the server compute checksums of files without transferring them.
+
+        Args:
+            relative_paths (list[str]): Literal paths relative to the root.
+            algorithm (str): ``md5``, ``sha1``, ``sha256`` or ``sha512``.
+
+        Returns:
+            dict[str, str]: Lowercase hexadecimal digest for every path.
+
+        Raises:
+            CapabilityError: If the server cannot compute checksums.
+        """
+        raise CapabilityError("This backend cannot compute checksums on the server")
+
     def read_text(self, relative_path, limit):
         """
         Read a remote metadata file within a byte limit.

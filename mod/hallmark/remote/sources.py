@@ -20,7 +20,9 @@ import pandas as pd
 from ..repo.config import normalize_remotes, single_data_format
 from ..transport.base import RemoteSpec, validate_remote_path
 
-SOURCE_FIELDS = ("name", "remote", "root", "prefix", "fmt", "filter")
+SOURCE_FIELDS = ("name", "remote", "root", "prefix", "fmt", "filter",
+                 "server_checksum")
+SERVER_CHECKSUMS = ("md5", "sha1", "sha256", "sha512")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 # Local folders that would place downloads inside repository metadata.
 _RESERVED_SEGMENTS = {".hm", ".git"}
@@ -69,6 +71,8 @@ class SourceSpec:
         prefix (str): Local folder for the files, ``""`` or ending in ``/``.
         fmt (str, optional): Filename pattern relative to ``root``.
         filter (tuple[str, ...]): Glob filters relative to ``root``.
+        server_checksum (str, optional): Algorithm the server computes for
+            files without a published checksum.
     """
 
     name: str
@@ -77,6 +81,7 @@ class SourceSpec:
     prefix: str = ""
     fmt: Optional[str] = None
     filter: tuple = ()
+    server_checksum: Optional[str] = None
 
     def __post_init__(self):
         validate_source_name(self.name)
@@ -91,6 +96,9 @@ class SourceSpec:
                                      or not self.fmt.strip()):
             raise ValueError(f"Source {self.name!r} pattern must be a string")
         object.__setattr__(self, "filter", _normalize_filter(self.filter))
+        if self.server_checksum not in (None, *SERVER_CHECKSUMS):
+            raise ValueError(
+                "server_checksum must be one of: " + ", ".join(SERVER_CHECKSUMS))
 
     @classmethod
     def from_config(cls, entry) -> SourceSpec:
@@ -102,7 +110,8 @@ class SourceSpec:
             raise ValueError(
                 "Sources support only " + ", ".join(SOURCE_FIELDS) + " fields")
         return cls(entry.get("name"), entry.get("remote"), entry.get("root", ""),
-                   entry.get("prefix", ""), entry.get("fmt"), entry.get("filter"))
+                   entry.get("prefix", ""), entry.get("fmt"), entry.get("filter"),
+                   entry.get("server_checksum"))
 
     def to_config(self) -> dict:
         """Return the ``config.yml`` entry, omitting empty fields."""
@@ -112,6 +121,8 @@ class SourceSpec:
                 entry[key] = getattr(self, key)
         if self.filter:
             entry["filter"] = list(self.filter)
+        if self.server_checksum:
+            entry["server_checksum"] = self.server_checksum
         return entry
 
     def selects_like(self, fmt, filter) -> bool:

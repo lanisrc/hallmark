@@ -247,13 +247,14 @@ def test_add_cli_forwards_backend_and_selection(monkeypatch, tmp_path):
         "add", "ssh://lab-data/export/", "--auth", "lab", "--backend", "ssh",
         "--backend-options", str(options), "--filter", "**/*.fits",
         "--filter", "README*", "--fmt", "{name}.fits", "--remote", "lab",
-        "--source", "fits", "--prefix", "lab/"])
+        "--source", "fits", "--prefix", "lab/", "--server-checksum", "sha256"])
     assert result.exit_code == 0, result.output
     assert captured == {
         "value": "ssh://lab-data/export/", "encoding": False,
         "auth": "lab", "backend": "ssh", "backend_options": {"collection": "latest"},
         "filter": ("**/*.fits", "README*"), "remote_fmt": "{name}.fits",
-        "remote": "lab", "source": "fits", "prefix": "lab/", "progress": True}
+        "remote": "lab", "source": "fits", "prefix": "lab/",
+        "server_checksum": "sha256", "progress": True}
 
 
 @pytest.mark.parametrize("arguments", [

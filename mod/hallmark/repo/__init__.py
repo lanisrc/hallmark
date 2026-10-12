@@ -709,7 +709,7 @@ class Repo:
 
     def add(self, fmt: str, encoding: bool = False, *, filter=None,
             remote_fmt=None, auth=None, backend=None, backend_options=None,
-            remote=None, source=None, prefix=None,
+            remote=None, source=None, prefix=None, server_checksum=None,
             progress=False) -> ParaFrame:
         '''
         Stage local file metadata or discover a remote catalog without downloading.
@@ -728,6 +728,8 @@ class Repo:
             remote (string, optional): Data remote to use or create.
             source (string, optional): Catalogue source to update or create.
             prefix (string, optional): Local folder for the source's files.
+            server_checksum (string, optional): Algorithm the server computes
+                for files without a published checksum (SSH only).
             progress (boolean): Show remote discovery progress.
         Returns:
             ParaFrame: Local parameters without checksums, or remote catalog rows.
@@ -738,10 +740,10 @@ class Repo:
             return add_remote(self, fmt, fmt=remote_fmt, filter=filter, auth=auth,
                               backend=backend, backend_options=backend_options,
                               remote=remote, source=source, prefix=prefix,
-                              progress=progress)
+                              server_checksum=server_checksum, progress=progress)
         if any(value is not None for value in
                (filter, remote_fmt, auth, backend, backend_options, remote,
-                source, prefix)):
+                source, prefix, server_checksum)):
             raise ValueError("Remote options require a remote URL")
         if is_remote_catalog(self.state):
             raise ValueError("Use a remote URL to update this catalog")

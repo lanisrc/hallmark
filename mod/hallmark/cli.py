@@ -290,10 +290,14 @@ def status(repo):
               help="Data remote to catalog under; matched by URL by default.")
 @click.option("--source", help="Catalog source to update or create.")
 @click.option("--prefix", help="Local folder for this source's files.")
+@click.option("--server-checksum",
+              type=click.Choice(["md5", "sha1", "sha256", "sha512"]),
+              help="Have an SSH server hash files that have no published "
+                   "checksum. Reads every such file on the server.")
 @click.argument("inputs", nargs=-1, required=True)
 @click.pass_obj
 def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmt,
-        remote_name, source, prefix):
+        remote_name, source, prefix, server_checksum):
     """Add files to the hallmark index.
 
     A remote URL or URL pattern stages a catalog without downloading files
@@ -317,7 +321,8 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     remote_options = dict(auth=auth, backend=backend,
                           backend_options=options,
                           filter=filters or None, remote_fmt=remote_fmt,
-                          remote=remote_name, source=source, prefix=prefix)
+                          remote=remote_name, source=source, prefix=prefix,
+                          server_checksum=server_checksum)
     if len(inputs) != 1 and any(value is not None for value in remote_options.values()):
         raise ClickException("Remote add accepts one URL at a time")
     # attempt to add the specified files to the hallmark index, handling any errors

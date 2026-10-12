@@ -91,12 +91,27 @@ the problem, exits with an error and keeps the previously staged catalog
 unchanged; it never stages a partial result.
 
 Both URL schemes use structured SFTP directory enumeration and file transfers.
-SFTP-only accounts work for discovery as well as downloading. No
-``--allow-remote-commands`` or ``--remote-hash`` option is needed. Discovery
+SFTP-only accounts work for discovery as well as downloading. Discovery
 reads listings and published checksum manifests without reading dataset files
-to compute checksums. Missing checksums remain unknown. For reproducible
-catalogs, publish an immutable export with a SHA-256 manifest, for example
-``<digest>  runs/run_001.h5`` records in ``SHA256SUMS``.
+to compute checksums. Missing checksums remain unknown until a download records
+the file's SHA-1. For reproducible catalogs, publish an immutable export with a
+SHA-256 manifest, for example ``<digest>  runs/run_001.h5`` records in
+``SHA256SUMS``.
+
+Where no manifest exists and the account has a login shell, the server can
+compute checksums instead:
+
+.. code-block:: bash
+
+   hm add 'ssh://lab-data/srv/exports/lab/' --server-checksum sha256
+
+The server runs ``xargs -0 sha256sum`` (or ``md5sum``, ``sha1sum``,
+``sha512sum``) on every file without an equal or stronger published checksum;
+file names reach it only as input, never as part of a command. Hashing reads
+each such file on the server, so prefer a data-transfer node to a shared login
+node for large exports. The choice is saved with the source and repeated by
+later ``add`` runs. SFTP-only accounts report that they cannot hash, and names
+containing a backslash or newline cannot be hashed this way.
 
 The generated data remote is named ``origin`` and points to the source URL.
 Each ``add`` records a *source*: the remote, the folder beneath it, and the

@@ -21,7 +21,7 @@ from hallmark.cli import hallmark
 from hallmark.transport import OperationContext, RemoteSpec
 from conftest import download_selection
 from hallmark.transport.base import (
-    DownloadError, RemoteObjectMissing, TransferCancelled,
+    CapabilityError, DownloadError, RemoteObjectMissing, TransferCancelled,
 )
 from hallmark.transport.ssh import SshBackend
 
@@ -489,3 +489,28 @@ def test_add_records_profile_reference(ssh_server, tmp_path, monkeypatch):
     repo = Repo.init(tmp_path / "catalog")
     repo.add(ssh_server["url"], auth="lab")
     assert Repo(repo.worktree).state.config["remote"][0]["auth"] == "lab"
+
+
+def test_server_hashing_over_a_real_shell(ssh_server, tmp_path):
+    root = ssh_server["root"]
+    (root / "a b#.dat").write_bytes(b"science")
+    (root / "nested").mkdir()
+    (root / "nested/$(id).dat").write_bytes(b"more")
+    repo = Repo.init(tmp_path / "repo")
+    repo.add(ssh_server["url"], server_checksum="sha256")
+    rows = repo.state.data.set_index("path")
+    assert rows.loc["a b#.dat", "checksum"] == hashlib.sha256(b"science").hexdigest()
+    assert rows.loc["nested/$(id).dat", "checksum"] == \
+        hashlib.sha256(b"more").hexdigest()
+    assert set(rows["checksum_source"]) == {"server"}
+    result = repo.download(repo.plan_download(all_files=True), approved=True)
+    assert (result["succeeded"], result["failed"]) == (2, 0)
+
+
+@pytest.mark.parametrize("ssh_server", ["sftp-only"], indirect=True)
+def test_server_hashing_needs_a_login_shell(ssh_server, tmp_path):
+    (ssh_server["root"] / "item").write_bytes(b"data")
+    repo = Repo.init(tmp_path / "repo")
+    with pytest.raises(CapabilityError, match="SFTP-only"):
+        repo.add(ssh_server["url"], server_checksum="sha256")
+    assert repo.state.data.empty

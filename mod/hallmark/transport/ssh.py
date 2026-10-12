@@ -14,12 +14,14 @@ import time
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
 
+from ..utils import is_valid_checksum
 from .base import (
     CapabilityError,
     DownloadError,
     RemoteConfigurationError,
     RemoteEntry,
     DataBackend,
+    TransferCancelled,
     validate_remote_path,
     reject_control_characters,
 )
@@ -42,6 +44,51 @@ def parse_openssh_version(text):
     """
     match = re.search(rb"OpenSSH_(\d+)\.(\d+)", text)
     return tuple(map(int, match.groups())) if match else None
+
+
+# Server hashing runs this fixed command; paths arrive NUL-separated on stdin,
+# so no catalogue data ever reaches the remote shell.
+HASH_TOOLS = {"md5": "md5sum", "sha1": "sha1sum", "sha256": "sha256sum",
+              "sha512": "sha512sum"}
+HASH_BATCH = 500
+
+
+def parse_hash_output(output, requested, algorithm):
+    """
+    Read ``*sum`` output for the absolute paths that were requested.
+
+    Args:
+        output (bytes): Lines of ``DIGEST  PATH`` or ``DIGEST *PATH``.
+        requested (dict[str, str]): Absolute remote path to catalogue path.
+        algorithm (str): Expected algorithm.
+
+    Returns:
+        dict[str, str]: Digest for each catalogue path.
+
+    Raises:
+        DownloadError: If a line is escaped, unexpected or missing.
+    """
+    try:
+        lines = output.decode("utf-8").splitlines()
+    except UnicodeError:
+        raise DownloadError("Server checksum output is not UTF-8") from None
+    digests = {}
+    for line in lines:
+        # GNU tools escape names containing a backslash or newline.
+        if line.startswith("\\"):
+            raise DownloadError(
+                "Server hashing cannot report names containing backslashes "
+                "or newlines")
+        digest, _, name = line.partition(" ")
+        name = name[1:] if name[:1] in {" ", "*"} else name
+        if name not in requested or not is_valid_checksum(algorithm, digest):
+            raise DownloadError("Unexpected server checksum output")
+        digests[requested[name]] = digest.lower()
+    missing = set(requested.values()) - set(digests)
+    if missing:
+        raise DownloadError(
+            f"The server reported no checksum for {len(missing)} file(s)")
+    return digests
 
 
 def quote_sftp_path(path):
@@ -338,6 +385,44 @@ class SshBackend(DataBackend):
                 file_limit=file_limit,
                 report_progress=file_limit is None,
             )
+
+    def server_checksums(self, relative_paths, algorithm):
+        """
+        Hash files on the server with its ``*sum`` tool, in batches.
+
+        Needs a login shell with GNU-style ``md5sum``/``sha*sum`` and
+        ``xargs -0``; accounts limited to SFTP report a capability error.
+        """
+        tool = HASH_TOOLS.get(algorithm)
+        if tool is None:
+            raise RemoteConfigurationError(
+                f"Unsupported server checksum algorithm {algorithm!r}")
+        self.prepare()
+        digests = {}
+        paths = list(relative_paths)
+        for start in range(0, len(paths), HASH_BATCH):
+            requested = {self.context.remote.file_path(path): path
+                         for path in paths[start:start + HASH_BATCH]}
+            for name in requested:
+                reject_control_characters(name, "Remote path")
+            data = b"".join(name.encode("utf-8") + b"\0" for name in requested)
+            try:
+                with self._slots:
+                    output = self._run_ssh_command(
+                        self.ssh + self._ssh_options()
+                        + ["--", self.context.remote.host, f"xargs -0 {tool} --"],
+                        timeout=self.context.settings.transfer_timeout, data=data,
+                        limit=len(data) + 256 * len(requested))
+            except TransferCancelled:
+                raise
+            except DownloadError:
+                raise CapabilityError(
+                    f"Server-side {algorithm} hashing failed on "
+                    f"{self.context.remote.display}; it needs a login shell with "
+                    f"{tool} and read access (SFTP-only accounts cannot hash)"
+                ) from None
+            digests.update(parse_hash_output(output, requested, algorithm))
+        return digests
 
     def fetch(self, relative_path, destination, *, chunk_size=8192):
         """Download one file over SFTP; OpenSSH controls the read size."""

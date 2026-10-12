@@ -198,7 +198,7 @@ def _keep_sha1(frame, previous):
 
 def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
                backend_options=None, remote=None, source=None, prefix=None,
-               progress=False):
+               server_checksum=None, progress=False):
     """
     Catalog files from a remote folder as one source of the catalogue.
 
@@ -219,6 +219,9 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
         remote (str, optional): Remote name to use or create.
         source (str, optional): Source name to update or create.
         prefix (str, optional): Local folder for this source's files.
+        server_checksum (str, optional): Have the server compute this
+            algorithm for files without a published checksum; saved with the
+            source and reused when it is added again.
         progress: Discovery progress callback or flag.
 
     Returns:
@@ -266,11 +269,14 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
                 "a source keeps its prefix")
         if fmt is None and not filter:
             fmt, filter = current.fmt, list(current.filter) or None
+        if server_checksum is None:
+            server_checksum = current.server_checksum
         name, prefix = current.name, current.prefix
     else:
         name = source or derive_source_name(
             remote_name, root, [item.name for item in sources])
-    selected = SourceSpec(name, remote_name, root, prefix or "", fmt, filter)
+    selected = SourceSpec(name, remote_name, root, prefix or "", fmt, filter,
+                          server_checksum or None)
     data = state.data
     mine = (rows_of(data, current, sources) if current is not None
             else pd.Series(False, index=data.index))
@@ -281,13 +287,15 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
     try:
         with OperationContext(server.subpath(root)) as context:
             entries = discover_remote_files(
-                context, filter=filter, fmt=fmt, progress=progress
+                context, filter=filter, fmt=fmt, progress=progress,
+                server_checksum=selected.server_checksum,
             )
     except RemoteConfigurationError:
         raise
     except DownloadError as exc:
         # Nothing is saved until the scan completes, so the catalogue is intact.
-        raise DownloadError(
+        # Keep the error's type, such as CapabilityError, for callers.
+        raise type(exc)(
             f"Remote scan failed (previous catalogue kept): {exc}") from exc
     if not entries:
         raise ValueError(
