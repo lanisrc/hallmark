@@ -66,6 +66,10 @@ Utilities
    :members:
    :show-inheritance:
 
+.. automodule:: hallmark.fmt_detection
+   :members:
+   :show-inheritance:
+
 .. automodule:: hallmark.repo.dothm
    :members:
    :show-inheritance:
