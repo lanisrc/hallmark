@@ -357,5 +357,5 @@ SSH configuration and known-hosts files.
 They do not connect to a lab server or change the user's SSH trust files.
 Enabling the tests requires the OpenSSH tools to be installed; missing
 tools cause a test failure.
-CI installs the server and runs these tests separately from the
-Python-version matrix.
+CI installs the server and runs the complete suite, these tests included,
+in every Linux and macOS test job.

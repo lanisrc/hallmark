@@ -10,14 +10,14 @@ readme = "README.rst"
 requires-python = ">=3.9"
 
 dependencies =[
-    "click",
-    "GitPython",
-    "numpy",
-    "pandas",
-    "parse",
-    "pyyaml",
-    "requests",
-    "tqdm",
+    "click>=8.1",
+    "GitPython>=3.1.30",
+    "numpy>=1.21",
+    "pandas>=1.5",
+    "parse>=1.19",
+    "pyyaml>=5.4",
+    "requests>=2.26",
+    "tqdm>=4.60",
 ]
 
 authors = [
@@ -28,7 +28,9 @@ authors = [
     {name = "Ram Adithya"},
     {name = "Hayden Foote"},
     {name = "Samuel Jacobs"},
-    {name = "Yaqing Su"}
+    {name = "Yaqing Su"},
+    {name = "Tianrui (Dennis) Wu"},
+    {name = "Arshia Akhtarkavan"}
 ]
 
 [project.scripts]
@@ -41,7 +43,7 @@ Repository = "https://github.com/l6a/hallmark"
 Issues = "https://github.com/l6a/hallmark/issues"
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "pytest-cov", "pytest-timeout"]
 doc = ["sphinx"]
 lint = ["ruff"]
 
@@ -50,10 +52,11 @@ where = ["mod"]
 
 [tool.ruff]
 target-version = "py39"
+# Excluded at the top level so the shell cells in demo notebooks are not parsed.
+extend-exclude = ["doc", "demo"]
 
 [tool.ruff.lint]
 select = ["E", "F"]
-exclude = ["doc", "demo"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
@@ -62,3 +65,16 @@ markers = [
     "ssh_client: exercise the actual local OpenSSH SFTP command parser",
     "ssh_integration: disposable loopback sshd (HALLMARK_RUN_SSH_TESTS=1 required)",
 ]
+
+[tool.coverage.run]
+source_pkgs = ["hallmark"]
+branch = true
+# Store repository-relative paths so data from Linux and macOS jobs combines.
+relative_files = true
+
+[tool.coverage.paths]
+hallmark = ["mod/hallmark", "*/mod/hallmark", "*/site-packages/hallmark"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

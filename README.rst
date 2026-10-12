@@ -3,6 +3,10 @@
 
     Reproducibility is the |hallmark|_ of the scientific method.
 
+..  image:: https://codecov.io/gh/lanisrc/hallmark/graph/badge.svg?branch=main
+    :target: https://codecov.io/gh/lanisrc/hallmark
+    :alt: Coverage
+
 Modern science has become so complex that many science projects rely
 on multiple software packages to work in unison, resulting in networks of
 data products along the analyses.
@@ -135,8 +139,8 @@ version, operating system, and a minimal example without credentials or private 
 
 From a development checkout, install the validation tools and run::
 
-    python -m pip install -e . pytest ruff sphinx
-    python -m pytest
+    python -m pip install -e . --group dev --group lint --group doc
+    python -m pytest --cov
     ruff check --select E,F mod test
     python -m sphinx -b html -W doc doc/_build
 
