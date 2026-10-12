@@ -624,6 +624,20 @@ def test_named_remote_serves_every_file_at_its_remote_path(
                                "https://other.test/data/notes.txt"]
 
 
+def test_plan_summary_counts_cached_files_per_remote(tmp_path):
+    from hallmark.remote.plan import DownloadItem, DownloadPlan
+
+    remotes = {"origin": {"url": "https://a.test/"},
+               "mirror": {"url": "https://b.test/"}}
+    plan = DownloadPlan(
+        (DownloadItem("a", remote="origin"),), None, tmp_path, remotes=remotes,
+        cached_items=(DownloadItem("b", remote="mirror", sha1="1" * 40),))
+    summary = plan.summary()
+    assert "origin: https://a.test/ (1 file(s))" in summary
+    assert "mirror: https://b.test/ (1 file(s))" in summary
+    assert "From the local cache: 1 file(s) (no transfer)" in summary
+
+
 def test_plans_reject_items_naming_unrecorded_remotes(tmp_path):
     from hallmark.remote.plan import DownloadItem, DownloadPlan
 

@@ -1,0 +1,322 @@
+"""Downloads pass through .hm/cache: Worktree <-> Cache <-> State <-> Dothm."""
+
+import errno
+import hashlib
+import os
+import stat
+from pathlib import Path
+
+import pytest
+
+from hallmark import Repo
+from hallmark.repo import cache as cache_module
+from hallmark.transport import OperationContext
+from hallmark.transport.base import RemoteObjectMissing
+from hallmark.transport.http import HttpBackend
+
+ROOT = "https://example.test/data/"
+FILES = {"a.fits": b"alpha", "b.fits": b"bravo", "c.fits": b"alpha"}
+
+
+def sha1(data):
+    return hashlib.sha1(data).hexdigest()
+
+
+@pytest.fixture
+def server(monkeypatch):
+    """Serve FILES with sizes in an index and record every payload fetch."""
+    files = dict(FILES)
+    fetched = []
+
+    def read_text(context, path):
+        if path:
+            raise RemoteObjectMissing("No metadata")
+        return "<h1>Index of data</h1>" + "".join(
+            f'<a href="{name}" data-size="{len(data)}">{name}</a>'
+            for name, data in files.items())
+
+    def fetch(self, relative_path, destination, *, chunk_size=8192):
+        fetched.append(relative_path)
+        Path(destination).write_bytes(files[relative_path])
+
+    monkeypatch.setattr(OperationContext, "read_text", read_text)
+    monkeypatch.setattr(HttpBackend, "fetch", fetch)
+    return files, fetched
+
+
+@pytest.fixture
+def repo(tmp_path, server):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT)
+    repo.commit("Catalogue")
+    return repo
+
+
+def download(repo, **selection):
+    plan = repo.plan_download(**(selection or {"all_files": True}))
+    return plan, repo.download(plan, approved=True)
+
+
+def test_downloads_are_read_only_links_to_cached_objects(repo, server):
+    _, result = download(repo)
+    assert (result["succeeded"], result["failed"]) == (3, 0)
+    for name, data in FILES.items():
+        path = repo.worktree / name
+        assert path.read_bytes() == data
+        assert repo.cache.is_linked(sha1(data), path)
+        assert not os.stat(path).st_mode & stat.S_IWUSR
+    # Identical content is stored once and linked twice.
+    assert repo.cache.object_path(sha1(b"alpha")).stat().st_nlink == 3
+    assert list(repo.cache.tmp.iterdir()) == []
+    assert sorted(p.name for p in repo.worktree.iterdir()) == [
+        ".hm", "a.fits", "b.fits", "c.fits"]
+
+
+def test_a_rerun_recognises_its_own_files_without_transfers(repo, server):
+    download(repo)
+    files, fetched = server
+    fetched.clear()
+    plan, result = download(repo)
+    assert plan.items == () and plan.cached_items == ()
+    assert sorted(item.relative_path.name for item in plan.skipped_items) == sorted(
+        FILES)
+    assert {item.relative_path.name: item.sha1 for item in plan.skipped_items} == {
+        name: sha1(data) for name, data in FILES.items()}
+    assert fetched == []
+    assert result == {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
+
+
+def test_known_content_is_placed_from_the_cache(repo, server):
+    files, fetched = server
+    repo.state.data["sha1"] = [sha1(FILES[path]) for path in repo.state.data.path]
+    repo.dothm.save_state(repo.state)
+    download(repo)
+    (repo.worktree / "b.fits").unlink()
+    fetched.clear()
+    plan, result = download(repo)
+    assert [item.relative_path.name for item in plan.cached_items] == ["b.fits"]
+    assert plan.items == () and plan.file_count == 1 and plan.has_changes
+    assert "From the local cache: 1 file(s) (no transfer)" in plan.summary()
+    assert result["from_cache"] == ["b.fits"]
+    assert result["succeeded"] == 1
+    assert fetched == []
+    assert repo.cache.is_linked(sha1(b"bravo"), repo.worktree / "b.fits")
+
+
+def test_a_vanished_cached_object_is_not_fetched_without_approval(repo, server):
+    files, fetched = server
+    repo.state.data["sha1"] = [sha1(FILES[path]) for path in repo.state.data.path]
+    repo.dothm.save_state(repo.state)
+    download(repo)
+    (repo.worktree / "b.fits").unlink()
+    plan = repo.plan_download(all_files=True)
+    obj = repo.cache.object_path(sha1(b"bravo"))
+    obj.unlink()
+    fetched.clear()
+    result = repo.download(plan, approved=True)
+    assert result["failed"] == 1
+    assert "cached copy of b.fits is missing" in result["errors"][0]
+    assert fetched == []
+    with pytest.raises(Exception, match="approval"):
+        repo.download(plan)
+
+
+def test_files_are_copied_where_links_are_unavailable(repo, server, monkeypatch):
+    real_link = os.link
+
+    def link(source, destination):
+        if ".hm" not in str(destination):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_link(source, destination)
+
+    monkeypatch.setattr(cache_module.os, "link", link)
+    _, result = download(repo, file_paths=["a.fits"])
+    assert result["copied"] == ["a.fits"]
+    path = repo.worktree / "a.fits"
+    assert path.read_bytes() == b"alpha"
+    assert os.stat(path).st_mode & stat.S_IWUSR
+    assert not repo.cache.is_linked(sha1(b"alpha"), path)
+    assert repo.cache.contains(sha1(b"alpha"))
+
+
+def test_foreign_files_without_a_digest_block_the_download(repo, server):
+    files, fetched = server
+    (repo.worktree / "b.fits").write_bytes(b"bravo")
+    with pytest.raises(Exception, match="conflict"):
+        repo.plan_download(all_files=True)
+    assert fetched == []
+
+
+def test_stale_temporary_files_are_swept_before_downloading(repo, server):
+    repo.cache.tmp.mkdir(parents=True)
+    stale = repo.cache.tmp / ".a.fits.crashed"
+    stale.write_bytes(b"alp")
+    old = stale.stat().st_mtime - cache_module.STALE_TEMP_SECONDS - 60
+    os.utime(stale, (old, old))
+    download(repo, file_paths=["a.fits"])
+    assert list(repo.cache.tmp.iterdir()) == []
+
+
+def test_interrupted_transfers_leave_nothing_in_the_worktree(repo, server,
+                                                              monkeypatch):
+    def interrupted(self, relative_path, destination, *, chunk_size=8192):
+        Path(destination).write_bytes(b"al")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(HttpBackend, "fetch", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        download(repo, file_paths=["a.fits"])
+    assert sorted(p.name for p in repo.worktree.iterdir()) == [".hm"]
+    assert list(repo.cache.tmp.iterdir()) == []
+    assert not repo.cache.contains(sha1(b"alpha"))
+
+
+def test_output_folders_also_link_to_the_cache(repo, server, tmp_path):
+    plan = repo.plan_download(tmp_path / "elsewhere", all_files=True)
+    repo.download(plan, approved=True)
+    assert repo.cache.is_linked(sha1(b"bravo"), tmp_path / "elsewhere" / "b.fits")
+
+
+def test_downloads_stage_each_files_sha1_for_commit(repo, server):
+    _, result = download(repo)
+    assert result["staged"] == 3
+    assert repo.status()["staged"]["modified"] == sorted(FILES)
+    expected = {name: sha1(data) for name, data in FILES.items()}
+    assert dict(zip(repo.state.data.path, repo.state.data.sha1)) == expected
+    saved = Repo(repo.worktree)
+    assert dict(zip(saved.state.data.path, saved.state.data.sha1)) == expected
+    assert repo.commit("Record downloaded content")
+    assert Repo(repo.worktree).status()["staged"]["modified"] == []
+    assert not repo.objects.root.exists()
+    # Later runs skip the linked files without hashing them.
+    import hallmark.remote.download as module
+
+    def no_hashing(*args, **kwargs):
+        raise AssertionError("linked files need no hashing")
+
+    original = module.calculate_file_checksums
+    module.calculate_file_checksums = no_hashing
+    try:
+        plan, result = download(repo)
+    finally:
+        module.calculate_file_checksums = original
+    assert len(plan.skipped_items) == 3 and "staged" not in result
+
+
+def test_state_is_saved_once_per_download(repo, server, monkeypatch):
+    from hallmark.repo.dothm import Dothm
+
+    saves = []
+    original = Dothm.save_state
+    monkeypatch.setattr(Dothm, "save_state",
+                        lambda self, state: saves.append(1) or original(self, state))
+    download(repo)
+    assert saves == [1]
+    download(repo)
+    assert saves == [1]
+
+
+def test_only_successful_files_are_staged(repo, server, monkeypatch):
+    files, _ = server
+    files["b.fits"] = b"truncated"[:3]
+    _, result = download(repo)
+    assert (result["succeeded"], result["failed"], result["staged"]) == (2, 1, 2)
+    data = dict(zip(repo.state.data.path, repo.state.data.sha1))
+    assert data == {"a.fits": sha1(b"alpha"), "b.fits": "", "c.fits": sha1(b"alpha")}
+
+
+def test_an_interrupted_download_stages_what_finished(repo, server, monkeypatch):
+    files, fetched = server
+
+    def fetch(self, relative_path, destination, *, chunk_size=8192):
+        if relative_path == "b.fits":
+            raise KeyboardInterrupt
+        Path(destination).write_bytes(files[relative_path])
+
+    monkeypatch.setattr(HttpBackend, "fetch", fetch)
+    plan = repo.plan_download(file_paths=["a.fits", "b.fits"])
+    with pytest.raises(KeyboardInterrupt):
+        repo.download(plan, approved=True, max_workers=1)
+    data = dict(zip(Repo(repo.worktree).state.data.path,
+                    Repo(repo.worktree).state.data.sha1))
+    assert data["a.fits"] == sha1(b"alpha")
+    assert data["b.fits"] == ""
+
+
+def test_a_failed_save_is_recovered_by_the_next_run(repo, server, monkeypatch):
+    from hallmark.repo.dothm import Dothm
+
+    files, fetched = server
+    original = Dothm.save_state
+
+    def broken(self, state):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Dothm, "save_state", broken)
+    _, result = download(repo)
+    assert result["succeeded"] == 3
+    assert "disk full" in result["staging_error"]
+    assert (repo.worktree / "b.fits").read_bytes() == b"bravo"
+    monkeypatch.setattr(Dothm, "save_state", original)
+    fetched.clear()
+    reopened = Repo(repo.worktree)
+    assert "sha1" not in reopened.state.data.columns
+    plan, result = download(reopened)
+    assert fetched == [] and not plan.has_changes
+    assert result["staged"] == 3
+    assert Repo(repo.worktree).status()["staged"]["modified"] == sorted(FILES)
+
+
+def test_a_catalogue_changed_after_planning_is_not_staged(repo, server):
+    plan = repo.plan_download(file_paths=["b.fits"])
+    repo.state.data.loc[repo.state.data.path == "b.fits", "checksum_algorithm"] = "md5"
+    repo.state.data.loc[repo.state.data.path == "b.fits", "checksum"] = "0" * 32
+    repo.dothm.save_state(repo.state)
+    result = repo.download(plan, approved=True)
+    assert result["succeeded"] == 1 and "staged" not in result
+    assert "sha1" not in Repo(repo.worktree).state.data.columns
+
+
+def test_cli_reports_staging_and_recovers_on_a_quiet_rerun(repo, server,
+                                                           monkeypatch):
+    from click.testing import CliRunner
+
+    from hallmark.cli import hallmark
+    from hallmark.repo.dothm import Dothm
+
+    monkeypatch.chdir(repo.worktree)
+    original = Dothm.save_state
+
+    def broken(self, state):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Dothm, "save_state", broken)
+    result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
+    assert result.exit_code == 1
+    assert "could not be recorded: disk full" in result.output
+    assert "Run hm download again; no transfer is needed." in result.output
+    monkeypatch.setattr(Dothm, "save_state", original)
+    result = CliRunner().invoke(hallmark, ["download", "--all"])
+    assert result.exit_code == 0, result.output
+    assert "No files selected for download." in result.output
+    assert "Staged SHA-1 for 3 file(s); run hm commit to record them" in result.output
+    assert "Successfully downloaded" not in result.output
+
+
+def test_dry_run_lists_files_coming_from_the_cache(repo, server, monkeypatch):
+    from click.testing import CliRunner
+
+    from hallmark.cli import hallmark
+
+    download(repo)
+    repo.commit("Record downloaded content")
+    (repo.worktree / "b.fits").unlink()
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["download", "--all", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "From the local cache: 1 file(s) (no transfer)" in result.output
+    assert "  b.fits (from the local cache)" in result.output
+    result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "Placed 1 file(s) from the local cache" in result.output
+    assert "Successfully downloaded" not in result.output

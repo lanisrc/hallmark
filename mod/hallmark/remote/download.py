@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
@@ -16,6 +17,7 @@ from ..transport import OperationContext, RemoteSpec
 from ..transport.base import DownloadError, validate_remote_path
 from .plan import DownloadItem, DownloadPlan
 from .sources import effective_sources
+from ..repo.state import is_remote_catalog
 from ..utils import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
     SUPPORTED_CHECKSUM_ALGORITHMS,
@@ -804,8 +806,61 @@ def _parse_file_size(value) -> Optional[int]:
     return int(size)
 
 
-def _check_existing_files(items, output_root):
+def _existing_file_status(item, destination, cache):
+    """
+    Classify an existing destination as ours (skip) or a conflict.
+
+    Returns:
+        DownloadItem | None: The item to skip, carrying the file's SHA-1 when
+        it was computed, or None for a conflict.
+    """
+    if not destination.is_file() or destination.is_symlink():
+        return None
+    if cache is not None and item.sha1 is not None:
+        if cache.is_linked(item.sha1, destination):
+            if (item.size_bytes is not None
+                    and destination.stat().st_size != item.size_bytes):
+                return None
+            return item
+    checksum = _validate_expected_checksum(item.checksum)
+    if (checksum is None and item.sha1 is None
+            and (cache is None or destination.stat().st_nlink < 2)):
+        # Without a digest only a link into the cache identifies the file.
+        return None
+    algorithms = {"sha1"} | ({checksum[0]} if checksum else set())
+    digests = calculate_file_checksums(destination, algorithms)
+    if checksum is not None:
+        verified = digests[checksum[0]] == checksum[1]
+    elif item.sha1 is not None:
+        verified = digests["sha1"] == item.sha1
+    else:
+        # Downloaded earlier, but its SHA-1 was not staged before it stopped.
+        verified = cache.is_linked(digests["sha1"], destination)
+    if not verified or (item.sha1 is not None and digests["sha1"] != item.sha1):
+        return None
+    return replace(item, sha1=digests["sha1"])
+
+
+def _check_existing_files(items, output_root, cache=None):
+    """
+    Sort plan items by what their destinations hold.
+
+    Args:
+        items: Plan items to check.
+        output_root (Path): Destination root.
+        cache (Cache, optional): Download cache. Without one, nothing is
+            placed from the cache and only a verified copy is skipped.
+
+    Returns:
+        tuple[list, list, list]: Items to transfer, items whose content is
+        already cached, and items already at their destination.
+
+    Raises:
+        DownloadError: If any destination holds something else, so that
+            nothing is downloaded until the user removes it.
+    """
     pending = []
+    cached = []
     skipped = []
     conflicts = []
     for item in items:
@@ -821,16 +876,18 @@ def _check_existing_files(items, output_root):
                     break
             if blocked_parent:
                 conflicts.append(item.relative_path.as_posix())
-            elif not destination.exists():
-                pending.append(item)
-            else:
-                checksum = _validate_expected_checksum(item.checksum)
-                if (destination.is_file() and checksum is not None
-                        and calculate_file_checksum(destination, algorithm=checksum[0])
-                        .lower() == checksum[1]):
-                    skipped.append(item)
+            elif not os.path.lexists(destination):
+                if (cache is not None and item.sha1 is not None
+                        and cache.contains(item.sha1)):
+                    cached.append(item)
                 else:
+                    pending.append(item)
+            else:
+                status = _existing_file_status(item, destination, cache)
+                if status is None:
                     conflicts.append(item.relative_path.as_posix())
+                else:
+                    skipped.append(status)
         except (OSError, ValueError) as exc:
             raise DownloadError(str(exc)) from exc
     if conflicts:
@@ -838,7 +895,7 @@ def _check_existing_files(items, output_root):
             "Existing paths conflict with the catalog or cannot be verified:\n"
             + "\n".join(conflicts)
             + "\nNothing downloaded. Delete these paths first to replace them.")
-    return pending, skipped
+    return pending, cached, skipped
 
 
 def _remote_summary(remote: dict) -> dict:
@@ -993,14 +1050,15 @@ def plan_download(
         remote = {}
     remotes = {name: _remote_summary(config) for name, config in used.items()}
     pinned = _remote_summary(remote) if remote.get("url") else {}
-    items, skipped = _check_existing_files(items, output_root)
+    items, cached, skipped = _check_existing_files(
+        items, output_root, getattr(repo, "cache", None))
     return DownloadPlan(
         tuple(items), remote.get("url"), output_root,
         remote_auth=remote.get("auth"), remote_name=remote.get("name"),
         estimated_bytes_per_second=estimated_bytes_per_second,
         remote_backend=pinned.get("backend"),
         backend_options=remote.get("backend_options"), skipped_items=tuple(skipped),
-        remotes=remotes)
+        remotes=remotes, cached_items=tuple(cached))
 
 
 def execute_download_plan(
@@ -1033,19 +1091,115 @@ def execute_download_plan(
     """
     if not isinstance(plan, DownloadPlan):
         raise TypeError("plan must be a DownloadPlan")
-    if plan.items and approved is not True:
+    if plan.has_changes and approved is not True:
         raise DownloadError("Dataset downloads require explicit approval")
     max_workers = _require_positive_integer(max_workers, label="max_workers")
-    if not plan.items:
-        return {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
+    results = {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
+    cache = getattr(repo, "cache", None)
+    if not plan.has_changes:
+        if cache is not None:
+            # Files found complete while planning may still need their SHA-1.
+            _stage_download_sha1(repo, plan, _recovered_sha1(plan.skipped_items),
+                                 results)
+        return results
     if plan.output_path.resolve() != plan.output_path:
         raise DownloadError("Download destination changed since planning")
-    items, skipped = _check_existing_files(plan.items, plan.output_path)
-    results = {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
+    if cache is None and plan.cached_items:
+        raise DownloadError("This plan places files from a repository's cache")
+    if cache is not None:
+        cache.cleanup_stale_temps()
+    items, cached, skipped = _check_existing_files(
+        plan.items + plan.cached_items, plan.output_path, cache)
     if skipped:
         results["skipped"] = [item.relative_path.as_posix() for item in skipped]
-    if not items:
+    if cache is None:
+        _transfer_by_remote(plan, items, results, max_workers=max_workers,
+                            show_progress=show_progress)
         return results
+
+    results.update(sha1={}, copied=[])
+    try:
+        # A file planned from the cache is never transferred without approval.
+        planned_from_cache = {item.relative_path for item in plan.cached_items}
+        for item in items:
+            if item.relative_path in planned_from_cache:
+                results["failed"] += 1
+                results["errors"].append(
+                    f"The cached copy of {item.relative_path.as_posix()} is "
+                    "missing; run hm download again")
+        items = [item for item in items
+                 if item.relative_path not in planned_from_cache]
+        for item in cached:
+            _record_placed(results, _place_from_cache(
+                plan.output_path, cache, [item], item.sha1))
+        placed_from_cache = [item.relative_path.as_posix() for item in cached
+                             if item.relative_path.as_posix() in results["sha1"]]
+        if placed_from_cache:
+            results["from_cache"] = placed_from_cache
+        _transfer_by_remote(plan, items, results, cache=cache,
+                            max_workers=max_workers, show_progress=show_progress)
+    finally:
+        # Steps 3 and 4: record what is now in place, even after an interrupt.
+        found = {**_recovered_sha1(plan.skipped_items + tuple(skipped)),
+                 **results.pop("sha1")}
+        if not results["copied"]:
+            results.pop("copied")
+        _stage_download_sha1(repo, plan, found, results)
+    return results
+
+
+def _recovered_sha1(items) -> dict:
+    """Return the SHA-1 of skipped items whose content was hashed."""
+    return {item.relative_path.as_posix(): item.sha1 for item in items
+            if item.sha1 is not None}
+
+
+def _stage_download_sha1(repo, plan, sha1_by_path, results) -> None:
+    """
+    Record the SHA-1 of files now in place and stage it in ``.hm``.
+
+    Only remote catalogue rows without a SHA-1 are updated, and only while
+    their catalogued digest still matches the plan; the change is staged,
+    not committed. A failure to save is reported in ``staging_error``.
+    """
+    state = repo.state
+    if not sha1_by_path or not is_remote_catalog(state) \
+            or "path" not in state.data.columns:
+        return
+    planned = {item.relative_path.as_posix(): item for item in
+               plan.items + plan.cached_items + plan.skipped_items}
+    data = state.data.copy()
+    if "sha1" not in data.columns:
+        data["sha1"] = ""
+    known = data["sha1"].fillna("").astype(str)
+    updates = 0
+    for index, path in data["path"].astype(str).items():
+        sha1 = sha1_by_path.get(path)
+        if sha1 is None or known[index] or path not in planned:
+            continue
+        row = data.loc[index].to_dict()
+        catalogued = _parse_checksum(row.get("checksum"), row.get("checksum_algorithm"))
+        # The catalogue changed since planning; this SHA-1 may describe old bytes.
+        if _checksum_pair(catalogued) != _checksum_pair(planned[path].checksum):
+            continue
+        data.at[index, "sha1"] = sha1
+        updates += 1
+    if not updates:
+        return
+    state.data = data
+    try:
+        repo.dothm.save_state(state)
+    except Exception as exc:
+        results["staging_error"] = (
+            f"Downloaded files are in place, but their SHA-1 could not be "
+            f"recorded: {exc}")
+        return
+    results["staged"] = updates
+
+
+def _transfer_by_remote(plan, items, results, *, cache=None, max_workers,
+                        show_progress):
+    """Transfer items over one connection per remote recorded in the plan."""
     groups: dict[Optional[str], list[DownloadItem]] = {}
     for item in items:
         groups.setdefault(item.remote if item.remote in plan.remotes else None,
@@ -1063,6 +1217,12 @@ def execute_download_plan(
         total_bytes = None
         if all(item.size_bytes is not None for item in group):
             total_bytes = sum(item.size_bytes for item in group)
+        if cache is not None:
+            _download_selected_into_cache(
+                remote, plan.output_path, group, cache, results,
+                max_workers=max_workers, show_progress=show_progress,
+                total_bytes=total_bytes)
+            continue
         outcome = _download_selected(
             remote, plan.output_path, group,
             max_workers=max_workers, show_progress=show_progress,
@@ -1070,74 +1230,36 @@ def execute_download_plan(
         for key in ("succeeded", "failed", "total_bytes"):
             results[key] += outcome[key]
         results["errors"].extend(outcome["errors"])
-    return results
 
 
-def _download_selected(
-    remote_spec,
-    worktree_path,
-    items,
-    *,
-    max_workers,
-    show_progress,
-    total_bytes=None,
-):
+def _run_transfers(remote_spec, output_root, jobs, run_job, record, *, max_workers,
+                   show_progress, total_bytes=None):
     """
-    Download plan items from one remote with shared resources.
+    Run transfer jobs on one remote with a bounded window of workers.
 
-    Each file is verified against its catalogued size and digests before it
-    replaces nothing at its destination.
+    Args:
+        remote_spec (RemoteSpec): Remote serving every job.
+        output_root (Path): Resolved destination root.
+        jobs (list): Work items passed to ``run_job``.
+        run_job (callable): ``run_job(context, job)``, run in a worker thread.
+        record (callable): ``record(job, result, error)`` in the calling thread
+            as each job finishes; ``error`` is the DownloadError message.
+        max_workers (int): Maximum concurrent workers.
+        show_progress (bool): Show byte progress.
+        total_bytes (int, optional): Expected bytes for the progress bar.
     """
-    results = {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
-
-    # output_root is the resolved absolute path where files will be downloaded
-    output_root = Path(worktree_path).expanduser().resolve()
-    # if the output root exists and is not a directory, raise a DownloadError
-    if output_root.exists() and not output_root.is_dir():
-        raise DownloadError(
-            f"Download output is not a directory: {output_root}")
-
-    # Normalize selected files into a dictionary to ensure unique paths and checksums.
-    normalized_selection: dict[str, tuple[Path, Optional[ChecksumSpec]]] = {}
-    by_path: dict[str, DownloadItem] = {}
-    for item in items:
-        # Validate and convert the relative path to a safe Path object
-        relative_path = validate_remote_path(item.relative_path)
-        # Merge the selected file into the normalized selection,
-        # ensuring no conflicting checksums exist.
-        _merge_selected_file(normalized_selection, relative_path, item.checksum)
-        by_path[relative_path.as_posix()] = item
-
-    files_to_download = []
-    # for each unique relative path and expected checksum in the normalized selection
-    for relative_path, expected_checksum in (normalized_selection.values()):
-        # try to resolve the destination path for the download,
-        # ensuring it is contained within the output root
-        try:
-            destination = resolve_path_in_root(
-                output_root,
-                relative_path,
-                label="download destination")
-        # Handle exceptions raised by resolve_path_in_root and raise a DownloadError
-        except ValueError as exc:
-            raise DownloadError(str(exc)) from exc
-
-        item = by_path[relative_path.as_posix()]
-        files_to_download.append((
-            validate_remote_path(item.source_path), destination, expected_checksum,
-            item.size_bytes, item.sha1))
-
     # track transferred bytes
     progress = tqdm(
         total=total_bytes, unit="B", unit_scale=True, disable=not show_progress)
     progress_lock = Lock()
+    finished = 0
+    failed = 0
 
     def advance_bytes(count):
         # Transport callbacks run concurrently, one for each active worker.
         with progress_lock:
             progress.update(count)
 
-    # try to download the files using a thread pool executor for concurrent downloads
     try:
         with OperationContext(remote_spec, output_root) as context:
             context.on_bytes = advance_bytes
@@ -1145,69 +1267,38 @@ def _download_selected(
             executor = ThreadPoolExecutor(
                 max_workers=min(max_workers, context.settings.max_sessions)
                 if remote_spec.scheme in {"ssh", "sftp"} else max_workers)
+            pending = {}
             try:
-                # create an iterator over the files to download
-                file_iterator = iter(files_to_download)
-                # initialize a set to keep track of pending download futures
-                pending = set()
+                job_iterator = iter(jobs)
                 # Bound queued work as well as running workers.
                 window_size = max_workers * 2
 
                 def submit_next() -> bool:
-                    """
-                    Submit the next file for download if available.
-                    Returns:
-                        bool: True if a file was submitted,
-                        False if no more files are available.
-                    """
-                    # try to get the next file from the iterator
+                    """Submit the next job; return False when none remain."""
                     try:
-                        (relative_path, destination, checksum, size,
-                         sha1) = next(file_iterator)
-                    # Handle the exception when there are no more files to download
+                        job = next(job_iterator)
                     except StopIteration:
                         return False
-                    # add the download task to the pending set using the executor
-                    pending.add(
-                        executor.submit(
-                            _download_and_verify_file,
-                            context,
-                            relative_path,
-                            destination,
-                            checksum,
-                            DOWNLOAD_CHUNK_SIZE,
-                            expected_size=size,
-                            expected_sha1=sha1,
-                        )
-                    )
-                    # if the download was successfully submitted, return True
+                    pending[executor.submit(run_job, context, job)] = job
                     return True
 
-                # for each file in the initial window size, submit it for download
-                for _ in range(min(window_size, len(files_to_download))):
+                for _ in range(min(window_size, len(jobs))):
                     submit_next()
                 while pending:
-                    # wait for at least one of the pending download tasks to complete
                     completed, _ = wait(pending, return_when=FIRST_COMPLETED)
                     # Aggregate per-file failures and keep successful downloads.
                     for future in completed:
-                        pending.remove(future)
-                        # try to get the result of the completed download task
+                        job = pending.pop(future)
                         try:
-                            results["total_bytes"] += future.result()
-                            results["succeeded"] += 1
-                        # Handle exceptions raised during the download
+                            record(job, future.result(), None)
                         except DownloadError as exc:
-                            results["failed"] += 1
-                            results["errors"].append(str(exc))
-                        # report completed files even when a transfer fails
+                            failed += 1
+                            record(job, None, str(exc))
                         finally:
+                            finished += 1
                             with progress_lock:
-                                finished = results["succeeded"] + results["failed"]
                                 progress.set_postfix(
-                                    files=f"{finished}/{len(files_to_download)}",
-                                    failed=results["failed"])
-                        # submit the next file for download if available
+                                    files=f"{finished}/{len(jobs)}", failed=failed)
                         submit_next()
             except BaseException:
                 context.cancel()
@@ -1220,4 +1311,160 @@ def _download_selected(
     finally:
         progress.close()
 
+
+def _output_root(worktree_path) -> Path:
+    output_root = Path(worktree_path).expanduser().resolve()
+    if output_root.exists() and not output_root.is_dir():
+        raise DownloadError(f"Download output is not a directory: {output_root}")
+    return output_root
+
+
+def _destination(output_root, relative_path) -> Path:
+    try:
+        return resolve_path_in_root(output_root, relative_path,
+                                    label="download destination")
+    except ValueError as exc:
+        raise DownloadError(str(exc)) from exc
+
+
+def _download_selected(
+    remote_spec,
+    worktree_path,
+    items,
+    *,
+    max_workers,
+    show_progress,
+    total_bytes=None,
+):
+    """
+    Download plan items from one remote straight to their destinations.
+
+    Used where no cache is available. Each file is verified against its
+    catalogued size and digests before it takes its final name, and never
+    replaces an existing file.
+    """
+    results = {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
+    output_root = _output_root(worktree_path)
+
+    # Normalize selected files into a dictionary to ensure unique paths and checksums.
+    normalized_selection: dict[str, tuple[Path, Optional[ChecksumSpec]]] = {}
+    by_path: dict[str, DownloadItem] = {}
+    for item in items:
+        relative_path = validate_remote_path(item.relative_path)
+        _merge_selected_file(normalized_selection, relative_path, item.checksum)
+        by_path[relative_path.as_posix()] = item
+
+    jobs = []
+    for relative_path, expected_checksum in normalized_selection.values():
+        item = by_path[relative_path.as_posix()]
+        jobs.append((validate_remote_path(item.source_path),
+                     _destination(output_root, relative_path), expected_checksum,
+                     item.size_bytes, item.sha1))
+
+    def run_job(context, job):
+        relative_path, destination, checksum, size, sha1 = job
+        return _download_and_verify_file(
+            context, relative_path, destination, checksum, DOWNLOAD_CHUNK_SIZE,
+            expected_size=size, expected_sha1=sha1)
+
+    def record(job, size, error):
+        if error is None:
+            results["total_bytes"] += size
+            results["succeeded"] += 1
+        else:
+            results["failed"] += 1
+            results["errors"].append(error)
+
+    _run_transfers(remote_spec, output_root, jobs, run_job, record,
+                   max_workers=max_workers, show_progress=show_progress,
+                   total_bytes=total_bytes)
     return results
+
+
+def _download_into_cache(context, cache, item, chunk_size):
+    """
+    Fetch one file into the cache and place it at its destination.
+
+    The transfer goes to a temporary cache file, which becomes the SHA-1
+    object only once its size and digests are verified. The destination is
+    then hard-linked to that object, or receives a verified copy. Files with
+    identical content share one object.
+
+    Returns:
+        tuple[int, list]: Bytes received, and ``(item, sha1, how, error)``.
+    """
+    name = item.relative_path.name
+    try:
+        with cache.temp_file(name) as temp:
+            received, sha1 = _fetch_verified(
+                context, validate_remote_path(item.source_path), temp,
+                checksum=_validate_expected_checksum(item.checksum),
+                size=item.size_bytes, sha1=item.sha1, chunk_size=chunk_size,
+                name=name)
+            context.check_cancelled()
+            cache.publish(temp, sha1)
+    except (OSError, ValueError) as exc:
+        raise DownloadError(f"Failed to download {name}: {exc}") from None
+    return received, _place_from_cache(context.output_root, cache, [item], sha1)
+
+
+def _place_from_cache(output_root, cache, items, sha1):
+    """Link or copy a cached object to each item's destination."""
+    placed = []
+    for item in items:
+        name = item.relative_path.as_posix()
+        try:
+            destination = resolve_path_in_root(
+                output_root, item.relative_path, label="download destination")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            placed.append((item, sha1, cache.materialize(sha1, destination), None))
+        except FileExistsError:
+            placed.append((item, sha1, None,
+                           f"{name} appeared at its destination during the "
+                           "download; the existing file was kept"))
+        except FileNotFoundError:
+            placed.append((item, sha1, None,
+                           f"The cached copy of {name} is missing; "
+                           "run hm download again"))
+        except (OSError, ValueError) as exc:
+            placed.append((item, sha1, None, f"Failed to place {name}: {exc}"))
+    return placed
+
+
+def _download_selected_into_cache(remote_spec, worktree_path, items, cache, results,
+                                  *, max_workers, show_progress, total_bytes=None):
+    """
+    Download plan items from one remote through the cache.
+
+    Each placed file is recorded in ``results``: counts, ``copied`` paths and
+    the ``sha1`` of every file now at its destination.
+    """
+    output_root = _output_root(worktree_path)
+
+    def run_job(context, item):
+        return _download_into_cache(context, cache, item, DOWNLOAD_CHUNK_SIZE)
+
+    def record(item, outcome, error):
+        if error is not None:
+            results["failed"] += 1
+            results["errors"].append(error)
+            return
+        received, placed = outcome
+        results["total_bytes"] += received
+        _record_placed(results, placed)
+
+    _run_transfers(remote_spec, output_root, list(items), run_job, record,
+                   max_workers=max_workers, show_progress=show_progress,
+                   total_bytes=total_bytes)
+
+
+def _record_placed(results, placed):
+    for item, sha1, how, error in placed:
+        if error is not None:
+            results["failed"] += 1
+            results["errors"].append(error)
+            continue
+        results["succeeded"] += 1
+        results["sha1"][item.relative_path.as_posix()] = sha1
+        if how == "copied":
+            results["copied"].append(item.relative_path.as_posix())

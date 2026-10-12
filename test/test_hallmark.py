@@ -1379,6 +1379,8 @@ def test_checkout_restores_only_changed_target_files(monkeypatch, tmp_path):
 ### Repo.clone() tests ###
 
 def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
+    from hallmark.transport.http import HttpBackend
+
     source = Repo.init(tmp_path / "source")
     _write_files(source.worktree, ["a0_i0.h5"])
     source.add("a{a}_i{i}.h5")
@@ -1386,29 +1388,22 @@ def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
     expected_sha1 = Repo.checksum(source.worktree / "a0_i0.h5")
     source.commit("add source data")
 
-    captured = {}
+    captured = []
 
-    def fake_download_file(context, relative_path, destination, sha1, chunk_size,
-                 **kwargs):
-        captured["url"] = context.remote.file_url(str(relative_path))
-        captured["sha1"] = sha1
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text("downloaded\n", encoding="utf-8")
-        return destination.stat().st_size
+    def fetch(self, relative_path, destination, *, chunk_size=8192):
+        captured.append(self.context.remote.file_url(relative_path))
+        Path(destination).write_text("a0_i0.h5\n", encoding="utf-8")
 
-    monkeypatch.setattr(
-        "hallmark.remote.download._download_and_verify_file", fake_download_file
-    )
+    monkeypatch.setattr(HttpBackend, "fetch", fetch)
 
     clone = Repo.clone(str(source.dothm.path), tmp_path / "clone",
                        download=True, approve=lambda plan: plan.file_count == 1)
 
-    assert captured == {
-        "url": "https://example.com/data/a0_i0.h5",
-        "sha1": expected_sha1,
-    }
-    assert (clone.worktree / "a0_i0.h5").read_text(encoding="utf-8") == \
-        "downloaded\n"
+    assert captured == ["https://example.com/data/a0_i0.h5"]
+    downloaded = clone.worktree / "a0_i0.h5"
+    assert downloaded.read_text(encoding="utf-8") == "a0_i0.h5\n"
+    # The file is the cached object, verified against the catalogued SHA-1.
+    assert clone.cache.is_linked(expected_sha1, downloaded)
     assert clone.download_result["succeeded"] == 1
     assert clone.download_result["failed"] == 0
 

@@ -199,8 +199,9 @@ Explicit paths must be catalogued files or folders containing catalogued files.
 A folder selects all catalogued files below it, including subfolders. Unknown
 paths and folders without catalogued files are reported before any server request.
 Explicit selections retain their recorded checksums, just like ``--tsv`` and
-``--all``. Files without a usable publisher checksum can be downloaded to new
-paths, but their contents cannot be checked against the catalog.
+``--all``. Every download is checked against its recorded size. Files without a
+usable publisher checksum can be downloaded to new paths, but their contents
+can only be checked against the catalog once a SHA-1 is recorded (see below).
 
 ``--tsv`` can be repeated and combined with explicit paths; overlapping entries
 are deduplicated. ``--all`` cannot be combined with either selection mode.
@@ -212,6 +213,31 @@ blocking file paths, and existing files without a usable catalog checksum stop
 the whole selection before transfer. Delete conflicting paths yourself before
 retrying. There is no overwrite option. ``--dry-run`` performs the same local
 checks without downloading or creating files.
+
+Downloads pass through a cache in ``.hm/cache``:
+
+1. Each file is transferred to a temporary file in ``.hm/cache/tmp`` and is
+   stored under its SHA-1 only once its size and checksums are verified. An
+   interrupted download never leaves a partial file in the data folder, and its
+   temporary file is removed a day later.
+2. The cached file is hard-linked into the data folder (or copied where links
+   are unavailable, for example on another filesystem). Files with identical
+   contents are stored once.
+3. The SHA-1 of every file now in place is recorded in the catalog and staged.
+   ``download`` prints ``Staged SHA-1 for N file(s); run hm commit to record
+   them``. Commit them to share the hashes: later downloads, including your
+   collaborators', are then verified against them, and a deleted file is
+   restored from the cache without a transfer. Until you commit or run
+   ``hm restore --staged``, ``checkout`` refuses to switch branches.
+
+Downloaded files are read-only links to the cache, so editing one in place
+cannot silently change the cached copy. To change a downloaded file, copy it to
+a new name, or delete it and write a new file. Everything in ``.hm/cache`` can
+be downloaded again, so deleting that folder is always safe; it only means the
+next download transfers the files again. Linked worktrees share the cache.
+After an interruption, run the same download again: files already linked to the
+cache are recognised as complete, even without a catalog checksum, and only the
+rest are transferred.
 
 After committing the catalog, use ``download`` to review and approve a transfer.
 Declining keeps the catalog available; an empty selection needs no approval:

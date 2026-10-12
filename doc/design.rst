@@ -46,7 +46,11 @@ It has three architecture components with different responsibilities:
 
 3.  ``Worktree``:
     an on-disk working tree/directory, where data files are discovered
-    and consumed.
+    and consumed; and
+
+4.  ``Cache``:
+    re-downloadable file contents in ``.hm/cache``, stored by SHA-1 and
+    hard-linked into the ``Worktree``.
 
 The data flow can be summarized as::
 
@@ -67,6 +71,20 @@ The data flow can be summarized as::
                            |access
                            v
                          Other tools
+
+Downloads keep ``Worktree``, ``Cache``, ``State`` and ``Dothm`` in step
+(``Worktree <-> Cache <-> State <-> Dothm``), moving between them only in
+this order:
+
+1.  download to the ``Cache``, into a temporary file that gets its final
+    name only once complete and verified;
+2.  hard-link the cached file into the ``Worktree``;
+3.  record its SHA-1 in the in-memory ``State``; and
+4.  save the ``State`` to ``Dothm``, staged for the user to commit.
+
+A crash between any two steps leaves the repository consistent: at worst a
+temporary file, a cached file not yet linked, or a linked file whose SHA-1
+the next download records without transferring it again.
 
 
 API

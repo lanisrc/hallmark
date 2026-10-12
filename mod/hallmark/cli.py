@@ -78,13 +78,32 @@ def _report_download_results(results: dict) -> None:
     # Report the results of the download operation to the user.
     for path in results.get("skipped", []):
         click.echo(f"Already downloaded: {path}")
+    from_cache = results.get("from_cache", [])
+    if from_cache:
+        click.echo(f"Placed {len(from_cache)} file(s) from the local cache")
+    copied = results.get("copied", [])
+    if copied:
+        click.echo("Copied instead of linked to the cache (links unavailable):")
+        for path in copied[:10]:
+            click.echo(f"  {path}")
+    if results.get("staged"):
+        click.echo(f"Staged SHA-1 for {results['staged']} file(s); "
+                   "run hm commit to record them")
+    if results.get("staging_error"):
+        click.echo(results["staging_error"], err=True)
+        click.echo("Run hm download again; no transfer is needed.", err=True)
     succeeded = results["succeeded"]
     failed = results["failed"]
     total_mb = results["total_bytes"] / (1024 * 1024)
     # If there were no failed downloads, report success and exit.
+    # Files placed from the cache were not downloaded again.
+    transferred = succeeded - len(from_cache)
     if failed == 0:
-        click.echo(
-            f"Successfully downloaded {succeeded} files "f"({total_mb:.1f} MB)")
+        if transferred or not (from_cache or results.get("staged")):
+            click.echo(
+                f"Successfully downloaded {transferred} files "f"({total_mb:.1f} MB)")
+        if results.get("staging_error"):
+            raise ClickException("Downloaded files were not recorded")
         # bail out of the function early since there are no errors to report
         return
     # If there were failed downloads, report the number of successes and failures
@@ -118,8 +137,13 @@ def _run_download(repo, plan, *, max_workers):
         DownloadError: If the download cannot be started.
     """
     click.echo(plan.summary())
-    if not plan.file_count:
+    if not plan.has_changes:
         click.echo("No files selected for download.")
+        if any(item.sha1 for item in plan.skipped_items):
+            # Files found complete may still need their SHA-1 recorded.
+            results = repo.download(plan)
+            if results.get("staged") or results.get("staging_error"):
+                _report_download_results(results)
         return
     click.confirm("Download these files?", default=False, abort=True)
     results = repo.download(plan, approved=True, max_workers=max_workers,
@@ -572,8 +596,10 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
             sources=sources or None)
         if dry_run:
             click.echo(plan.summary())
-            for item in plan.items[:20]:
-                click.echo(f"  {item.relative_path.as_posix()}")
+            listed = [(item, "") for item in plan.items] + [
+                (item, " (from the local cache)") for item in plan.cached_items]
+            for item, note in listed[:20]:
+                click.echo(f"  {item.relative_path.as_posix()}{note}")
             if plan.file_count > 20:
                 click.echo(f"  ... {plan.file_count - 20} more file(s)")
             return

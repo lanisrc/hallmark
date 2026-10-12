@@ -95,6 +95,8 @@ class DownloadPlan:
         remotes (mapping): Every remote the items name, by name, with its
             ``url``, ``auth``, ``backend`` and ``backend_options`` pinned. The
             ``remote_*`` fields describe the remote when there is only one.
+        cached_items (tuple[DownloadItem]): Files whose content is already in
+            the local download cache; they are placed without a transfer.
     """
 
     items: tuple[DownloadItem, ...]
@@ -107,16 +109,20 @@ class DownloadPlan:
     backend_options: Mapping = field(default_factory=dict, repr=False, hash=False)
     skipped_items: tuple[DownloadItem, ...] = ()
     remotes: Mapping = field(default_factory=dict, repr=False, hash=False)
+    cached_items: tuple[DownloadItem, ...] = ()
 
     def __post_init__(self) -> None:
         """Copy the selection and validate the source fields and rate."""
         object.__setattr__(self, "items", tuple(self.items))
         object.__setattr__(self, "skipped_items", tuple(self.skipped_items))
+        object.__setattr__(self, "cached_items", tuple(self.cached_items))
         object.__setattr__(
             self, "output_path", Path(self.output_path).expanduser().absolute())
         if any(not isinstance(item, DownloadItem)
-               for item in self.items + self.skipped_items):
+               for item in self.items + self.skipped_items + self.cached_items):
             raise TypeError("items must contain DownloadItem values")
+        if any(item.sha1 is None for item in self.cached_items):
+            raise ValueError("Cached items must record their SHA-1")
         if any(value is not None and not isinstance(value, str) for value in
                (self.remote_url, self.remote_auth, self.remote_name,
                 self.remote_backend)):
@@ -133,7 +139,8 @@ class DownloadPlan:
             if remote.get("backend") is not None:
                 validate_backend_name(remote["backend"])
         object.__setattr__(self, "remotes", remotes)
-        unknown = {item.remote for item in self.items + self.skipped_items
+        unknown = {item.remote for item in
+                   self.items + self.skipped_items + self.cached_items
                    if item.remote is not None} - set(remotes)
         if unknown:
             raise ValueError("Items refer to remotes the plan does not record")
@@ -146,12 +153,17 @@ class DownloadPlan:
 
     @property
     def file_count(self) -> int:
-        """Number of files selected for download."""
-        return len(self.items)
+        """Number of files the plan places, including those from the cache."""
+        return len(self.items) + len(self.cached_items)
+
+    @property
+    def has_changes(self) -> bool:
+        """Whether executing the plan would place any file."""
+        return bool(self.file_count)
 
     @property
     def known_bytes(self) -> int:
-        """Sum of recorded sizes, excluding files whose sizes are unknown."""
+        """Bytes to transfer, excluding files whose sizes are unknown."""
         return sum(item.size_bytes or 0 for item in self.items)
 
     @property
@@ -191,13 +203,16 @@ class DownloadPlan:
             source += f"\nBackend: {self.remote_backend}"
         if len(self.remotes) > 1:
             counts = {}
-            for item in self.items:
+            for item in self.items + self.cached_items:
                 counts[item.remote] = counts.get(item.remote, 0) + 1
             source = "Sources:" + "".join(
                 f"\n  {name}: {_display_url(remote['url'])} "
                 f"({counts.get(name, 0)} file(s))"
                 for name, remote in self.remotes.items())
         skipped = ""
+        if self.cached_items:
+            skipped += (f"\nFrom the local cache: {len(self.cached_items)} file(s) "
+                        "(no transfer)")
         for item in self.skipped_items:
             skipped += f"\nAlready downloaded: {item.relative_path.as_posix()}"
         return (f"{self.file_count} file(s); {size}; estimated duration: {duration}"
