@@ -42,6 +42,8 @@ Features:
 
 Examples of using ``ParaFrame`` with Python API or Command Line Interface (CLI)
 can be found in the Jupyter Notebook tutorials in the ``demo`` folder.
+``demo/demo_private_data.ipynb`` shows several sources, the download cache and
+private servers.
 
 ``Installation``
 -----------------

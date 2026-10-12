@@ -51,6 +51,7 @@ def demo_dataset(tmp_path):
     "demo_cli.ipynb",
     "demo_python.ipynb",
     "demo_add.ipynb",
+    "demo_private_data.ipynb",
 ])
 def test_demo_notebook_workflow(tmp_path, request, notebook):
     """Execute every code cell, retaining state and failing on the first error.
@@ -75,7 +76,7 @@ def test_demo_notebook_workflow(tmp_path, request, notebook):
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [
         str(DEMO_DIR.parent / "mod"), env.get("PYTHONPATH")]))
     env["TMPDIR"] = str(tmp_path)
-    if notebook == "demo_cli.ipynb":
+    if document["metadata"]["kernelspec"]["language"] == "bash":
         bash = shutil.which("bash")
         if bash is None:
             pytest.skip("The CLI demo requires Bash")
