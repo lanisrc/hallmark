@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from __future__ import annotations
+import errno
 import re
 import hashlib
 import os
@@ -168,6 +169,68 @@ def calculate_file_checksum(
         return digest.hexdigest()
 
 
+def calculate_file_checksums(path: Path, algorithms,
+                             chunk_size: int = FILE_IO_CHUNK_SIZE) -> dict:
+    """
+    Compute several checksums of a file in one streaming pass.
+
+    Args:
+        path: Path to the file.
+        algorithms: Checksum algorithm names, such as ``("sha1", "sha256")``.
+        chunk_size: Size of chunks to read at a time (default: 1 MB).
+
+    Returns:
+        dict[str, str]: Hexadecimal digest for each requested algorithm.
+
+    Raises:
+        ValueError: If an algorithm is not supported by hashlib.
+    """
+    digests = {name: hashlib.new(name) for name in
+               {str(algorithm).strip().lower() for algorithm in algorithms}}
+    with Path(path).open("rb") as handle:
+        while True:
+            block = handle.read(chunk_size)
+            if not block:
+                break
+            for digest in digests.values():
+                digest.update(block)
+    return {name: digest.hexdigest() for name, digest in digests.items()}
+
+
+# Filesystems that cannot hard-link a file report these errors.
+NO_HARD_LINK_ERRORS = {errno.EPERM, errno.EXDEV, errno.EMLINK, errno.ENOSYS,
+                  errno.ENOTSUP, errno.EOPNOTSUPP}
+
+
+def publish_no_overwrite(source: Path, target: Path) -> None:
+    """
+    Give a finished file its final name, failing if that name exists.
+
+    The file appears under the final name complete or not at all. A hard
+    link refuses an existing target atomically and leaves ``source`` in
+    place for the caller to remove. Filesystems without hard links fall back
+    to a rename after checking the target, which a concurrent writer could
+    still race.
+
+    Args:
+        source: Finished temporary file in the target's directory.
+        target: Final path.
+
+    Raises:
+        FileExistsError: If ``target`` already exists.
+    """
+    try:
+        os.link(source, target)
+    except FileExistsError:
+        raise
+    except OSError as exc:
+        if exc.errno not in NO_HARD_LINK_ERRORS:
+            raise
+        if os.path.lexists(target):
+            raise FileExistsError(errno.EEXIST, "File exists", str(target)) from None
+        os.replace(source, target)
+
+
 @contextmanager
 def use_working_directory(path):
     '''
@@ -221,7 +284,7 @@ def replace_file_on_success(path: Path, *, suffix: str = ".tmp", overwrite=True)
         if overwrite:
             temp_path.replace(path)
         else:
-            os.link(temp_path, path)
+            publish_no_overwrite(temp_path, path)
     # always clean up the temporary file if an exception occurs or after replacement
     finally:
         temp_path.unlink(missing_ok=True)
