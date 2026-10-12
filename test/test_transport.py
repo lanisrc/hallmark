@@ -170,6 +170,41 @@ def test_invalid_profiles_fail_preflight(monkeypatch, tmp_path, profile):
         OperationContext(RemoteSpec.from_url("ssh://campus/data", "campus"))
 
 
+def test_profile_tunes_keepalives_compression_and_sessions(monkeypatch, tmp_path):
+    write_auth(
+        monkeypatch,
+        tmp_path,
+        {"hpc": {"hosts": ["campus"], "server_alive_interval": 60,
+                 "server_alive_count_max": 5, "compression": True,
+                 "max_sessions": 10}},
+        {"server_alive_interval": 30},
+    )
+    with OperationContext(RemoteSpec.from_url("ssh://campus/data", "hpc")) as context:
+        options = context.transport._ssh_options()
+        assert context.settings.max_sessions == 10
+    assert "ServerAliveInterval=60" in options
+    assert "ServerAliveCountMax=5" in options
+    assert "Compression=yes" in options
+    with OperationContext(RemoteSpec.from_url("ssh://other/data")) as context:
+        options = context.transport._ssh_options()
+    # Global defaults apply without a profile; unset compression defers to SSH config.
+    assert "ServerAliveInterval=30" in options
+    assert "ServerAliveCountMax=2" in options
+    assert not any(option.startswith("Compression=") for option in options)
+
+
+@pytest.mark.parametrize("profile", [
+    {"hosts": ["campus"], "max_sessions": 11},
+    {"hosts": ["campus"], "server_alive_interval": 0},
+    {"hosts": ["campus"], "server_alive_count_max": "2"},
+    {"hosts": ["campus"], "compression": "yes"},
+])
+def test_invalid_ssh_tuning_fails_preflight(monkeypatch, tmp_path, profile):
+    write_auth(monkeypatch, tmp_path, {"campus": profile})
+    with pytest.raises(RemoteConfigurationError):
+        OperationContext(RemoteSpec.from_url("ssh://campus/data", "campus"))
+
+
 def test_profile_xdg_and_removal(monkeypatch, tmp_path):
     folder = tmp_path / "config" / "hallmark"
     folder.mkdir(parents=True)
@@ -622,16 +657,45 @@ def test_reject_scoped_ipv6_and_invalid_unicode(url):
         RemoteSpec.from_url(url)
 
 
-def test_minimum_openssh_is_checked_before_connection(monkeypatch):
+@pytest.mark.parametrize("banner", [b"OpenSSH_7.9p1", b"Dropbear 2022.83"])
+def test_minimum_openssh_is_checked_before_connection(monkeypatch, banner):
     with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         monkeypatch.setattr("hallmark.transport.ssh.shutil.which", lambda name: name)
         monkeypatch.setattr(
-            context.transport, "_run_ssh_command", lambda *a, **kw: b"OpenSSH_9.5p1"
+            context.transport, "_run_ssh_command", lambda *a, **kw: banner
         )
-        with pytest.raises(CapabilityError, match="9.6"):
+        with pytest.raises(CapabilityError, match="8.0"):
             context.transport.prepare()
         assert context.transport._master is None
         assert context.transport._socket_dir is None
+
+
+@pytest.mark.parametrize("banner, version, forks", [
+    (b"OpenSSH_8.0p1, OpenSSL 1.1.1k  FIPS 25 Mar 2021", (8, 0), False),
+    (b"OpenSSH_8.7p1, OpenSSL 3.0.7 1 Nov 2022", (8, 7), True),
+    (b"OpenSSH_9.6p1 Ubuntu-3ubuntu13.19, OpenSSL 3.0.13", (9, 6), True),
+])
+def test_ssh_options_follow_the_client_version(monkeypatch, banner, version, forks):
+    from hallmark.transport.ssh import parse_openssh_version
+
+    assert parse_openssh_version(banner) == version
+    with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
+        monkeypatch.setattr("hallmark.transport.ssh.shutil.which", lambda name: name)
+        monkeypatch.setattr(
+            context.transport, "_run_ssh_command", lambda *a, **kw: banner)
+
+        def stop(*args, **kwargs):
+            raise DownloadError("stop before connecting")
+
+        monkeypatch.setattr(context.transport, "_start_process", stop)
+        with pytest.raises(DownloadError, match="stop before connecting"):
+            context.transport.prepare()
+        assert context.transport._version == version
+        options = context.transport._ssh_options()
+        # Clients before 8.7 exit on this unknown option.
+        assert ("ForkAfterAuthentication=no" in options) is forks
+        assert "BatchMode=yes" in options
+        assert "RemoteCommand=none" in options
 
 
 def test_short_socket_ignores_long_tempdir(monkeypatch, tmp_path):

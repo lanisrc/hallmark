@@ -23,7 +23,10 @@ class SSHSettings:
 
     Timeouts are in seconds. ``transfer_timeout`` limits the total time
     for each file, and ``max_sessions`` limits concurrent SFTP sessions.
-    Unset user, port, and identity values fall back to SSH configuration.
+    Keepalives probe every ``server_alive_interval`` seconds and drop the
+    connection after ``server_alive_count_max`` unanswered probes. Unset
+    user, port, identity, and compression values fall back to SSH
+    configuration.
     """
     user: str | None = None
     port: int | None = None
@@ -33,6 +36,13 @@ class SSHSettings:
     transfer_timeout: int = 3600
     shutdown_timeout: int = 2
     max_sessions: int = 4
+    server_alive_interval: int = 15
+    server_alive_count_max: int = 2
+    compression: bool | None = None
+
+
+# sshd's default MaxSessions; more sessions on one master connection fail.
+MAX_SSH_SESSIONS = 10
 
 
 def _validate_ssh_settings(values):
@@ -49,6 +59,8 @@ def _validate_ssh_settings(values):
         "transfer_timeout",
         "shutdown_timeout",
         "max_sessions",
+        "server_alive_interval",
+        "server_alive_count_max",
     ):
         if key not in values:
             continue
@@ -57,6 +69,11 @@ def _validate_ssh_settings(values):
             raise RemoteConfigurationError(f"SSH {key} must be a positive integer")
         if key == "port" and value > 65535:
             raise RemoteConfigurationError("SSH port must be at most 65535")
+        if key == "max_sessions" and value > MAX_SSH_SESSIONS:
+            raise RemoteConfigurationError(
+                f"SSH max_sessions must be at most {MAX_SSH_SESSIONS}")
+    if "compression" in values and not isinstance(values["compression"], bool):
+        raise RemoteConfigurationError("SSH compression must be true or false")
     if values.get("host_key_policy", "strict") not in {"strict", "accept-new"}:
         raise RemoteConfigurationError("host_key_policy must be strict or accept-new")
     if "identity_file" in values:

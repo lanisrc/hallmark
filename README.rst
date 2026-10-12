@@ -73,8 +73,10 @@ Private data remotes
 |hallmark|_ can download data products from HTTP(S), SSH, and SFTP servers.
 A data remote specifies where the files are stored, while a Git remote
 is used to share the history of the data index.
-For a private server, |hallmark|_ uses OpenSSH 9.6 or newer with a trusted
+For a private server, |hallmark|_ uses OpenSSH 8.0 or newer with a trusted
 host key and key-based authentication that does not require a prompt.
+Servers that require interactive two-factor authentication (such as Duo on
+some HPC login nodes) are not supported yet.
 
 Create a repository, stage a remote catalog, then commit it::
 

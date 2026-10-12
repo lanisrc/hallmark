@@ -166,7 +166,8 @@ Files that have already downloaded successfully remain available.
 SSH access and file paths
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The client requires OpenSSH ``ssh`` and ``sftp`` version 9.6 or newer
+The client requires OpenSSH ``ssh`` and ``sftp`` version 8.0 or newer
+(RHEL 8 and later, Ubuntu 20.04 and later, current macOS)
 with connection multiplexing enabled.
 Linux and macOS have integration-test jobs. Windows SSH transport is
 not supported.

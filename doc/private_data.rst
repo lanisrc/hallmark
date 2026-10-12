@@ -21,7 +21,7 @@ does not require Hallmark, Git, Python or a login shell.
 ---------------------------------
 
 Install the checkout with ``python -m pip install -e .``. The client requires
-system OpenSSH ``ssh`` and ``sftp`` version 9.6 or newer, with connection
+system OpenSSH ``ssh`` and ``sftp`` version 8.0 or newer, with connection
 multiplexing available. Linux and macOS have integration-test jobs; Windows
 SSH transport is unsupported.
 
@@ -238,6 +238,9 @@ with any existing profiles:
        transfer_timeout: 3600
        shutdown_timeout: 2
        max_sessions: 4
+       server_alive_interval: 15
+       server_alive_count_max: 2
+       compression: false
 
 Keep this file outside the repository and restrict it to your account, for
 example with ``chmod 600 ~/.config/hallmark/auth.yml``. Hallmark reads
@@ -271,7 +274,13 @@ unset values use SSH configuration. Passwords, tokens and arbitrary
 SSH options are not valid profile fields. ``transfer_timeout`` is the total
 per-file time budget in seconds, not an idle timeout. Effective SSH download
 concurrency is the smaller of ``--max-workers`` and local ``max_sessions``
-(both default to 4).
+(both default to 4). ``max_sessions`` is at most 10, the default session limit
+of an OpenSSH server. The connection is closed after about
+``server_alive_interval`` times ``server_alive_count_max`` seconds without a
+reply from the server; raise them if transfers over a congested link are
+dropped. Set ``compression: true`` for text-like data over slow links. Unset ``compression`` follows SSH
+configuration. These tuning fields may also appear under ``defaults`` to
+apply to every host.
 
 5. Use the Python API
 ---------------------

@@ -25,6 +25,25 @@ from .base import (
 )
 
 
+# RemoteCommand=none and StrictHostKeyChecking=accept-new need 7.6; 8.0 is the
+# oldest client covered by CI (RHEL 8).
+MIN_OPENSSH = (8, 0)
+# Clients before 8.7 reject this option, and cannot read it from ~/.ssh/config
+# either, so there is nothing to override on them.
+FORK_AFTER_AUTHENTICATION = (8, 7)
+
+
+def parse_openssh_version(text):
+    """
+    Return the (major, minor) version from ``ssh -V`` output, or None.
+
+    Args:
+        text (bytes): Output such as ``OpenSSH_8.7p1, OpenSSL 3.0.7``.
+    """
+    match = re.search(rb"OpenSSH_(\d+)\.(\d+)", text)
+    return tuple(map(int, match.groups())) if match else None
+
+
 def quote_sftp_path(path):
     """
     Escape an absolute path for a literal SFTP batch argument.
@@ -69,6 +88,8 @@ class SshBackend(DataBackend):
         self._process_lock = Lock()
         self._processes = set()
         self._master = None
+        # Unknown for injected test clients, which emulate a current release.
+        self._version = None
         self._socket_dir = None
         self._socket = None
         self._slots = BoundedSemaphore(context.settings.max_sessions)
@@ -86,10 +107,13 @@ class SshBackend(DataBackend):
             "ClearAllForwardings=yes",
             "RequestTTY=no",
             "RemoteCommand=none",
-            "ForkAfterAuthentication=no",
+        ]
+        if self._version is None or self._version >= FORK_AFTER_AUTHENTICATION:
+            options.append("ForkAfterAuthentication=no")
+        options += [
             "ControlPersist=no",
-            "ServerAliveInterval=15",
-            "ServerAliveCountMax=2",
+            f"ServerAliveInterval={settings.server_alive_interval}",
+            f"ServerAliveCountMax={settings.server_alive_count_max}",
             "ConnectionAttempts=1",
             f"ConnectTimeout={settings.connect_timeout}",
             f"ControlPath={self._socket}",
@@ -102,6 +126,8 @@ class SshBackend(DataBackend):
             options.append(f"User={settings.user}")
         if settings.port is not None:
             options.append(f"Port={settings.port}")
+        if settings.compression is not None:
+            options.append(f"Compression={'yes' if settings.compression else 'no'}")
         args = []
         for option in options:
             args.extend(["-o", option])
@@ -243,14 +269,17 @@ class SshBackend(DataBackend):
             if os.name != "posix":
                 raise CapabilityError("SSH transport requires a Linux/macOS client")
             if not self._injected:
+                minimum = ".".join(map(str, MIN_OPENSSH))
                 if not shutil.which("ssh") or not shutil.which("sftp"):
-                    raise CapabilityError("Install OpenSSH ssh and sftp clients (9.6+)")
-                version = self._run_ssh_command(
+                    raise CapabilityError(
+                        f"Install OpenSSH ssh and sftp clients ({minimum}+)")
+                version = parse_openssh_version(self._run_ssh_command(
                     self.ssh + ["-V"], timeout=5, capture_stderr=True
-                )
-                match = re.search(rb"OpenSSH_(\d+)\.(\d+)", version)
-                if not match or tuple(map(int, match.groups())) < (9, 6):
-                    raise CapabilityError("SSH transport requires OpenSSH 9.6 or newer")
+                ))
+                if version is None or version < MIN_OPENSSH:
+                    raise CapabilityError(
+                        f"SSH transport requires OpenSSH {minimum} or newer")
+                self._version = version
             self._socket_dir = tempfile.TemporaryDirectory(prefix="hm-", dir="/tmp")
             os.chmod(self._socket_dir.name, 0o700)
             self._socket = str(Path(self._socket_dir.name) / "s")
