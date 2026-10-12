@@ -120,7 +120,8 @@ def _attach_published_checksums(context, entries):
                     or strength.get(algorithm, 99)
                     < strength.get(previous.checksum_algorithm, 100)):
                 entries[target] = replace(
-                    previous, checksum_algorithm=algorithm, checksum=digest.lower())
+                    previous, checksum_algorithm=algorithm, checksum=digest.lower(),
+                    checksum_source="published")
 
 
 def discover_remote_files(

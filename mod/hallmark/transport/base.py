@@ -189,6 +189,9 @@ class RemoteEntry:
         mtime (float, optional): Modification time reported by the server.
         checksum_algorithm (str, optional): Published checksum algorithm.
         checksum (str, optional): Published digest.
+        checksum_source (str, optional): Where the digest came from:
+            ``published`` for a checksum file next to the data, ``server``
+            for a digest the server reports or computes.
 
     Unavailable metadata remains None; file contents are not read to fill it.
     """
@@ -198,6 +201,7 @@ class RemoteEntry:
     mtime: float | None = None
     checksum_algorithm: str | None = None
     checksum: str | None = None
+    checksum_source: str | None = None
 
 
 @dataclass(frozen=True)

@@ -95,6 +95,9 @@ operation has been cancelled.
      - Yield ``RemoteEntry`` records with literal logical paths relative to the
        dataset root. Report completed directories through the optional callback.
        Missing sizes, timestamps and published checksums remain ``None``.
+       Set ``checksum_source="server"`` on a digest the service itself reports;
+       the catalogue records it so collaborators can tell it from a published
+       checksum file (``"published"``).
    * - ``read_text(relative_path, limit)``
      - Read metadata within the supplied byte limit and return decoded text.
        Reject oversized responses and propagate access or connection errors.
@@ -149,6 +152,7 @@ For example, an HTTP service can publish a small ``manifest.json`` array with
                    size=record.get("size"),
                    checksum_algorithm="sha256" if digest else None,
                    checksum=digest,
+                   checksum_source="server" if digest else None,
                )
            if on_directory is not None:
                on_directory("")

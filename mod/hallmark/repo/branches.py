@@ -6,7 +6,7 @@ from git.exc import GitCommandError
 
 from ..error import CheckoutError, DestinationExistsError, DothmError
 from ..utils import resolve_path_in_root
-from ..remote.add import is_remote_catalog
+from .state import is_remote_catalog
 from .config import branch_filename_format, row_to_path, single_data_format
 from .manifest import iter_manifest_entries
 from .history import (

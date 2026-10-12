@@ -65,6 +65,33 @@ def test_remote_add_merges_paths_and_leaves_unmatched_rows(tmp_path, remote_list
     assert repo.state.data.path.tolist() == ["M87_001.fits", "M87_002.fits"]
 
 
+def test_remote_add_records_where_checksums_came_from(tmp_path, remote_listing):
+    pages, _ = remote_listing
+    pages[""] += '<a href="SHA256SUMS">SHA256SUMS</a>'
+    pages["SHA256SUMS"] = "a" * 64 + "  M87_001.fits\n"
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/", filter="*.fits")
+    for state in (repo.state, Repo(repo.worktree).state):
+        rows = state.data.set_index("path")
+        assert rows.loc["M87_001.fits", "checksum"] == "a" * 64
+        assert rows.loc["M87_001.fits", "checksum_source"] == "published"
+        assert rows.loc["M87_002.fits", "checksum_source"] == ""
+
+
+def test_remote_add_extends_a_catalogue_without_provenance(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/", filter="*001.fits")
+    # Catalogues committed before checksum provenance have no such column.
+    repo.state.data = repo.state.data.drop(columns="checksum_source")
+    repo.dothm.save_state(repo.state)
+    repo.commit("Catalogue without provenance")
+    repo.add("https://example.test/data/", filter="*002.fits")
+    assert repo.state.data.path.tolist() == ["M87_001.fits", "M87_002.fits"]
+    assert repo.state.data.checksum_source.tolist() == ["", ""]
+    assert repo.status()["staged"]["added"] == ["M87_002.fits"]
+    assert repo.plan_download(all_files=True).file_count == 2
+
+
 def test_remote_catalog_clone_and_branches_keep_payloads_separate(
         tmp_path, remote_listing):
     source = Repo.init(tmp_path / "source")

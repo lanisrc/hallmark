@@ -191,7 +191,7 @@ def test_only_conventional_checksum_metadata_is_read():
     })
     entries = discover_remote_files(source, filter="*.fits")
     assert entries == [RemoteEntry(path="data.fits", checksum_algorithm="sha256",
-                                   checksum=digest)]
+                                   checksum=digest, checksum_source="published")]
     assert source.reads == ["", "sha256sums.txt"]
 
 

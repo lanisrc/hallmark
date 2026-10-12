@@ -64,8 +64,10 @@ Suppose the export contains ``runs/run_001.h5``, ``runs/run_002.h5`` and
        --fmt 'runs/run_{run:03d}.h5'
    hm commit -m "Record remote catalog"
 
-This creates ``./lab/.hm`` and catalogs only the matching run files. The URL
-is the exact discovery root. A filename format selects paths and extracts
+This creates ``./lab/.hm`` and catalogs only the matching run files, with their
+sizes, modification times and any checksums. The ``checksum_source`` column says
+where each checksum came from: ``published`` for a checksum file such as
+``SHA256SUMS`` beside the data. The URL is the exact discovery root. A filename format selects paths and extracts
 parameters; it does not approve a download. A glob filter can select paths
 without defining parameters:
 

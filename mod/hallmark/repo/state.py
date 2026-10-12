@@ -21,6 +21,19 @@ import pandas as pd
 COLUMNS = ["sha1"]
 
 
+def is_remote_catalog(state) -> bool:
+    """
+    Return whether a state catalogs files on a data server.
+
+    Remote catalogue rows are keyed by ``path`` and have no committed object;
+    local manifests key each row by its ``sha1`` object.
+
+    Args:
+        state (State): Repository state to classify.
+    """
+    return "path" in state.data.columns and "sha1" not in state.data.columns
+
+
 def _prepare_file_rows(frame: pd.DataFrame) -> pd.DataFrame:
     """
     Used by update and replace.

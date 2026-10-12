@@ -24,9 +24,9 @@ from git.exc import GitCommandError
 
 from .branches import (
     checkout, create_branch, current_branch, current_commit, add_worktree)
-from ..remote.add import add_remote, is_remote_catalog
+from ..remote.add import add_remote
 from .dothm import Dothm
-from .state import State
+from .state import State, is_remote_catalog
 from .worktree import Worktree
 from .objects import Objects
 from ..paraframe import ParaFrame

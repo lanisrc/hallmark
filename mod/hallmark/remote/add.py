@@ -7,14 +7,11 @@ import parse
 from .discovery import discover_remote_files, path_matches
 from ..utils import as_list_of_dicts
 from ..repo.config import normalize_remotes, validate_tsv_filename
+from ..repo.state import is_remote_catalog
 from ..transport import OperationContext, RemoteSpec
 from ..transport.base import (
     DownloadError, RemoteConfigurationError, copy_backend_options,
     reject_url_secrets)
-
-
-def is_remote_catalog(state):
-    return "path" in state.data.columns and "sha1" not in state.data.columns
 
 
 def split_remote_pattern(value, fmt=None):
@@ -90,11 +87,13 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
         raise ValueError(
             f"No remote files matched {_describe_selection(fmt, filter)} under "
             f"{url}; previous catalogue kept")
-    columns = ["path", "checksum_algorithm", "checksum", "size_bytes", "mtime"]
+    columns = ["path", "checksum_algorithm", "checksum", "size_bytes", "mtime",
+               "checksum_source"]
     rows = []
     for entry in entries:
         row = dict(zip(columns, (entry.path, entry.checksum_algorithm,
-                                entry.checksum, entry.size, entry.mtime)))
+                                entry.checksum, entry.size, entry.mtime,
+                                entry.checksum_source)))
         if fmt:
             matched = parse.parse(fmt, entry.path, case_sensitive=True)
             row.update({key: value for key, value in matched.named.items()

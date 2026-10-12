@@ -8,6 +8,7 @@ from collections.abc import Iterator
 import pandas as pd
 
 from ..utils import string_or_none
+from .state import is_remote_catalog
 from .config import (
     filename_fields,
     row_to_path,
@@ -105,7 +106,7 @@ def file_versions_by_path(state, *, fmt: str | None = None) -> dict[str, str]:
         dict[str, str]: Dictionary mapping relative file paths to their
         corresponding SHA-1 checksums.
     """
-    if "path" in state.data.columns and "sha1" not in state.data.columns:
+    if is_remote_catalog(state):
         from ..transport.base import validate_remote_path
 
         return {validate_remote_path(record["path"]).as_posix():
