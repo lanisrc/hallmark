@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional, Union
 from io import BytesIO
 import json
+import os
 
 from git import Repo
 from git.exc import GitCommandError
@@ -119,12 +120,18 @@ class Dothm(Repo):
     def path(self) -> Path:
         return Path(self.working_tree_dir)
 
-    def stage_file_version(self, record: dict) -> None:
+    def stage_file_version(self, record: dict, *, add: bool = True) -> str:
         """
         Stage a version of a file in the repository.
 
         Args:
             record (dict): A dictionary containing the file version information.
+            add (bool): Add the record to the Git index now. Callers staging
+                many records pass False and add the returned paths at once,
+                since every index update rewrites the whole index.
+
+        Returns:
+            str: The record's path in the ``.hm`` worktree.
         """
         # Get the relative path of the file within the repository
         relative = Path(record["path"])
@@ -132,19 +139,19 @@ class Dothm(Repo):
         entry_path = Path("versions") / relative
         # resolve the full path of the versioned file within the repository's root
         path = resolve_path_in_root(self.path, entry_path, label="version path")
-        # ensure the parent directory exists before writing the file
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        # write the file content to a temporary file and replace the original on success
-        with replace_file_on_success(path) as temp_path:
-            # write the JSON representation of the record to the temporary file
-            temp_path.write_text(
-                json.dumps(
-                    {**record, "path": relative.as_posix()},
-                    sort_keys=True,
-                    default=str), encoding="utf-8")
+        text = json.dumps({**record, "path": relative.as_posix()},
+                          sort_keys=True, default=str)
+        # Rewriting an unchanged record would only cost time on large catalogs.
+        if not (path.is_file() and path.read_text(encoding="utf-8") == text):
+            # ensure the parent directory exists before writing the file
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # write the content to a temporary file and replace the original on success
+            with replace_file_on_success(path) as temp_path:
+                temp_path.write_text(text, encoding="utf-8")
         # add the versioned file to the git index
-        self.index.add([entry_path.as_posix()])
+        if add:
+            self.index.add([entry_path.as_posix()])
+        return entry_path.as_posix()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -500,8 +507,7 @@ remote:
                         break
                     parent = parent.parent
 
-        for record in records:
-            self.stage_file_version(record)
+        staged = [self.stage_file_version(record, add=False) for record in records]
 
         self.write_yaml(state.config, "config")
         self.write_yaml(state.meta, "meta")
@@ -509,9 +515,25 @@ remote:
         self.write_yaml(
             {"columns": list(state.data.columns)}, "versions"
         )
-        self.index.add([
-            "config.yml", "meta.yml", "data.tsv", "versions.yml"
+        self._add_to_index([
+            *staged, "config.yml", "meta.yml", "data.tsv", "versions.yml"
         ])
+
+    def _add_to_index(self, paths) -> None:
+        """
+        Stage worktree files in one Git process.
+
+        GitPython hashes each added file in its own subprocess. Plumbing
+        reads literal, NUL-separated paths, so names need no pathspec quoting
+        and unchanged files are only checked, not hashed again.
+
+        Args:
+            paths: Paths relative to the ``.hm`` worktree.
+        """
+        with TemporaryFile() as names:
+            names.write(b"".join(os.fsencode(str(path)) + b"\0" for path in paths))
+            names.seek(0)
+            self.git.update_index("--add", "-z", "--stdin", istream=names)
 
     def read_yaml(self, stem: Union[Path, str]) -> dict:
         """
