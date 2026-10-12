@@ -31,6 +31,9 @@ authors = [
     {name = "Yaqing Su"}
 ]
 
+[project.optional-dependencies]
+keyring = ["keyring"]
+
 [project.scripts]
 hallmark = "hallmark.cli:hallmark"
 hm = "hallmark.cli:hallmark"

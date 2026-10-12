@@ -219,7 +219,7 @@ class RemoteSpec:
         root (str): Dataset root, decoded for SSH and SFTP.
         user (str, optional): Explicit SSH username.
         port (int, optional): Explicit port number.
-        auth (str, optional): Local SSH authentication profile name.
+        auth (str, optional): Local authentication profile name.
         backend (str): Registered backend name, resolved from the URL by default.
         backend_options (Mapping): Deeply immutable backend configuration.
     """
@@ -254,7 +254,7 @@ class RemoteSpec:
 
         Args:
             url (str): HTTP(S) URL or SSH/SFTP URL with an absolute dataset root.
-            auth (str, optional): Local SSH profile name. Unsupported for HTTP(S).
+            auth (str, optional): Local auth profile name.
             backend (str, optional): Registered backend name. Defaults to URL
                 detection. Parsing does not load plugins or resolve profiles.
             backend_options (Mapping, optional): Backend-specific configuration.
@@ -315,12 +315,8 @@ class RemoteSpec:
                     "SSH root must be absolute, without traversal or backslashes"
                 )
         else:
+            # Whether a backend accepts the profile is checked when it is used.
             root, user = parsed.path, None
-            if auth is not None:
-                raise RemoteConfigurationError(
-                    "Auth profiles currently support SSH/SFTP only; "
-                    "HTTP retains Requests .netrc authentication"
-                )
         return cls(url, scheme, host, root, user, port, auth,
                    backend, backend_options)
 
@@ -375,6 +371,11 @@ class DataBackend:
     Args:
         context (OperationContext): Resources and settings for this operation.
     """
+
+    # The local profile type this backend reads from ``context.auth``:
+    # "http", "s3", or "ssh" (read from ``context.settings``). None means
+    # the backend accepts no auth profile.
+    auth_type = None
 
     def __init__(self, context):
         self.context = context

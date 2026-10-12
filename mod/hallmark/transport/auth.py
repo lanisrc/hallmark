@@ -7,6 +7,7 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
 from ..utils import load_yaml_file
+from .secrets import SecretRef
 from .base import (
     RemoteConfigurationError,
     validate_profile_name,
@@ -43,6 +44,9 @@ class SSHSettings:
 
 # sshd's default MaxSessions; more sessions on one master connection fail.
 MAX_SSH_SESSIONS = 10
+AUTH_FILE_VERSIONS = (1, 2)
+AUTH_TYPES = ("ssh", "http", "s3")
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 def _validate_ssh_settings(values):
@@ -88,6 +92,105 @@ def _validate_ssh_settings(values):
     return values
 
 
+def auth_file_path():
+    """
+    Return the local auth file path and whether it was chosen explicitly.
+
+    ``$HALLMARK_AUTH_FILE`` wins, then ``$XDG_CONFIG_HOME/hallmark/auth.yml``,
+    then ``~/.config/hallmark/auth.yml``.
+    """
+    configured = os.environ.get("HALLMARK_AUTH_FILE")
+    if configured:
+        return Path(configured).expanduser(), True
+    base = Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser()
+    return base / "hallmark" / "auth.yml", False
+
+
+def _check_owner_only(path: Path) -> None:
+    """Refuse a file that another account could change, as OpenSSH does."""
+    if os.name != "posix":
+        return
+    details = path.stat()
+    if details.st_uid != os.getuid() or details.st_mode & 0o022:
+        raise RemoteConfigurationError(
+            "The Hallmark auth file must belong to you and be writable only by "
+            "you; run chmod go-w on it")
+
+
+def load_auth_file(required: bool = False):
+    """
+    Read and validate the structure of the local auth file.
+
+    Version 1 files hold SSH profiles only. Version 2 profiles declare a
+    ``type`` of ``ssh``, ``http`` or ``s3``; because they may run secret
+    commands, version 2 files must be writable only by their owner.
+
+    Args:
+        required (bool): Fail if the file does not exist.
+
+    Returns:
+        dict | None: The document, or None when no file exists and none was
+        required or configured.
+
+    Raises:
+        RemoteConfigurationError: If the file is unreadable or malformed.
+    """
+    path, configured = auth_file_path()
+    if not path.exists() and not configured and not required:
+        return None
+    try:
+        document = load_yaml_file(path)
+    except Exception:
+        raise RemoteConfigurationError(
+            "Unable to read local Hallmark auth file"
+        ) from None
+    if (
+        not isinstance(document, dict)
+        or set(document) - {"version", "profiles", "defaults"}
+        or type(document.get("version")) is not int
+        or document["version"] not in AUTH_FILE_VERSIONS
+    ):
+        raise RemoteConfigurationError("Auth file must use version: 1 or version: 2")
+    if document["version"] >= 2:
+        _check_owner_only(path)
+    profiles = document.get("profiles", {})
+    if not isinstance(profiles, dict):
+        raise RemoteConfigurationError("Auth profiles must be a mapping")
+    for name, profile in profiles.items():
+        validate_profile_name(name)
+        if not isinstance(profile, dict):
+            raise RemoteConfigurationError("Each auth profile must be a mapping")
+        kind = profile.get("type", "ssh" if document["version"] == 1 else None)
+        if document["version"] == 1 and "type" in profile:
+            raise RemoteConfigurationError(
+                "Profile types need version: 2 in the auth file")
+        if kind not in AUTH_TYPES:
+            raise RemoteConfigurationError(
+                f"Auth profile {name!r} needs a type: " + ", ".join(AUTH_TYPES))
+    return document
+
+
+def _profile(document, name, kind):
+    """Return a named profile's fields, checking its type."""
+    profiles = (document or {}).get("profiles", {})
+    if name not in profiles:
+        raise RemoteConfigurationError(f"Unresolved auth profile {name!r}")
+    profile = dict(profiles[name])
+    found = profile.pop("type", "ssh")
+    if found != kind:
+        raise RemoteConfigurationError(
+            f"Auth profile {name!r} is for {found}, not {kind} access")
+    return profile
+
+
+def _bound_hosts(profile, name):
+    hosts = profile.pop("hosts", None)
+    if (not isinstance(hosts, list) or not hosts
+            or any(not isinstance(host, str) for host in hosts)):
+        raise RemoteConfigurationError("Each auth profile requires hosts")
+    return hosts
+
+
 def resolve_ssh_settings(remote):
     """
     Resolve local SSH settings before opening a connection.
@@ -108,56 +211,27 @@ def resolve_ssh_settings(remote):
     settings = SSHSettings()
     if remote.scheme not in {"ssh", "sftp"}:
         return settings
-    configured = os.environ.get("HALLMARK_AUTH_FILE")
-    path = (
-        Path(configured).expanduser()
-        if configured
-        else Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser()
-        / "hallmark"
-        / "auth.yml"
-    )
-    if not path.exists() and not configured and remote.auth is None:
+    document = load_auth_file(required=remote.auth is not None)
+    if document is None:
         return replace(settings, user=remote.user, port=remote.port)
-    try:
-        document = load_yaml_file(path)
-    except Exception:
-        raise RemoteConfigurationError(
-            "Unable to read local Hallmark auth file"
-        ) from None
-    if (
-        not isinstance(document, dict)
-        or set(document) - {"version", "profiles", "defaults"}
-        or type(document.get("version")) is not int
-        or document["version"] != 1
-    ):
-        raise RemoteConfigurationError("Auth file must use version: 1")
     defaults = _validate_ssh_settings(document.get("defaults", {}))
     # User, port, and identity settings require a profile bound to specific hosts.
     if set(defaults) & {"user", "port", "identity_file"}:
         raise RemoteConfigurationError("Global SSH defaults cannot select an identity")
     settings = replace(settings, **defaults)
-    profiles = document.get("profiles", {})
-    if not isinstance(profiles, dict):
-        raise RemoteConfigurationError("Auth profiles must be a mapping")
     validated = {}
-    for name, profile in profiles.items():
-        validate_profile_name(name)
-        if not isinstance(profile, dict):
-            raise RemoteConfigurationError("Each auth profile must be a mapping")
-        hosts = profile.get("hosts")
-        if (
-            not isinstance(hosts, list)
-            or not hosts
-            or any(not isinstance(host, str) for host in hosts)
-        ):
-            raise RemoteConfigurationError("Each auth profile requires hosts")
-        hosts = [validate_ssh_host(host).lower() for host in hosts]
-        values = _validate_ssh_settings(
-            {k: v for k, v in profile.items() if k != "hosts"})
-        validated[name] = (hosts, values)
+    for name, profile in document.get("profiles", {}).items():
+        kind = profile.get("type", "ssh")
+        if kind != "ssh":
+            continue
+        values = {k: v for k, v in profile.items() if k != "type"}
+        hosts = [validate_ssh_host(host).lower()
+                 for host in _bound_hosts(values, name)]
+        validated[name] = (hosts, _validate_ssh_settings(values))
     if remote.auth is not None:
         if remote.auth not in validated:
-            raise RemoteConfigurationError(f"Unresolved auth profile {remote.auth!r}")
+            # Report a missing profile, or one of another type.
+            _profile(document, remote.auth, "ssh")
         hosts, values = validated[remote.auth]
         if remote.host.lower() not in hosts:
             raise RemoteConfigurationError(
@@ -168,3 +242,162 @@ def resolve_ssh_settings(remote):
     return replace(
         settings, user=remote.user or settings.user, port=remote.port or settings.port
     )
+
+
+@dataclass(frozen=True)
+class HttpSettings:
+    """
+    Credentials for an HTTP(S) profile, resolved when a request needs them.
+
+    Attributes:
+        profile (str): Profile name, for messages.
+        hosts (tuple[str, ...]): Lowercase host names the credentials may reach.
+        scheme (str): ``basic`` or ``bearer``.
+        username (str | SecretRef, optional): Basic user name.
+        password (SecretRef, optional): Basic password.
+        token (SecretRef, optional): Bearer token.
+    """
+
+    profile: str
+    hosts: tuple
+    scheme: str
+    username: object = None
+    password: object = None
+    token: object = None
+
+
+def _http_settings(remote, document):
+    name = remote.auth
+    profile = _profile(document, name, "http")
+    hosts = tuple(host.lower() for host in _bound_hosts(profile, name))
+    if remote.host.lower() not in hosts:
+        raise RemoteConfigurationError(
+            f"Auth profile {name!r} is not bound to {remote.host}")
+    scheme = profile.pop("scheme", None)
+    fields_by_scheme = {"basic": {"username", "password"}, "bearer": {"token"}}
+    if scheme not in fields_by_scheme:
+        raise RemoteConfigurationError(
+            f"Auth profile {name!r} needs scheme: basic or scheme: bearer")
+    if set(profile) != fields_by_scheme[scheme]:
+        raise RemoteConfigurationError(
+            f"Auth profile {name!r} with scheme {scheme} needs exactly: "
+            + ", ".join(sorted(fields_by_scheme[scheme])))
+    # Credentials travel only over HTTPS, except to this computer.
+    if remote.scheme != "https" and remote.host.lower() not in LOOPBACK_HOSTS:
+        raise RemoteConfigurationError(
+            f"Auth profile {name!r} needs an https:// URL; "
+            "credentials are not sent over plain HTTP")
+    values = {"profile": name, "hosts": hosts, "scheme": scheme}
+    for field in fields_by_scheme[scheme]:
+        value = profile[field]
+        if field == "username" and isinstance(value, str) and value:
+            reject_control_characters(value, "username")
+            values[field] = value
+        else:
+            values[field] = SecretRef.parse(value, profile=name, field=field)
+    return HttpSettings(**values)
+
+
+@dataclass(frozen=True)
+class S3Settings:
+    """
+    Credentials for an S3-compatible profile, resolved when a client starts.
+
+    Attributes:
+        profile (str): Profile name, for messages.
+        buckets (tuple[str, ...]): Buckets the credentials may reach.
+        endpoints (tuple[str, ...]): Endpoint URLs the credentials may reach;
+            empty for AWS itself.
+        aws_profile (str, optional): Named profile in the AWS configuration.
+        access_key_id (SecretRef, optional): Access key reference.
+        secret_access_key (SecretRef, optional): Secret key reference.
+        session_token (SecretRef, optional): Session token reference.
+    """
+
+    profile: str
+    buckets: tuple
+    endpoints: tuple = ()
+    aws_profile: str | None = None
+    access_key_id: object = None
+    secret_access_key: object = None
+    session_token: object = None
+
+
+def _string_list(profile, key, name, required):
+    values = profile.pop(key, None)
+    if values is None and not required:
+        return ()
+    if (not isinstance(values, list) or not values
+            or any(not isinstance(value, str) or not value for value in values)):
+        raise RemoteConfigurationError(
+            f"Auth profile {name!r} needs {key} as a list of names")
+    return tuple(values)
+
+
+def _s3_settings(remote, document):
+    name = remote.auth
+    profile = _profile(document, name, "s3")
+    buckets = _string_list(profile, "buckets", name, True)
+    endpoints = tuple(endpoint.rstrip("/") for endpoint in
+                      _string_list(profile, "endpoints", name, False))
+    if remote.host not in buckets:
+        raise RemoteConfigurationError(
+            f"Auth profile {name!r} is not bound to bucket {remote.host}")
+    endpoint = remote.backend_options.get("endpoint_url")
+    endpoint = endpoint.rstrip("/") if isinstance(endpoint, str) else None
+    # A shared catalogue must not redirect your keys to another server.
+    if (endpoint or None) not in (endpoints or (None,)):
+        raise RemoteConfigurationError(
+            f"Auth profile {name!r} is not bound to this S3 endpoint")
+    values = {"profile": name, "buckets": buckets, "endpoints": endpoints}
+    aws_profile = profile.pop("aws_profile", None)
+    if aws_profile is not None:
+        if not isinstance(aws_profile, str) or not aws_profile:
+            raise RemoteConfigurationError(
+                f"Auth profile {name!r} aws_profile must be a name")
+        values["aws_profile"] = aws_profile
+    for field in ("access_key_id", "secret_access_key", "session_token"):
+        if field in profile:
+            values[field] = SecretRef.parse(profile.pop(field), profile=name,
+                                            field=field)
+    if profile:
+        raise RemoteConfigurationError(
+            f"Unsupported fields in auth profile {name!r}: "
+            + ", ".join(sorted(map(str, profile))))
+    if aws_profile is not None and "access_key_id" in values:
+        raise RemoteConfigurationError(
+            f"Auth profile {name!r} uses either aws_profile or keys, not both")
+    if ("access_key_id" in values) != ("secret_access_key" in values):
+        raise RemoteConfigurationError(
+            f"Auth profile {name!r} needs both access_key_id and secret_access_key")
+    return S3Settings(**values)
+
+
+def resolve_settings(remote, auth_type):
+    """
+    Resolve the local credentials a backend uses for a remote.
+
+    No secret is read here; HTTP and S3 settings hold references that are
+    resolved when a request needs them.
+
+    Args:
+        remote (RemoteSpec): Remote and its optional profile name.
+        auth_type (str, optional): ``http`` or ``s3``, as declared by the
+            backend; SSH settings are resolved separately.
+
+    Returns:
+        HttpSettings | S3Settings | None: Settings, or None without a profile.
+
+    Raises:
+        RemoteConfigurationError: If the profile is missing, of another type,
+            not bound to the remote, or unsupported by the backend.
+    """
+    if remote.auth is None or auth_type == "ssh":
+        return None
+    if auth_type not in {"http", "s3"}:
+        raise RemoteConfigurationError(
+            f"The {remote.backend} backend does not use auth profiles")
+    document = load_auth_file(required=True)
+    if auth_type == "http":
+        return _http_settings(remote, document)
+    return _s3_settings(remote, document)

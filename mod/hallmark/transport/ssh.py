@@ -76,6 +76,8 @@ class SshBackend(DataBackend):
         ssh (list[str], optional): Internal command override for offline tests.
         sftp (list[str], optional): Internal command override for offline tests.
     """
+    auth_type = "ssh"
+
     def __init__(self, context, *, ssh=None, sftp=None):
         super().__init__(context)
         if context.remote.scheme not in {"ssh", "sftp"}:

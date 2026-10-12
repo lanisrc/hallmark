@@ -7,7 +7,7 @@ from threading import Event, Lock, local
 
 import requests
 
-from .auth import resolve_ssh_settings
+from .auth import resolve_settings, resolve_ssh_settings
 from .base import DataBackend, RemoteEntry, RemoteSpec, TransferCancelled
 
 
@@ -21,6 +21,12 @@ class OperationContext:
     Args:
         remote (RemoteSpec): Data source and optional local profile name.
         output_root (Path | str, optional): Root used to validate download paths.
+
+    Attributes:
+        settings (SSHSettings): SSH settings; defaults for other schemes.
+        auth (HttpSettings | S3Settings | None): Credentials from the remote's
+            profile, for backends declaring that ``auth_type``. Secrets are
+            read only when a request needs them.
     """
 
     def __init__(
@@ -40,8 +46,10 @@ class OperationContext:
         self._sessions = []
         from ..remote.backends import get_backend
 
+        backend = get_backend(remote.backend)
+        self.auth = resolve_settings(remote, getattr(backend, "auth_type", None))
         try:
-            self.transport = get_backend(remote.backend)(self)
+            self.transport = backend(self)
         except BaseException:
             self.cancelled.set()
             for session in self._sessions:
