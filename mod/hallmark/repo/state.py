@@ -25,13 +25,19 @@ def is_remote_catalog(state) -> bool:
     """
     Return whether a state catalogs files on a data server.
 
-    Remote catalogue rows are keyed by ``path`` and have no committed object;
-    local manifests key each row by its ``sha1`` object.
+    Remote catalogue rows record their ``source`` and are keyed by ``path``;
+    their ``sha1``, when known, describes downloaded content rather than a
+    committed object. Catalogues written before sources existed are
+    recognized by a ``path`` column without ``sha1``.
 
     Args:
         state (State): Repository state to classify.
     """
-    return "path" in state.data.columns and "sha1" not in state.data.columns
+    config = state.config if isinstance(state.config, dict) else {}
+    columns = state.data.columns
+    if config.get("sources") or "source" in columns:
+        return True
+    return "path" in columns and "sha1" not in columns
 
 
 def _prepare_file_rows(frame: pd.DataFrame) -> pd.DataFrame:

@@ -25,6 +25,7 @@ from ..transport import OperationContext, RemoteSpec
 from ..transport.base import (
     RemoteObjectMissing, reject_url_credentials, validate_remote_path)
 from ..repo.worktree import Worktree
+from .sources import normalize_sources
 
 
 def _catalog_filenames(config):
@@ -38,7 +39,9 @@ def _catalog_filenames(config):
             names.add(validate_tsv_filename(entry["db"]))
         if entry.get("file"):
             validate_remote_path(entry["file"])
-    normalize_remotes(config.get("remote"))
+    remotes = normalize_remotes(config.get("remote"))
+    normalize_sources(config.get("sources"),
+                      [remote.get("name") or "origin" for remote in remotes])
     return sorted(names)
 
 

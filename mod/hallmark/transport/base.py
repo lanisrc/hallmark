@@ -341,6 +341,20 @@ class RemoteSpec:
         root = self.root.rstrip("/") + "/" + path
         return urlunsplit((self.scheme, parsed.netloc, quote(root, safe="/"), "", ""))
 
+    def subpath(self, root: str) -> RemoteSpec:
+        """
+        Return the spec of a folder beneath this root with the same settings.
+
+        Args:
+            root (str): Literal relative folder, or ``""`` for this root.
+        """
+        if not root:
+            return self
+        folder = root if root.endswith("/") else root + "/"
+        return RemoteSpec.from_url(self.file_url(folder), self.auth,
+                                   backend=self.backend,
+                                   backend_options=self.backend_options)
+
     @property
     def display(self) -> str:
         """Source scheme and host, with credentials and paths omitted."""
