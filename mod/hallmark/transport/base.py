@@ -204,6 +204,31 @@ class RemoteEntry:
     checksum_source: str | None = None
 
 
+_DEFAULT_BACKENDS = {"ssh": "ssh", "sftp": "ssh", "s3": "s3"}
+_S3_BUCKET = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
+
+
+def _s3_root(url, parsed, port):
+    """Validate an ``s3://BUCKET/PREFIX/`` URL and return its literal prefix."""
+    if parsed.username is not None or parsed.password is not None or port:
+        raise RemoteConfigurationError(
+            "S3 URLs name only a bucket and prefix: s3://BUCKET/PREFIX/")
+    if "?" in url or "#" in url:
+        raise RemoteConfigurationError(
+            "S3 URLs cannot contain query or fragment fields; "
+            "percent-encode ? and # in key names")
+    if not _S3_BUCKET.fullmatch(parsed.hostname) or ".." in parsed.hostname:
+        raise RemoteConfigurationError("Invalid S3 bucket name")
+    try:
+        root = unquote(parsed.path or "/", errors="strict")
+    except UnicodeError:
+        raise RemoteConfigurationError("S3 URL must encode UTF-8") from None
+    reject_control_characters(root, "S3 prefix")
+    if ".." in root.split("/") or "\\" in root or root.startswith("//"):
+        raise RemoteConfigurationError("S3 prefix cannot contain traversal")
+    return root if root.startswith("/") else "/" + root
+
+
 @dataclass(frozen=True)
 class RemoteSpec:
     """
@@ -238,7 +263,7 @@ class RemoteSpec:
     def __post_init__(self):
         selected = self.backend
         if selected is None:
-            selected = "ssh" if self.scheme in {"ssh", "sftp"} else "http"
+            selected = _DEFAULT_BACKENDS.get(self.scheme, "http")
             if selected == "http" and (self.host == "cyverse.org"
                                       or self.host.endswith(".cyverse.org")):
                 # Signed-in CyVerse access is WebDAV; /dav-anon/ serves HTML.
@@ -278,13 +303,17 @@ class RemoteSpec:
         except ValueError:
             raise RemoteConfigurationError("Invalid remote URL host or port") from None
         scheme = parsed.scheme.lower()
-        if scheme not in {"http", "https", "ssh", "sftp"}:
+        if scheme not in {"http", "https", "ssh", "sftp", "s3"}:
             raise RemoteConfigurationError(
-                "Use an http(s):// or ssh://HOST/absolute/root/ URL; "
-                "scp shorthand and this scheme are unsupported"
+                "Use an http(s)://, s3://BUCKET/ or ssh://HOST/absolute/root/ "
+                "URL; scp shorthand and this scheme are unsupported"
             )
         if not host or port == 0 or parsed.netloc.endswith(":"):
             raise RemoteConfigurationError("Invalid remote URL host or port")
+        if scheme == "s3":
+            root = _s3_root(url, parsed, port)
+            return cls(url, scheme, host, root, None, None, auth,
+                       backend, backend_options)
         if scheme in {"ssh", "sftp"}:
             validate_ssh_host(host)
             if parsed.password is not None:

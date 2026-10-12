@@ -145,6 +145,48 @@ instead, at the same path beneath its URL, which suits a mirror.
 Catalogs created before sources existed keep working and record their single
 source on the next ``add``.
 
+S3-compatible storage
+~~~~~~~~~~~~~~~~~~~~~
+
+Objects in AWS S3 and compatible stores (Open Storage Network, MinIO, Wasabi,
+Ceph) are catalogued from ``s3://BUCKET/PREFIX/`` URLs after
+``pip install hallmark[s3]``. Stores other than AWS need their endpoint in a
+backend options file:
+
+.. code-block:: bash
+
+   printf 'endpoint_url: https://sdsc.osn.xsede.org\n' > osn.yml
+   hm add 's3://ehtc-sims/m87/' --backend-options osn.yml --auth osn
+
+The options are ``endpoint_url``, ``region``, ``addressing_style`` (``auto``,
+``virtual`` or ``path``), ``anonymous`` (``true`` for public buckets),
+``page_size`` (objects per listing request, at most 1000) and ``etag_md5``.
+Objects uploaded with a SHA-256 or SHA-1 checksum are catalogued with it as a
+``server`` checksum. Set ``etag_md5: auto`` to also treat single-part ETags as
+MD5 checksums; leave it unset for buckets that encrypt objects with KMS or
+customer keys, whose ETags are not checksums.
+
+Credentials come from an ``s3`` auth profile, otherwise from the usual AWS
+sources (environment, ``~/.aws`` configuration, instance roles). Without any,
+requests are unsigned, as public buckets expect. A profile is bound to its
+buckets and endpoints, so a shared catalog cannot send your keys to another
+server:
+
+.. code-block:: yaml
+
+   version: 2
+   profiles:
+     osn:
+       type: s3
+       buckets: [ehtc-sims]
+       endpoints: [https://sdsc.osn.xsede.org]
+       access_key_id: {env: OSN_ACCESS_KEY_ID}
+       secret_access_key: {command: [pass, show, osn/secret]}
+     aws:
+       type: s3
+       buckets: [my-lab-bucket]
+       aws_profile: research    # a profile in ~/.aws/config
+
 Select a built-in backend with ``--backend http``, ``ssh``, ``cyverse`` or
 ``webdav``, or name an installed plugin. A ``webdavs://HOST/PATH/`` URL is a
 shorthand for ``https://HOST/PATH/`` with ``--backend webdav``, for servers

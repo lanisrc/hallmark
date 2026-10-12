@@ -229,7 +229,7 @@ def materialize_sources(state) -> list:
 
 def _decoded_root(spec: RemoteSpec) -> str:
     """Return a remote's literal root folder ending in ``/``."""
-    root = spec.root if spec.scheme in {"ssh", "sftp"} else unquote(spec.root)
+    root = spec.root if spec.scheme in {"ssh", "sftp", "s3"} else unquote(spec.root)
     return root.rstrip("/") + "/"
 
 

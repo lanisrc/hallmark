@@ -49,8 +49,8 @@ def _expand_webdav_scheme(value, backend):
 
 def split_remote_pattern(value, fmt=None):
     parts = urlsplit(value)
-    if parts.scheme not in {"https", "http", "ssh", "sftp"}:
-        raise ValueError("Remote add requires an HTTP(S), SSH or SFTP URL")
+    if parts.scheme not in {"https", "http", "ssh", "sftp", "s3"}:
+        raise ValueError("Remote add requires an HTTP(S), WebDAV, S3, SSH or SFTP URL")
     reject_url_secrets(value)
     path = parts.path
     if "{" in path:

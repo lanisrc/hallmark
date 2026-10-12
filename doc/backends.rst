@@ -22,9 +22,12 @@ implementations:
   requests and transfers files over HTTP(S). It suits servers without a
   browsable index, such as Nextcloud, ownCloud and iRODS davrods, and records
   the checksums those servers keep (``oc:checksums``) as ``server`` checksums.
+* ``S3Backend`` (``s3``) lists and transfers objects in AWS S3 and compatible
+  stores for ``s3://BUCKET/PREFIX/`` remotes. It needs the optional ``boto3``
+  dependency (``pip install hallmark[s3]``).
 
 Without an explicit backend, Hallmark selects one from the data URL:
-``ssh`` for SSH and SFTP URLs, ``webdav`` for ``webdav://`` and ``webdavs://``
+``ssh`` for SSH and SFTP URLs, ``s3`` for S3 URLs, ``webdav`` for ``webdav://`` and ``webdavs://``
 URLs (stored as ``http://`` and ``https://``) and for signed-in CyVerse
 ``/dav/`` URLs, ``cyverse`` for other CyVerse URLs, and ``http`` otherwise.
 Explicit selection takes precedence. For example:

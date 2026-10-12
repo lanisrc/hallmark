@@ -14,8 +14,8 @@ observational data calibration pipelines and theory data analyses
 tools, |hallmark|_ is a lightweight package designed to version
 control and manage data products in a complex workflow.
 It provides a common Python API and CLI for local files and remote data
-accessed through HTTP(S), WebDAV, SSH/SFTP, and CyVerse. Additional data services
-can be supported through backend plugins.
+accessed through HTTP(S), WebDAV, S3, SSH/SFTP, and CyVerse. Additional data
+services can be supported through backend plugins.
 By using |hallmark|_ with other packages such as |yukon|_ and
 |banyan|_ in `Project Laniakea <l6a_>`_, researchers can utilize
 computing infrastructures in a global scale to accelerate their
@@ -96,7 +96,7 @@ all discoverable files beneath the supplied URL.
 Every nonempty CLI transfer asks for confirmation. For separate Python
 downloads, callers can inspect
 ``repo.plan_download()`` and then execute ``repo.download(plan, approved=True)``.
-Optional authentication profiles for SSH and HTTP(S) remain local and can be
+Optional authentication profiles for SSH, HTTP(S) and S3 remain local and can be
 selected with ``add --auth PROFILE`` or ``set-config --remote-auth PROFILE``.
 Profiles name where each secret comes from (an environment variable, the
 system keyring or a password-manager command); no secret is stored.
@@ -114,7 +114,8 @@ unless an ``approve(plan)`` callback is supplied; use ``download=False`` to skip
 Bare destinations require ``--no-download`` / ``download=False``.
 
 The public ``DataBackend`` interface supports generic HTTP/SSH, WebDAV,
-CyVerse, and registered plugins for collaboration-specific APIs.
+S3-compatible storage (``pip install hallmark[s3]``), CyVerse, and registered
+plugins for collaboration-specific APIs.
 See `Data backends <doc/backends.rst>`_ for configuration and an extension example.
 
 Examples and configuration details are described in
