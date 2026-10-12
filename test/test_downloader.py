@@ -354,7 +354,8 @@ def test_download_builds_urls_and_destinations_from_fmt(
         tmp_path: A pytest fixture providing a temporary directory.
     """
     captured = {}
-    def fake_fetch_file(context, relative_path, destination, sha1, chunk_size):
+    def fake_fetch_file(context, relative_path, destination, sha1, chunk_size,
+                 **kwargs):
         url = context.remote.file_url(relative_path.as_posix())
         """A fake _download_and_verify_file function that records its arguments"""
         captured.setdefault("files", []).append((url, destination, sha1))
@@ -461,7 +462,8 @@ def test_download_aggregates_successes_and_failures(monkeypatch, tmp_path):
                 {"name": "origin", "url": "https://origin.test/data"},
                 {"name": "mirror", "url": "https://mirror.test/base/"}]})
     calls = []
-    def fake_download(context, relative_path, destination, sha1, chunk_size):
+    def fake_download(context, relative_path, destination, sha1, chunk_size,
+                 **kwargs):
         url = context.remote.file_url(relative_path.as_posix())
         """A fake _download_and_verify_file function that records its arguments and
         simulates a failure for a specific file"""
@@ -601,7 +603,8 @@ def test_download_deduplicates_selected_paths(monkeypatch, tmp_path):
                 "name": "origin",
                 "url": "https://example.test/data"}})
     calls = []
-    def fake_download(context, relative_path, destination, checksum, chunk_size):
+    def fake_download(context, relative_path, destination, checksum, chunk_size,
+                 **kwargs):
         url = context.remote.file_url(relative_path.as_posix())
         """A fake _download_and_verify_file function that records its arguments and
         simulates a download."""
@@ -751,7 +754,8 @@ def test_download_deduplicates_equivalent_checksum_tuples(
                 "name": "origin",
                 "url": "https://example.test/data"}})
     calls = []
-    def fake_download(context, relative_path, destination, checksum, chunk_size):
+    def fake_download(context, relative_path, destination, checksum, chunk_size,
+                 **kwargs):
         url = context.remote.file_url(relative_path.as_posix())
         """Record download requests and return a fixed byte count."""
         calls.append((url, destination, checksum))

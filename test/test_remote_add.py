@@ -653,3 +653,48 @@ def test_download_selects_files_by_source(tmp_path, remote_listing, monkeypatch)
     assert result.exit_code == 0, result.output
     assert "2 file(s)" in result.output
     assert "  M87_001.fits" in result.output
+
+
+@pytest.mark.parametrize("served", [b"abc", b"abcdefg"])
+def test_download_rejects_a_size_that_differs_from_the_catalogue(
+        tmp_path, remote_listing, monkeypatch, served):
+    # Issue #54: a truncated file was accepted when no checksum was published.
+    from hallmark.transport.http import HttpBackend
+
+    pages, _ = remote_listing
+    pages[""] = _listing("a.fits", sizes={"a.fits": 5})
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT)
+    monkeypatch.setattr(HttpBackend, "fetch", lambda self, path, destination, **kw:
+                        Path(destination).write_bytes(served))
+    result = repo.download(repo.plan_download(all_files=True), approved=True)
+    assert (result["succeeded"], result["failed"]) == (0, 1)
+    assert "expected 5 bytes" in result["errors"][0]
+    assert sorted(path.name for path in repo.worktree.iterdir()) == [".hm"]
+
+
+def test_catalogued_checksum_is_verified_before_a_known_sha1(
+        tmp_path, remote_listing, monkeypatch):
+    import hashlib
+
+    from hallmark.transport.http import HttpBackend
+
+    pages, _ = remote_listing
+    pages[""] = _listing("a.fits", "b.fits", "SHA256SUMS")
+    pages["SHA256SUMS"] = hashlib.sha256(b"right").hexdigest() + "  a.fits\n"
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    repo.state.data["sha1"] = [hashlib.sha1(b"right").hexdigest(),
+                               hashlib.sha1(b"other").hexdigest()]
+    repo.dothm.save_state(repo.state)
+    plan = repo.plan_download(all_files=True)
+    assert [(item.checksum, item.sha1) for item in plan.items] == [
+        (("sha256", hashlib.sha256(b"right").hexdigest()),
+         hashlib.sha1(b"right").hexdigest()),
+        (hashlib.sha1(b"other").hexdigest(), hashlib.sha1(b"other").hexdigest())]
+    monkeypatch.setattr(HttpBackend, "fetch", lambda self, path, destination, **kw:
+                        Path(destination).write_bytes(b"right"))
+    result = repo.download(plan, approved=True)
+    assert (result["succeeded"], result["failed"]) == (1, 1)
+    assert "b.fits (sha1)" in result["errors"][0]
+    assert (repo.worktree / "a.fits").read_bytes() == b"right"

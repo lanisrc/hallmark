@@ -10,6 +10,7 @@ from typing import Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
 from ..transport.base import validate_backend_name, readonly_backend_options
+from ..utils import is_valid_checksum
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,8 @@ class DownloadItem:
             None for the plan's single remote.
         remote_path (Path, optional): Path beneath that remote's URL when it
             differs from ``relative_path``, as for a source with a prefix.
+        sha1 (str, optional): SHA-1 of the file's content when the catalogue
+            already knows it, for example from an earlier download.
     """
 
     relative_path: Path
@@ -34,6 +37,7 @@ class DownloadItem:
     mtime: Optional[str] = None
     remote: Optional[str] = None
     remote_path: Optional[Path] = None
+    sha1: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Normalize the path and validate optional file metadata."""
@@ -42,6 +46,10 @@ class DownloadItem:
             object.__setattr__(self, "remote_path", Path(self.remote_path))
         if self.remote is not None and not isinstance(self.remote, str):
             raise ValueError("remote must be a remote name or None")
+        if self.sha1 is not None:
+            if not is_valid_checksum("sha1", self.sha1):
+                raise ValueError("sha1 must be 40 hexadecimal characters or None")
+            object.__setattr__(self, "sha1", self.sha1.lower())
         if isinstance(self.checksum, list):
             object.__setattr__(self, "checksum", tuple(self.checksum))
         if self.checksum is not None and not (

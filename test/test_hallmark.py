@@ -1388,7 +1388,8 @@ def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
 
     captured = {}
 
-    def fake_download_file(context, relative_path, destination, sha1, chunk_size):
+    def fake_download_file(context, relative_path, destination, sha1, chunk_size,
+                 **kwargs):
         captured["url"] = context.remote.file_url(str(relative_path))
         captured["sha1"] = sha1
         destination.parent.mkdir(parents=True, exist_ok=True)

@@ -19,9 +19,11 @@ from .sources import effective_sources
 from ..utils import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
     SUPPORTED_CHECKSUM_ALGORITHMS,
+    FILE_IO_CHUNK_SIZE,
     as_list_of_dicts,
     replace_file_on_success,
     calculate_file_checksum,
+    calculate_file_checksums,
     require_nonempty_string,
     resolve_path_in_root,
     is_valid_checksum)
@@ -177,14 +179,24 @@ def _checksum_from_row(row: Union[pd.Series, Mapping[str, object]]
     Returns:
         Optional[ChecksumSpec]: The checksum specification, or None if not available.
     """
-    # Check for legacy SHA-1 checksum in the "sha1" column first
+    # A catalogued checksum comes first: on a remote row, "sha1" only records
+    # what an earlier download computed, while local manifests have no pair.
+    catalogued = _parse_checksum(row.get("checksum"), row.get("checksum_algorithm"))
+    if catalogued is not None:
+        return catalogued
+    # Otherwise use the "sha1" column, as local manifests do
     legacy_sha1 = _parse_checksum(row.get("sha1"))
-    # If a legacy SHA-1 checksum is found, return it immediately
     if legacy_sha1 is not None:
         return legacy_sha1
-    # If not found, check the "checksum" and "checksum_algorithm" columns
-    return (_parse_checksum(row.get("checksum"), row.get("checksum_algorithm"))
-            or _checksum_from_config(row))
+    return _checksum_from_config(row)
+
+
+def _sha1_from_row(row) -> Optional[str]:
+    """Return a row's valid SHA-1 in lowercase, or None."""
+    value = _clean_checksum(row.get("sha1"))
+    if value is None or not is_valid_checksum("sha1", value):
+        return None
+    return value.lower()
 
 
 def _checksum_from_config(entry: dict) -> Optional[ChecksumSpec]:
@@ -502,8 +514,48 @@ def _verify_file_checksum(
         raise DownloadError(f"Checksum mismatch for {path.name} " f"({algorithm})")
 
 
+def _fetch_verified(context, relative_path, temp_path, *, checksum, size, sha1,
+                    chunk_size, name):
+    """
+    Fetch a file and check it against everything the catalogue records.
+
+    The size is compared first, so a truncated transfer fails even without a
+    checksum. The catalogued digest and the file's SHA-1 are computed in one
+    pass over the bytes.
+
+    Args:
+        context (OperationContext): Transfer resources.
+        relative_path (Path): Path beneath the remote URL.
+        temp_path (Path): Temporary file to write.
+        checksum (tuple[str, str], optional): Validated catalogued digest.
+        size (int, optional): Catalogued size in bytes.
+        sha1 (str, optional): Known SHA-1 of the content.
+        chunk_size (int): Transfer read size.
+        name (str): File name for messages.
+
+    Returns:
+        tuple[int, str]: Bytes received and the content's SHA-1.
+
+    Raises:
+        DownloadError: If the size or a digest does not match.
+    """
+    context.transport.fetch(relative_path.as_posix(), temp_path, chunk_size=chunk_size)
+    received = temp_path.stat().st_size
+    if size is not None and received != size:
+        raise DownloadError(
+            f"Size mismatch for {name}: expected {size} bytes, received {received}")
+    algorithms = {"sha1"} | ({checksum[0]} if checksum else set())
+    digests = calculate_file_checksums(temp_path, algorithms, FILE_IO_CHUNK_SIZE)
+    if checksum is not None and digests[checksum[0]] != checksum[1]:
+        raise DownloadError(f"Checksum mismatch for {name} ({checksum[0]})")
+    if sha1 is not None and digests["sha1"] != sha1:
+        raise DownloadError(f"Checksum mismatch for {name} (sha1)")
+    return received, digests["sha1"]
+
+
 def _download_and_verify_file(
-    context, relative_path, destination, expected_checksum, chunk_size
+    context, relative_path, destination, expected_checksum, chunk_size,
+    expected_size=None, expected_sha1=None,
 ):
     """
     Download and verify a file before replacing its destination.
@@ -515,6 +567,8 @@ def _download_and_verify_file(
             it is resolved again before writing and before publishing.
         expected_checksum: Optional digest or (algorithm, digest) pair.
         chunk_size (int): Bytes per read when downloading or verifying.
+        expected_size (int, optional): Catalogued size in bytes.
+        expected_sha1 (str, optional): Known SHA-1 of the content.
 
     Returns:
         int: Number of downloaded bytes.
@@ -533,10 +587,10 @@ def _download_and_verify_file(
         destination.parent.mkdir(parents=True, exist_ok=True)
         with replace_file_on_success(
                 destination, suffix=".part", overwrite=False) as temp_path:
-            context.transport.fetch(relative_path.as_posix(), temp_path,
-                                    chunk_size=chunk_size)
-            _verify_file_checksum(temp_path, validated_checksum, chunk_size)
-            size = temp_path.stat().st_size
+            size, _ = _fetch_verified(
+                context, relative_path, temp_path, checksum=validated_checksum,
+                size=expected_size, sha1=expected_sha1, chunk_size=chunk_size,
+                name=destination.name)
             # Recheck for symlink changes before replacing the destination.
             # Another process can still change the path after this check.
             resolve_path_in_root(context.output_root, local_path,
@@ -574,6 +628,7 @@ def _select_download_items(
     # dictionary to store selected files with relative paths and optional checksums.
     selected: dict[str, tuple[Path, Optional[ChecksumSpec]]] = {}
     metadata = {}
+    known_sha1 = {}
     explicit_paths = {validate_remote_path(path).as_posix() for path in file_paths}
     folder_paths = {validate_remote_path(path).as_posix() for path in file_paths
                     if str(path).endswith("/")}
@@ -613,6 +668,11 @@ def _select_download_items(
             metadata[relative_path.as_posix()] = (
                 size if size is not None else previous_size,
                 modified if modified is not None else previous_modified)
+            sha1 = _sha1_from_row(row)
+            if sha1 is not None:
+                if known_sha1.get(name, sha1) != sha1:
+                    raise DownloadError(f"Conflicting SHA-1 for {name!r}")
+                known_sha1[name] = sha1
 
     def add_frame(frame: pd.DataFrame, fmt_entries: list[dict],
                   *, explicit_only=False) -> None:
@@ -726,7 +786,8 @@ def _select_download_items(
         raise DownloadError(
             "Paths not in the catalog, or folders with no catalogued files:\n"
             + "\n".join(unknown_paths))
-    return [DownloadItem(path, checksum, *metadata.get(path.as_posix(), (None, None)))
+    return [DownloadItem(path, checksum, *metadata.get(path.as_posix(), (None, None)),
+                         sha1=known_sha1.get(path.as_posix()))
             for path, checksum in selected.values()]
 
 
@@ -1003,8 +1064,7 @@ def execute_download_plan(
         if all(item.size_bytes is not None for item in group):
             total_bytes = sum(item.size_bytes for item in group)
         outcome = _download_selected(
-            remote, plan.output_path,
-            [(item.relative_path, item.checksum, item.remote_path) for item in group],
+            remote, plan.output_path, group,
             max_workers=max_workers, show_progress=show_progress,
             total_bytes=total_bytes)
         for key in ("succeeded", "failed", "total_bytes"):
@@ -1016,13 +1076,18 @@ def execute_download_plan(
 def _download_selected(
     remote_spec,
     worktree_path,
-    selected_files,
+    items,
     *,
     max_workers,
     show_progress,
     total_bytes=None,
 ):
-    """Download selected files with shared resources and atomic file replacement."""
+    """
+    Download plan items from one remote with shared resources.
+
+    Each file is verified against its catalogued size and digests before it
+    replaces nothing at its destination.
+    """
     results = {"succeeded": 0, "failed": 0, "total_bytes": 0, "errors": []}
 
     # output_root is the resolved absolute path where files will be downloaded
@@ -1034,17 +1099,14 @@ def _download_selected(
 
     # Normalize selected files into a dictionary to ensure unique paths and checksums.
     normalized_selection: dict[str, tuple[Path, Optional[ChecksumSpec]]] = {}
-    # Paths beneath the remote URL, when they differ from the local path.
-    source_paths: dict[str, Path] = {}
-    for relative_path, expected_checksum, *source_path in selected_files:
+    by_path: dict[str, DownloadItem] = {}
+    for item in items:
         # Validate and convert the relative path to a safe Path object
-        relative_path = validate_remote_path(relative_path)
+        relative_path = validate_remote_path(item.relative_path)
         # Merge the selected file into the normalized selection,
         # ensuring no conflicting checksums exist.
-        _merge_selected_file(normalized_selection, relative_path, expected_checksum)
-        if source_path and source_path[0] is not None:
-            source_paths[relative_path.as_posix()] = validate_remote_path(
-                source_path[0])
+        _merge_selected_file(normalized_selection, relative_path, item.checksum)
+        by_path[relative_path.as_posix()] = item
 
     files_to_download = []
     # for each unique relative path and expected checksum in the normalized selection
@@ -1060,9 +1122,10 @@ def _download_selected(
         except ValueError as exc:
             raise DownloadError(str(exc)) from exc
 
+        item = by_path[relative_path.as_posix()]
         files_to_download.append((
-            source_paths.get(relative_path.as_posix(), relative_path),
-            destination, expected_checksum))
+            validate_remote_path(item.source_path), destination, expected_checksum,
+            item.size_bytes, item.sha1))
 
     # track transferred bytes
     progress = tqdm(
@@ -1099,7 +1162,8 @@ def _download_selected(
                     """
                     # try to get the next file from the iterator
                     try:
-                        relative_path, destination, checksum = next(file_iterator)
+                        (relative_path, destination, checksum, size,
+                         sha1) = next(file_iterator)
                     # Handle the exception when there are no more files to download
                     except StopIteration:
                         return False
@@ -1112,6 +1176,8 @@ def _download_selected(
                             destination,
                             checksum,
                             DOWNLOAD_CHUNK_SIZE,
+                            expected_size=size,
+                            expected_sha1=sha1,
                         )
                     )
                     # if the download was successfully submitted, return True
