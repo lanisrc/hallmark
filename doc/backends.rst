@@ -18,9 +18,16 @@ implementations:
   without a login shell.
 * ``CyVerseBackend`` extends HTTP support with CyVerse directory and metadata
   parsing.
+* ``WebDavBackend`` (``webdav``) lists collections with WebDAV ``PROPFIND``
+  requests and transfers files over HTTP(S). It suits servers without a
+  browsable index, such as Nextcloud, ownCloud and iRODS davrods, and records
+  the checksums those servers keep (``oc:checksums``) as ``server`` checksums.
 
-Without an explicit backend, Hallmark selects one from the data URL. Explicit
-selection takes precedence. For example:
+Without an explicit backend, Hallmark selects one from the data URL:
+``ssh`` for SSH and SFTP URLs, ``webdav`` for ``webdav://`` and ``webdavs://``
+URLs (stored as ``http://`` and ``https://``) and for signed-in CyVerse
+``/dav/`` URLs, ``cyverse`` for other CyVerse URLs, and ``http`` otherwise.
+Explicit selection takes precedence. For example:
 
 .. code-block:: bash
 
@@ -114,6 +121,10 @@ Raise
 ``RemoteObjectMissing`` for an absent metadata object. These exceptions are
 available from ``hallmark.remote.backends``. Do not disguise authentication failures
 as missing objects.
+
+Backends that use local credentials declare ``auth_type = "http"`` (or
+``"s3"``); the operation context then provides the remote's profile as
+``context.auth``. Subclasses of ``HttpBackend`` inherit HTTP profile support.
 
 Discovery reads listings and published metadata only. It must not download
 payloads to infer checksums. The shared downloader owns approval, destination

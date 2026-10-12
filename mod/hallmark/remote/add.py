@@ -32,6 +32,21 @@ _RESERVED_FIELDS = {*CATALOG_COLUMNS, "sha1"}
 _SAME_FILE = ("size_bytes", "mtime", "checksum_algorithm", "checksum")
 
 
+# Shorthand schemes for WebDAV servers, which speak HTTP(S).
+_WEBDAV_SCHEMES = {"webdav": "http", "webdavs": "https"}
+
+
+def _expand_webdav_scheme(value, backend):
+    """Rewrite ``webdav(s)://`` to ``http(s)://`` with the webdav backend."""
+    scheme, separator, rest = value.partition("://")
+    mapped = _WEBDAV_SCHEMES.get(scheme.lower()) if separator else None
+    if mapped is None:
+        return value, backend
+    if backend not in (None, "webdav"):
+        raise ValueError(f"{scheme}:// URLs use the webdav backend, not {backend}")
+    return f"{mapped}://{rest}", "webdav"
+
+
 def split_remote_pattern(value, fmt=None):
     parts = urlsplit(value)
     if parts.scheme not in {"https", "http", "ssh", "sftp"}:
@@ -210,6 +225,7 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
         pandas.DataFrame: Rows found by the scan. ``attrs["removed"]`` lists
         catalogued paths that the server no longer has.
     """
+    value, backend = _expand_webdav_scheme(value, backend)
     url, fmt = split_remote_pattern(value, fmt)
     path_matches("validation", filter=filter, fmt=fmt)
     specs = as_list_of_dicts(repo.state.config.get("data", []))

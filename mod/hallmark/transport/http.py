@@ -142,8 +142,14 @@ class HttpBackend(DataBackend):
                        "; name an auth profile with --auth, or use ~/.netrc")
         return cls(f"Failed to download from {self.context.remote.display}: {detail}")
 
-    def _open_metadata_response(self, relative_path):
-        """Follow bounded metadata redirects only within the declared source root."""
+    def _open_metadata_response(self, relative_path, *, method="GET", headers=None,
+                                data=None):
+        """
+        Follow bounded metadata redirects only within the declared source root.
+
+        Other methods, such as WebDAV's PROPFIND, are repeated unchanged at
+        each redirect target.
+        """
         url = self.context.remote.file_url(relative_path)
         root = urlsplit(self.context.remote.url)
         root_path = unquote(root.path, errors="strict").rstrip("/") or "/"
@@ -168,10 +174,13 @@ class HttpBackend(DataBackend):
                     raise DownloadError("Metadata redirect leaves the source root")
             except (ValueError, UnicodeError):
                 raise DownloadError("Invalid metadata redirect URL") from None
-            response = self.context.session().get(
-                url, stream=True, timeout=REMOTE_REQUEST_TIMEOUT,
-                allow_redirects=False, **self._auth_option(),
-            )
+            options = dict(stream=True, timeout=REMOTE_REQUEST_TIMEOUT,
+                           allow_redirects=False, **self._auth_option())
+            if method == "GET":
+                response = self.context.session().get(url, **options)
+            else:
+                response = self.context.session().request(
+                    method, url, headers=headers, data=data, **options)
             if response.status_code not in {301, 302, 303, 307, 308}:
                 return response, url
             location = response.headers.get("Location")

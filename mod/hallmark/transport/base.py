@@ -241,7 +241,8 @@ class RemoteSpec:
             selected = "ssh" if self.scheme in {"ssh", "sftp"} else "http"
             if selected == "http" and (self.host == "cyverse.org"
                                       or self.host.endswith(".cyverse.org")):
-                selected = "cyverse"
+                # Signed-in CyVerse access is WebDAV; /dav-anon/ serves HTML.
+                selected = "webdav" if self.root.startswith("/dav/") else "cyverse"
         object.__setattr__(self, "backend", validate_backend_name(selected))
         object.__setattr__(self, "backend_options",
                            readonly_backend_options(self.backend_options))

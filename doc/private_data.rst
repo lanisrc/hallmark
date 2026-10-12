@@ -145,8 +145,10 @@ instead, at the same path beneath its URL, which suits a mirror.
 Catalogs created before sources existed keep working and record their single
 source on the next ``add``.
 
-Select a built-in backend with ``--backend http``, ``ssh``, or ``cyverse``, or
-name an installed plugin. Without an explicit choice, Hallmark selects a
+Select a built-in backend with ``--backend http``, ``ssh``, ``cyverse`` or
+``webdav``, or name an installed plugin. A ``webdavs://HOST/PATH/`` URL is a
+shorthand for ``https://HOST/PATH/`` with ``--backend webdav``, for servers
+that answer WebDAV requests but show no browsable index. Without an explicit choice, Hallmark selects a
 backend from the URL. ``--backend-options FILE`` reads a YAML mapping of
 nonsecret backend settings. These settings are saved with the data remote;
 credentials belong in local authentication configuration. See :doc:`backends`
