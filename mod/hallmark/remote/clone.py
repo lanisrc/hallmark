@@ -22,7 +22,8 @@ from ..repo.config import (
     row_to_path,
 )
 from ..transport import OperationContext, RemoteSpec
-from ..transport.base import RemoteObjectMissing, validate_remote_path
+from ..transport.base import (
+    RemoteObjectMissing, reject_url_credentials, validate_remote_path)
 from ..repo.worktree import Worktree
 
 
@@ -170,9 +171,10 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
     """
     Clone an existing Git catalog or published HTTP/SFTP catalog snapshot.
 
-    Existing destinations are rejected before source access. An incomplete
-    destination created by this call is removed on failure. Local-file catalogs
-    without a data server are rejected before destination creation. Dataset discovery
+    Source URLs with credentials and existing destinations are rejected
+    before source access. An incomplete destination created by this call is
+    removed on failure. Local-file catalogs without a data server are rejected
+    before destination creation. Dataset discovery
     belongs to ``Repo.add(URL)``.
 
     Args:
@@ -191,6 +193,8 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
         ValueError: If source options are invalid.
         DownloadError: If remote metadata cannot be read or validated.
     """
+    # Git records the source URL in .hm/.git/config, so it must hold no secret.
+    reject_url_credentials(str(url))
     destination = Path(path).expanduser().absolute()
     if destination.exists() or destination.is_symlink():
         raise DestinationExistsError(

@@ -104,6 +104,17 @@ nonsecret backend settings. These settings are saved with the data remote;
 credentials belong in local authentication configuration. See :doc:`backends`
 for the plugin interface.
 
+Keep passwords and keys outside ``.hm``. ``add URL`` and
+``set-config --remote-url`` reject URLs containing a password, an HTTP(S)
+username or token, a query string or a fragment, before contacting the server
+and without repeating the URL. Store SSH users and keys in ``~/.ssh/config`` or
+a local profile in ``~/.config/hallmark/auth.yml`` (see section 4), and
+HTTP(S) logins in ``~/.netrc``. An SSH username such as
+``ssh://researcher@lab-data/srv/exports/lab/`` is not a secret and is allowed.
+``clone`` likewise refuses a source URL with a password or an HTTP(S) username
+or token, before creating anything, because Git would save it in
+``.hm/.git/config``; use a Git credential helper or ``~/.netrc`` instead.
+
 3. Preview, approve and download
 --------------------------------
 
