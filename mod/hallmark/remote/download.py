@@ -265,7 +265,7 @@ def _checksum_pair(expected_checksum: Optional[ChecksumSpec]
 def _validate_expected_checksum(expected_checksum: Optional[ChecksumSpec]
                             ) -> Optional[tuple[str, str]]:
     """
-    Used by _download_and_verify_file.
+    Used by _existing_file_status and _download_into_store.
     Validate and normalize a checksum specification.
 
     Args:

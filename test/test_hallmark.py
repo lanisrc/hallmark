@@ -30,7 +30,6 @@ from hallmark.repo.manifest import (
     build_file_table,
     file_versions_by_path)
 from hallmark.repo.history import (
-    _parse_data_tsv,
     load_branch_state,
     load_head_state)
 
@@ -2590,25 +2589,28 @@ def test_worktree_changes_accepts_uppercase_expected_checksum(tmp_path):
 
 ### repo.history tests ###
 
-def test_parse_data_tsv_preserves_na_tokens_and_blank_values():
+def test_loaded_catalogue_preserves_na_tokens_and_blank_values(tmp_path):
     """
-    Test that _parse_data_tsv correctly preserves 'NA' tokens and blank values when
-    parsing a TSV string. This test provides a TSV string with 'NA' and blank values
-    and checks that the resulting DataFrame has the expected values.
+    Loading a committed data.tsv keeps 'NA' and blank values as text instead
+    of turning them into missing values.
     """
-    frame = _parse_data_tsv("sha1\tname\n""first\tNA\n""second\t\n")
+    repo = Repo.init(tmp_path / "repo")
+    (repo.dothm.path / "data.tsv").write_text("sha1\tname\nfirst\tNA\nsecond\t\n")
+    repo.dothm.index.add(["data.tsv"])
+    frame = repo.dothm.load_state(staged=True).data
 
     assert frame["name"].tolist() == ["NA", ""], \
         f"Expected ['NA', ''], got {frame['name'].tolist()}"
 
 
-def test_parse_data_tsv_empty_text_returns_empty_state_schema():
-    """
-    Empty TSV text should parse to an empty DataFrame with the canonical State schema.
-    """
-    frame = _parse_data_tsv("   \n")
+def test_loading_an_empty_catalogue_gives_the_state_schema(tmp_path):
+    """An empty data.tsv loads as an empty catalogue with the State schema."""
+    repo = Repo.init(tmp_path / "repo")
+    (repo.dothm.path / "data.tsv").write_text("   \n")
+    repo.dothm.index.add(["data.tsv"])
+    frame = repo.dothm.load_state(staged=True).data
 
-    assert frame.empty, "Expected parsed frame to be empty for blank TSV text"
+    assert frame.empty, "Expected an empty catalogue for blank data.tsv"
     assert list(frame.columns) == ["sha1"], \
         f"Expected canonical columns ['sha1'], got {list(frame.columns)}"
 

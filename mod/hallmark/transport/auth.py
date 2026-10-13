@@ -183,7 +183,7 @@ def _profile(document, name, kind):
     return profile
 
 
-def _bound_hosts(profile, name):
+def _bound_hosts(profile):
     hosts = profile.pop("hosts", None)
     if (not isinstance(hosts, list) or not hosts
             or any(not isinstance(host, str) for host in hosts)):
@@ -226,7 +226,7 @@ def resolve_ssh_settings(remote):
             continue
         values = {k: v for k, v in profile.items() if k != "type"}
         hosts = [validate_ssh_host(host).lower()
-                 for host in _bound_hosts(values, name)]
+                 for host in _bound_hosts(values)]
         validated[name] = (hosts, _validate_ssh_settings(values))
     if remote.auth is not None:
         if remote.auth not in validated:
@@ -269,7 +269,7 @@ class HttpSettings:
 def _http_settings(remote, document):
     name = remote.auth
     profile = _profile(document, name, "http")
-    hosts = tuple(host.lower() for host in _bound_hosts(profile, name))
+    hosts = tuple(host.lower() for host in _bound_hosts(profile))
     if remote.host.lower() not in hosts:
         raise RemoteConfigurationError(
             f"Auth profile {name!r} is not bound to {remote.host}")

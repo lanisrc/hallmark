@@ -34,7 +34,7 @@ from .utils import CHECKSUM_ALGORITHMS
 def _translate_cli_errors(*error_types, prefix=None):
     """
     Used by hallmark, init, info, status, add, set_config, commit, log, branch,
-    checkout, download, clone, and build.
+    checkout, download, and clone.
     Context manager to translate application errors into clean Click errors.
 
     Args:

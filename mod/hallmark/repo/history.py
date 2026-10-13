@@ -1,66 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from io import StringIO
 from pathlib import Path
 from typing import Iterable
-from git.exc import GitCommandError
 
-import pandas as pd
 
-from ..utils import load_yaml
 from .objects import Objects
 from .state import State
-
-def _load_revision_yaml(
-    repo,
-    revision: str,
-    filename: str,
-    fallback: dict,
-    ) -> dict:
-    """
-    Used by load_revision_state.
-    Load a YAML file from a specific Git revision.
-
-    Args:
-        repo:     The repository object.
-        revision: The Git revision (commit hash, branch name, etc.) to load.
-        filename: The name of the YAML file to load (e.g., "config.yml").
-        fallback: A dictionary to return if the file does not exist in the specified
-        revision.
-
-    Returns:
-        (dict) The contents of the YAML file at the specified revision, or the
-        fallback dictionary if the file does not exist.
-        Uses a deep copy of the fallback dictionary to ensure that it is not modified.
-    """
-    # try to load the YAML file from the specified revision in the Git repository
-    try:
-        return load_yaml(repo.dothm.git.show(f"{revision}:{filename}"))
-    # if the file does not exist in the specified revision, return fallback dictionary
-    except GitCommandError:
-        # ensure that the fallback dictionary is not modified by returning a deep copy
-        return deepcopy(fallback)
-
-
-def _parse_data_tsv(data: str) -> pd.DataFrame:
-    """
-    Used by load_revision_state.
-    Parse Git-backed TSV text into a DataFrame.
-
-    Args:
-        data: TSV text to parse.
-
-    Returns:
-        A pandas DataFrame containing the parsed TSV data, or an empty DataFrame
-        if the input data is empty.
-    """
-    # if the input data is empty or contains only whitespace, return an empty DataFrame
-    if not data.strip():
-        return State().data.copy()
-    # otherwise, parse the TSV data into a DataFrame with specified options
-    return pd.read_csv(StringIO(data), sep="\t", dtype=str, keep_default_na=False)
-
 
 def _copy_current_state(repo, *, include_data: bool) -> State:
     """

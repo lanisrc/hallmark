@@ -151,8 +151,7 @@ def calculate_file_checksum(
     chunk_size: int = FILE_IO_CHUNK_SIZE,
     ) -> str:
     """
-    Used in repo.objects by _verify_file_checksum and repo.objects by
-    _calculate_sha1.
+    Used in repo.objects by _calculate_sha1.
     Compute a file checksum using streaming reads.
 
     Uses hashlib.file_digest when available and retains compatibility
@@ -271,9 +270,8 @@ def use_working_directory(path):
 @contextmanager
 def replace_file_on_success(path: Path, *, suffix: str = ".tmp", overwrite=True):
     """
-    Used in repo.dothm by write_yaml and write_tsv, remote.download by
-    _download_and_verify_file,
-    and repo.objects by _copy_and_verify_file.
+    Used in repo.dothm by write_yaml and write_tsv, and repo.objects by
+    _copy_and_verify_file and _record_stat.
     Context manager that yields a temporary file path for atomic writes.
     The temporary file is created in the same directory as the target path
     and is replaced with the target path upon successful completion.
@@ -311,7 +309,7 @@ def replace_file_on_success(path: Path, *, suffix: str = ".tmp", overwrite=True)
 
 def load_yaml(source):
     """
-    Used in repo.history by _load_revision_yaml.
+    Used in repo.dothm by load_state.
     Load YAML from text or a readable stream.
     Empty YAML documents are represented consistently as an empty
     dictionary.
@@ -579,9 +577,9 @@ def validate_relative_path(value, *, label: str = "path") -> Path:
 
 def resolve_path_in_root(root, value, *, label: str = "path") -> Path:
     """
-    Used in remote.download by _download_and_verify_file, repo by _resolve_worktree_path
-    and
-    add_worktree, and repo.changes by find_changed_and_missing_files.
+    Used in remote.download by _check_existing_files, repo by
+    _resolve_worktree_path and add_worktree, and repo.changes by
+    find_changed_and_missing_files.
     Resolve a relative path beneath root without following symlinks outside it.
 
     Args:

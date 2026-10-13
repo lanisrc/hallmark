@@ -4,7 +4,7 @@ from pathlib import Path
 
 from ..error import CheckoutError
 from ..utils import (
-    SymlinkPathError, resolve_path_in_root, validate_relative_path)
+    SymlinkPathError, resolve_path_in_root)
 from .config import branch_filename_format
 from .manifest import file_versions_by_path, iter_manifest_entries
 
@@ -31,50 +31,6 @@ def working_directory_for_repo(repo) -> Path:
     except ValueError:
         return worktree
     return cwd
-
-
-def filter_files_in_directory(repo, pf):
-    '''
-    Filter a ``ParaFrame`` to include only files that are within the effective working
-    directory of the repository. Raise ValueError if the repository has no worktree.
-
-    Args:
-        repo (Repo): Repository object.
-        pf (ParaFrame): ParaFrame to filter.
-
-    Returns:
-        ParaFrame: Filtered containing only files within the effective working directory
-
-    Raises:
-        ValueError: If the repository has no worktree.
-    '''
-    # Determine the effective working directory for repository operations
-    root = working_directory_for_repo(repo)
-    # resolve the repository's worktree path to an absolute path
-    worktree = Path(repo.worktree).resolve()
-    # if the effective working directory is the same as the worktree root
-    if root == worktree:
-        # return the original paraframe without filtering
-        return pf
-
-    # get the relative path of the working directory with respect to the worktree root
-    relative_root = root.relative_to(worktree)
-
-    def is_within_root(value) -> bool:
-        """Check if a given path is within the effective working directory."""
-        # try to validate the relative path
-        try:
-            relative_path = validate_relative_path(value, label="matched data path")
-            # check if it is within the effective working directory
-            relative_path.relative_to(relative_root)
-        # if the path is not valid, return False
-        except ValueError:
-            return False
-        # if the check passes, return True
-        return True
-
-    # filter the paraframe to include only paths that are within the working directory
-    return pf[pf["path"].map(is_within_root)]
 
 
 def tracked_paths(repo) -> set[Path]:
