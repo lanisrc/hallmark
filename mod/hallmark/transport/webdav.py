@@ -89,7 +89,7 @@ class WebDavBackend(HttpBackend):
     def _propfind(self, directory):
         """Request one collection's members within the metadata size limit."""
         content = bytearray()
-        limit = self.context.text_limit
+        limit = self.context.large_text_limit
         try:
             response, final_url = self._open_metadata_response(
                 directory, method="PROPFIND", data=PROPFIND_BODY,

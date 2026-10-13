@@ -95,7 +95,7 @@ def _attach_published_checksums(context, entries):
         if manifest_algorithm is None:
             continue
         try:
-            text = context.read_text(path)
+            text = context.read_text(path, large=True)
         except RemoteObjectMissing:
             continue
         parent = PurePosixPath(path).parent

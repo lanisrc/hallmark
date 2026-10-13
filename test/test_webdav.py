@@ -127,7 +127,7 @@ def test_servers_without_webdav_are_reported(dav):
 def test_unsafe_or_oversized_listings_are_refused(dav, body, message):
     dav.listings["/data/"] = body
     with OperationContext(RemoteSpec.from_url(dav.url, backend="webdav")) as context:
-        context.text_limit = 4096
+        context.large_text_limit = 4096
         with pytest.raises(DownloadError, match=message):
             discover_remote_files(context)
 

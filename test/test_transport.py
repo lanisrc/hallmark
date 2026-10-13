@@ -735,7 +735,7 @@ def test_discovered_manifest_preserves_names_and_rejects_escaped_names():
     name = " leading%20 name  "
     text = "a" * 64 + "  " + name + "\n"
 
-    def read_text(path):
+    def read_text(path, **_):
         return text
 
     entries = {name: RemoteEntry(name), "sha256sums": RemoteEntry("sha256sums")}
@@ -754,7 +754,7 @@ def test_discovered_manifest_prefers_strong_checksum_and_rejects_conflict():
 
     texts = {"sha256sums": "a" * 64 + "  file\n", "md5sums": "b" * 32 + "  file\n"}
 
-    def read_text(path):
+    def read_text(path, **_):
         return texts[path]
 
     entries = {name: RemoteEntry(name) for name in ["file", *texts]}

@@ -464,7 +464,7 @@ def test_nested_remote_add_keeps_url_workflow_and_download_discovery(
     monkeypatch.chdir(nested)
     reads = []
 
-    def read_text(context, path):
+    def read_text(context, path, **_):
         reads.append(path)
         assert path == "", "Remote add must only read the directory listing"
         return ('<h1>Index of data</h1>'
@@ -573,7 +573,7 @@ def test_remote_format_update_is_refused_without_changes(
     repo = local_repo
     reads = []
 
-    def read_text(context, path):
+    def read_text(context, path, **_):
         reads.append(path)
         assert path == ""
         return ('<h1>Index of data</h1>'

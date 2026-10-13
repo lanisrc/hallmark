@@ -16,7 +16,7 @@ def metadata_server(monkeypatch):
     """Serve registered metadata and record each requested URL."""
     pages, reads = {}, []
 
-    def read_text(context, path):
+    def read_text(context, path, **_):
         url = context.remote.url.rstrip("/") + "/" + path
         reads.append(url)
         if url not in pages:
@@ -353,7 +353,7 @@ def test_snapshot_clone_does_not_require_payload_authentication(
 
 
 def test_snapshot_access_failure_never_falls_back_to_git(tmp_path, monkeypatch):
-    def inaccessible(context, path):
+    def inaccessible(context, path, **_):
         raise DownloadError("Metadata server requires authentication")
 
     def fail(*args, **kwargs):
@@ -411,3 +411,31 @@ def test_published_local_catalog_is_rejected(tmp_path, metadata_server, download
     with pytest.raises(CloneError, match="This repository tracks local files"):
         Repo.clone(root, target, download=download)
     assert not target.exists()
+
+
+def test_snapshot_catalogues_larger_than_small_documents_can_be_cloned(
+        tmp_path, monkeypatch):
+    from http_server import LocalServer
+    from hallmark.transport import OperationContext
+
+    original = OperationContext.__init__
+
+    def small_text_limit(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        # A published config.yml stays small; the catalogue grows with files.
+        self.text_limit = 1024
+
+    monkeypatch.setattr(OperationContext, "__init__", small_text_limit)
+    server = LocalServer()
+    server.files.update({
+        "config.yml": (b"data:\n- db: data.tsv\nremote:\n- name: origin\n"
+                       b"  url: https://payload.test/data/\n"),
+        "meta.yml": b"{}\n",
+        "data.tsv": b"path\tsha1\n" + b"".join(
+            f"run/{index:06d}.h5\t{'a' * 40}\n".encode() for index in range(2000)),
+    })
+    try:
+        repo = Repo.clone(server.url, tmp_path / "copy", download=False)
+    finally:
+        server.close()
+    assert len(repo.state.data) == 2000

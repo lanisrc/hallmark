@@ -1158,7 +1158,7 @@ def test_add_then_download_requires_confirmation(monkeypatch, tmp_path, answer):
     from hallmark.transport.base import RemoteObjectMissing
     from mock_server import MockServer
 
-    def metadata(context, path):
+    def metadata(context, path, **_):
         if path == "":
             return '<h1>Index of data</h1><a href="a.fits">a.fits</a>'
         raise RemoteObjectMissing("Missing metadata")

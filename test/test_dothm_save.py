@@ -78,7 +78,8 @@ def test_saving_a_loaded_catalogue_changes_nothing(tmp_path, monkeypatch):
 
     listing = ('<h1>Index of data</h1><a href="M87_002.fits" data-size="12">'
                'M87_002.fits</a><a href="M87_001.fits">M87_001.fits</a>')
-    monkeypatch.setattr(OperationContext, "read_text", lambda context, path: listing)
+    monkeypatch.setattr(OperationContext, "read_text",
+                        lambda context, path, **_: listing)
     repo = Repo.init(tmp_path / "repo")
     repo.add("https://x.test/d/{src}_{day:03d}.fits")
     repo.commit("Catalogue")
@@ -95,7 +96,8 @@ def test_adding_a_source_leaves_other_rows_untouched(tmp_path, monkeypatch):
 
     listing = ('<h1>Index of data</h1><a href="M87_001.fits">M87_001.fits</a>'
                '<a href="notes.txt">notes.txt</a>')
-    monkeypatch.setattr(OperationContext, "read_text", lambda context, path: listing)
+    monkeypatch.setattr(OperationContext, "read_text",
+                        lambda context, path, **_: listing)
     repo = Repo.init(tmp_path / "repo")
     repo.add("https://x.test/d/{src}_{day:03d}.fits")
     repo.commit("Catalogue")

@@ -28,7 +28,7 @@ def server(monkeypatch):
     files = dict(FILES)
     fetched = []
 
-    def read_text(context, path):
+    def read_text(context, path, **_):
         if path:
             raise RemoteObjectMissing("No metadata")
         return "<h1>Index of data</h1>" + "".join(

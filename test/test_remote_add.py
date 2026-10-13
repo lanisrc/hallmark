@@ -17,7 +17,7 @@ def remote_listing(monkeypatch):
                    '<a href="notes.txt">notes.txt</a>'}
     reads = []
 
-    def read_text(context, path):
+    def read_text(context, path, **_):
         reads.append(path)
         if path not in pages:
             raise RemoteObjectMissing("No metadata")
@@ -849,12 +849,12 @@ def test_an_add_never_saves_over_a_change_made_during_its_scan(
     pages, _ = remote_listing
     real_read = OperationContext.read_text
 
-    def read_text(context, path):
+    def read_text(context, path, **_):
         # Another command saves metadata while this scan lists the server.
         other = Repo(repo.worktree)
         other.state.meta["owner"] = "eht"
         other.dothm.save_state(other.state)
-        return real_read(context, path)
+        return real_read(context, path, **_)
 
     monkeypatch.setattr(OperationContext, "read_text", read_text)
     with pytest.raises(ValueError, match="changed while the server was scanned"):

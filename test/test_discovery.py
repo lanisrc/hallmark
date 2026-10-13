@@ -20,7 +20,7 @@ class Source:
         if self.remote.scheme in {"http", "https"}:
             self.transport = HttpBackend(self)
 
-    def read_text(self, path):
+    def read_text(self, path, **_):
         self.reads.append(path)
         assert path in self.pages, f"Unexpected payload request: {path}"
         return self.pages[path]

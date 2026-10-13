@@ -110,7 +110,7 @@ def _read_catalog_snapshot(context):
         raise CloneError("Published catalog config.yml must contain a data mapping")
     try:
         meta_text = context.read_text("meta.yml")
-        data_text = context.read_text("data.tsv")
+        data_text = context.read_text("data.tsv", large=True)
     except RemoteObjectMissing as exc:
         raise CloneError(
             "Published Hallmark catalog is missing required metadata") from exc
@@ -124,7 +124,7 @@ def _read_catalog_snapshot(context):
              "data.tsv": data_text}
     for name in _catalog_filenames(config):
         if name not in files:
-            files[name] = context.read_text(name)
+            files[name] = context.read_text(name, large=True)
     _validate_snapshot(files, config)
     return files
 

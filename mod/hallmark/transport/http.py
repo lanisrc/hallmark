@@ -119,7 +119,7 @@ class HttpBackend(DataBackend):
                 continue
             visited.add(directory)
             self.context.check_cancelled()
-            text = self.context.read_text(directory)
+            text = self.context.read_text(directory, large=True)
             canonical = _redirected_directory(self.context, directory)
             if canonical != directory and canonical in visited:
                 continue
