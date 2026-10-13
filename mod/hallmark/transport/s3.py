@@ -13,6 +13,7 @@ import base64
 import binascii
 from threading import Lock
 
+from ..utils import names_repository_metadata
 from .base import (
     CapabilityError,
     DataBackend,
@@ -180,8 +181,7 @@ class S3Backend(DataBackend):
         # Keys ending in "/" are folder placeholders created by consoles.
         if not relative or relative.endswith("/"):
             return None
-        parts = relative.split("/")
-        if any(part.lower() in {".hm", ".git"} for part in parts):
+        if names_repository_metadata(relative):
             return None
         try:
             path = validate_remote_path(relative).as_posix()

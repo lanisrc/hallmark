@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
 
-from ..utils import is_valid_checksum
+from ..utils import is_valid_checksum, names_repository_metadata
 from .base import (
     CapabilityError,
     DownloadError,
@@ -504,7 +504,7 @@ class SshBackend(DataBackend):
                     self.context.check_cancelled()
                     if name in {".", ".."}:
                         continue
-                    if name.lower() in {".hm", ".git"}:
+                    if names_repository_metadata(name):
                         continue
                     if not name or "/" in name or name in names:
                         raise DownloadError("Invalid or duplicate SFTP directory name")

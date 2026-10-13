@@ -24,8 +24,6 @@ SOURCE_FIELDS = ("name", "remote", "root", "prefix", "fmt", "filter",
                  "server_checksum")
 SERVER_CHECKSUMS = ("md5", "sha1", "sha256", "sha512")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
-# Local folders that would place downloads inside repository metadata.
-_RESERVED_SEGMENTS = {".hm", ".git"}
 
 
 def validate_source_name(name) -> str:
@@ -88,9 +86,8 @@ class SourceSpec:
         if not isinstance(self.remote, str) or not self.remote:
             raise ValueError(f"Source {self.name!r} must name its remote")
         object.__setattr__(self, "root", _validate_folder(self.root, "Source root"))
+        # Path validation refuses .hm and .git folders at any depth.
         prefix = _validate_folder(self.prefix, "Source prefix")
-        if _RESERVED_SEGMENTS & set(prefix.split("/")):
-            raise ValueError("Source prefix cannot use .hm or .git folders")
         object.__setattr__(self, "prefix", prefix)
         if self.fmt is not None and (not isinstance(self.fmt, str)
                                      or not self.fmt.strip()):

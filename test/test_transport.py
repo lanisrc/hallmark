@@ -257,10 +257,16 @@ def test_http_error_redacts_exception_and_cause(monkeypatch, tmp_path):
         raise requests.ConnectionError("https://user:secret@example.test/?token=secret")
 
     monkeypatch.setattr(requests.Session, "get", fail)
+    repo = SimpleNamespace(objects=Objects(tmp_path / ".hm"))
+    # A URL carrying credentials is refused before any request, without echoing it.
     plan = DownloadPlan([DownloadItem("file")], "https://user:secret@example.test/data/",
                         tmp_path)
-    result = execute_download_plan(
-        SimpleNamespace(objects=Objects(tmp_path / ".hm")), plan, approved=True)
+    with pytest.raises(RemoteConfigurationError, match="credentials") as error:
+        execute_download_plan(repo, plan, approved=True)
+    assert "secret" not in str(error.value)
+    # A request that fails reports neither the URL nor the exception's text.
+    plan = DownloadPlan([DownloadItem("file")], "https://example.test/data/", tmp_path)
+    result = execute_download_plan(repo, plan, approved=True)
     assert result["failed"] == 1
     assert "secret" not in "".join(result["errors"])
 

@@ -345,6 +345,8 @@ class RemoteSpec:
                     "SSH root must be absolute, without traversal or backslashes"
                 )
         else:
+            # Catalogues are shared, so their URLs must hold no secret.
+            reject_url_secrets(url)
             # Whether a backend accepts the profile is checked when it is used.
             root, user = parsed.path, None
         return cls(url, scheme, host, root, user, port, auth,

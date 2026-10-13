@@ -793,3 +793,48 @@ def test_a_legacy_catalogue_with_several_remotes_is_left_as_it_was(
     assert "predates sources" in result["staging_note"]
     assert not legacy.dothm.index.diff("HEAD")
     assert "sha1" not in Repo(legacy.worktree).state.data.columns
+
+
+@pytest.mark.parametrize("path", [
+    "x/.git/config", "x/.GIT/hooks/post-checkout", "a/b/.hm/data.tsv", ".Hm/x"])
+def test_catalogue_rows_cannot_plant_repository_metadata(tmp_path, path):
+    from hallmark.utils import validate_relative_path
+
+    with pytest.raises(ValueError, match="repository metadata"):
+        validate_relative_path(path)
+    repo = Repo.init(tmp_path / "data")
+    repo.state.config = {"data": [{"db": "data.tsv"}],
+                         "remote": [{"name": "origin", "url": ROOT}],
+                         "sources": [{"name": "origin", "remote": "origin"}]}
+    repo.state.data = __import__("pandas").DataFrame(
+        {"path": [path], "source": ["origin"]})
+    with pytest.raises(Exception, match="repository metadata"):
+        repo.plan_download(all_files=True)
+
+
+def test_source_prefixes_cannot_name_metadata_in_any_case(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    with pytest.raises(ValueError, match="repository metadata"):
+        repo.add(ROOT, filter="*.fits", prefix="data/.Git")
+    assert repo.state.data.empty
+
+
+@pytest.mark.parametrize("url", [
+    "https://user:secret@example.test/data/",
+    "https://example.test/data/?sig=secret",
+    "https://example.test/data/#secret",
+])
+def test_remote_urls_with_secrets_are_refused_wherever_they_come_from(
+        tmp_path, url):
+    from hallmark.repo.config import normalize_remotes
+    from hallmark.transport import RemoteSpec
+
+    with pytest.raises(ValueError) as error:
+        RemoteSpec.from_url(url)
+    assert "secret" not in str(error.value)
+    # A configuration written by hand or received in a clone is checked too.
+    with pytest.raises(ValueError):
+        normalize_remotes([{"name": "origin", "url": url}])
+    with pytest.raises(ValueError):
+        Repo.clone(url, tmp_path / "copy", download=False)
+    assert not (tmp_path / "copy").exists()

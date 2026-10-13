@@ -23,7 +23,8 @@ from ..repo.config import (
 )
 from ..transport import OperationContext, RemoteSpec
 from ..transport.base import (
-    RemoteObjectMissing, reject_url_credentials, validate_remote_path)
+    RemoteObjectMissing, reject_url_credentials, reject_url_secrets,
+    validate_remote_path)
 from ..repo.worktree import Worktree
 from .sources import normalize_sources
 
@@ -197,7 +198,11 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
         DownloadError: If remote metadata cannot be read or validated.
     """
     # Git records the source URL in .hm/.git/config, so it must hold no secret.
-    reject_url_credentials(str(url))
+    # Local paths may contain "?" or "#"; only URLs carry queries and fragments.
+    if "://" in str(url):
+        reject_url_secrets(str(url))
+    else:
+        reject_url_credentials(str(url))
     destination = Path(path).expanduser().absolute()
     if destination.exists() or destination.is_symlink():
         raise DestinationExistsError(

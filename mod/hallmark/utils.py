@@ -491,6 +491,20 @@ def convert_format_value(value: str, spec: str):
     return value
 
 
+def names_repository_metadata(path) -> bool:
+    """
+    Return whether any segment of a relative path is ``.hm`` or ``.git``.
+
+    Case is ignored, as on macOS and Windows filesystems, so ``data/.Git``
+    counts too. Every check for repository metadata in paths uses this.
+
+    Args:
+        path: Relative path with ``/`` separators.
+    """
+    return any(part.lower() in REPOSITORY_INTERNAL_NAMES
+               for part in str(path).split("/"))
+
+
 def validate_relative_path(value, *, label: str = "path") -> Path:
     """
     Used in repo.config by row_to_path, transport.base by validate_remote_path,
@@ -534,8 +548,8 @@ def validate_relative_path(value, *, label: str = "path") -> Path:
         # invalid path: raise ValueError indicating it must be a safe relative path
         raise ValueError(
             f"{label} must be a safe relative path: {raw_path!r}")
-    # if the path starts with ".hm" or ".git"
-    if (path.parts and path.parts[0].lower() in REPOSITORY_INTERNAL_NAMES):
+    # A .hm or .git folder at any depth would plant repository metadata.
+    if names_repository_metadata(raw_path):
         # raise ValueError to prevent targeting repository metadata
         raise ValueError(
             f"{label} cannot target repository metadata: {raw_path!r}")
