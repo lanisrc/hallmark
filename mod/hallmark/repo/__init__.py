@@ -29,7 +29,6 @@ from .dothm import Dothm
 from .state import State, is_remote_catalog
 from .worktree import Worktree
 from .objects import Objects
-from .cache import Cache
 from ..paraframe import ParaFrame
 from .manifest import build_file_table, file_versions_by_path, iter_manifest_entries
 from .history import (
@@ -99,10 +98,9 @@ class Repo:
         self.state = self.dothm.load_state()
         self.download_result = None
 
+        # Linked worktrees share the main repository's object store.
         common = Path(self.dothm.common_dir).resolve().parent
         self.objects = Objects(common)
-        # Linked worktrees share the main repository's download cache.
-        self.cache = Cache(common)
         dothm_objects = Path(dothm_path) / "objects"
         main_objects = common / "objects"
         if dothm_objects.resolve() != main_objects.resolve() \
@@ -682,7 +680,7 @@ class Repo:
         for diff in self.dothm.index.diff(None):
             path = diff.a_path or diff.b_path
             if not path or Path(path).parts[0] in {
-                "objects", "cache", "versions", "versions.yml"
+                "objects", "versions", "versions.yml"
             }:
                 continue
             if diff.deleted_file:
@@ -885,7 +883,7 @@ class Repo:
                     relative, label="restore path"
                 )
                 if relative.parts[0] in {
-                    "objects", "cache", "versions", "versions.yml"
+                    "objects", "versions", "versions.yml"
                 }:
                     raise ValueError(
                         "Use dataset paths to restore file versions"

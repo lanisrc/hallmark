@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from hallmark.remote.plan import DownloadItem, DownloadPlan
+from hallmark.repo.objects import Objects
 from hallmark.remote.download import (
     DownloadError,
     execute_download_plan,
@@ -30,6 +31,7 @@ def catalog(tmp_path):
     frame.to_csv(metadata / "data.tsv", sep="\t", index=False)
     return SimpleNamespace(
         dothm=SimpleNamespace(path=metadata), worktree=tmp_path,
+        objects=Objects(metadata),
         state=SimpleNamespace(data=frame, config={
             "data": [{"db": "data.tsv"}],
             "remote": {"name": "origin", "url": "https://source.test/data/"},
@@ -254,9 +256,9 @@ def test_plan_pins_backend_and_nested_options_without_loading_plugin(
 
     def download(source, *args, **kwargs):
         captured.append(source)
-        return {"succeeded": 1, "failed": 0, "total_bytes": 6, "errors": []}
 
-    monkeypatch.setattr("hallmark.remote.download._download_selected", download)
+    monkeypatch.setattr("hallmark.remote.download._download_selected_into_store",
+                        download)
     execute_download_plan(catalog, plan, approved=True)
     assert captured[0].backend == "external-survey"
     assert captured[0].backend_options["servers"][0]["url"] == \

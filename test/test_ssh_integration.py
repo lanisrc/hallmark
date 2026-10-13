@@ -438,7 +438,7 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
             [(Path("large"), None)])
         try:
             # Partial transfers live in the cache, never in the worktree.
-            _wait_for_partial_file(repo.cache.tmp, ".large.*", len(payload), task)
+            _wait_for_partial_file(repo.objects.tmp, ".large.*", len(payload), task)
             destination.write_bytes(b"original")
             assert len(transports) == 1
             transports[0]._master.terminate()
@@ -448,7 +448,7 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
                 transport.context.cancel()
     assert result["failed"] == 1
     assert destination.read_bytes() == b"original"
-    assert list(repo.cache.tmp.iterdir()) == []
+    assert list(repo.objects.tmp.iterdir()) == []
     assert sorted(path.name for path in repo.worktree.iterdir()) == [".hm", "large"]
     assert not transports[0]._processes
 

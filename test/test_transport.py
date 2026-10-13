@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 from urllib.parse import quote
 
 import pytest
@@ -18,6 +19,7 @@ import yaml
 from hallmark import Repo
 from hallmark.remote.plan import DownloadItem, DownloadPlan
 from hallmark.remote.download import execute_download_plan
+from hallmark.repo.objects import Objects
 from conftest import download_selection
 from hallmark.remote.discovery import discover_remote_files
 from hallmark.repo.config import normalize_remotes
@@ -257,7 +259,8 @@ def test_http_error_redacts_exception_and_cause(monkeypatch, tmp_path):
     monkeypatch.setattr(requests.Session, "get", fail)
     plan = DownloadPlan([DownloadItem("file")], "https://user:secret@example.test/data/",
                         tmp_path)
-    result = execute_download_plan(None, plan, approved=True)
+    result = execute_download_plan(
+        SimpleNamespace(objects=Objects(tmp_path / ".hm")), plan, approved=True)
     assert result["failed"] == 1
     assert "secret" not in "".join(result["errors"])
 

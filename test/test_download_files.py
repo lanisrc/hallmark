@@ -163,7 +163,7 @@ def test_file_created_during_transfer_is_not_overwritten(download_repo):
     assert target.read_bytes() == b'created during transfer'
     assert sorted(path.name for path in target.parent.iterdir()) == ['a.txt']
     # The verified download stays cached for a later run.
-    assert repo.cache.contains(sha1(b'first').hexdigest())
+    assert repo.objects.contains(sha1(b'first').hexdigest())
 
 
 @pytest.mark.parametrize('kind', ['directory', 'parent_file', 'unknown_checksum'])

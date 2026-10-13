@@ -1402,8 +1402,8 @@ def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
     assert captured == ["https://example.com/data/a0_i0.h5"]
     downloaded = clone.worktree / "a0_i0.h5"
     assert downloaded.read_text(encoding="utf-8") == "a0_i0.h5\n"
-    # The file is the cached object, verified against the catalogued SHA-1.
-    assert clone.cache.is_linked(expected_sha1, downloaded)
+    # The file is the stored object, verified against the catalogued SHA-1.
+    assert clone.objects.is_linked(expected_sha1, downloaded)
     assert clone.download_result["succeeded"] == 1
     assert clone.download_result["failed"] == 0
 
@@ -1419,7 +1419,7 @@ def test_repo_clone_can_skip_remote_data_download(monkeypatch, tmp_path):
         raise AssertionError("download should not be attempted")
 
     monkeypatch.setattr(
-        "hallmark.remote.download._download_and_verify_file", fail_download
+        "hallmark.remote.download._download_into_store", fail_download
     )
 
     clone = Repo.clone(str(source.dothm.path), tmp_path / "clone", download=False)
@@ -1866,6 +1866,7 @@ def test_object_store_rejects_corrupted_object_during_restore(tmp_path):
     source.write_text("original\n", encoding="utf-8")
     sha1 = Repo.checksum(source)
     stored = objects.store(source, sha1)
+    stored.chmod(0o644)
     stored.write_text("corrupted\n", encoding="utf-8")
     destination = tmp_path / "destination.dat"
     destination.write_text("existing\n", encoding="utf-8")

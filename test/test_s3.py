@@ -88,11 +88,11 @@ def test_add_and_download_verify_through_the_cache(s3, tmp_path):
     assert (result["succeeded"], result["failed"]) == (3, 0)
     assert (repo.worktree / "a.h5").read_bytes() == b"alpha"
     assert (repo.worktree / "other/c.h5").read_bytes() == b"charlie"
-    assert repo.cache.is_linked(hashlib.sha1(b"alpha").hexdigest(),
+    assert repo.objects.is_linked(hashlib.sha1(b"alpha").hexdigest(),
                                 repo.worktree / "a.h5")
     s3.put_object(Bucket=BUCKET, Key="m87/a.h5", Body=b"ALPHA")
     (repo.worktree / "a.h5").unlink()
-    repo.cache.object_path(hashlib.sha1(b"alpha").hexdigest()).unlink()
+    repo.objects.object_path(hashlib.sha1(b"alpha").hexdigest()).unlink()
     result = repo.download(repo.plan_download(file_paths=["a.h5"]), approved=True)
     assert result["failed"] == 1 and "a.h5 (sha256)" in result["errors"][0]
 

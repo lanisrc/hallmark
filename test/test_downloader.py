@@ -14,9 +14,10 @@ from hallmark.remote.download import (
     _select_download_items,
     execute_download_plan,
     plan_download,
-    _verify_file_checksum,
     _checksum_from_config)
 from hallmark.remote.plan import DownloadPlan
+from hallmark.repo.objects import Objects
+from hallmark.utils import calculate_file_checksums
 from hallmark.transport.base import RemoteSpec, validate_remote_path
 from conftest import download_selection
 from mock_server import MockServer
@@ -46,6 +47,22 @@ class _Response:
         return iter(self.chunks)
 
 
+def _fake_store_download(calls, size, failing=()):
+    """
+    Replace the download of one plan item through the object store.
+
+    Each call records the URL, destination and checksum the real transfer would
+    use, then reports the item as placed without touching the network.
+    """
+    def download(context, store, item, chunk_size):
+        url = context.remote.file_url(item.source_path.as_posix())
+        calls.append((url, context.output_root / item.relative_path, item.checksum))
+        if item.relative_path.name in failing:
+            raise DownloadError("bad download")
+        return size, [(item, "0" * 40, "linked", None)]
+    return download
+
+
 def _selected(repo, **kwargs):
     return [(item.relative_path, item.checksum)
             for item in _select_download_items(repo, **kwargs)]
@@ -66,6 +83,7 @@ def _repo(tmp_path, config=None, data=None):
     dothm_path.mkdir()
     return SimpleNamespace(
         dothm=SimpleNamespace(path=dothm_path),
+        objects=Objects(dothm_path),
         state=SimpleNamespace(
             config={} if config is None else config,
             data=pd.DataFrame() if data is None else data))
@@ -348,23 +366,16 @@ def test_download_builds_urls_and_destinations_from_fmt(
     """
     Test that the download constructs the correct URLs and destination paths
     based on the data format configuration and the row data, and that it calls
-    _download_and_verify_file with the expected arguments.
+    _download_into_store with the expected arguments.
     Args:
         monkeypatch: A pytest fixture for monkeypatching.
         tmp_path: A pytest fixture providing a temporary directory.
     """
-    captured = {}
-    def fake_fetch_file(context, relative_path, destination, sha1, chunk_size,
-                 **kwargs):
-        url = context.remote.file_url(relative_path.as_posix())
-        """A fake _download_and_verify_file function that records its arguments"""
-        captured.setdefault("files", []).append((url, destination, sha1))
-        return 123
-
-    monkeypatch.setattr(
-        "hallmark.remote.download._download_and_verify_file", fake_fetch_file
-    )
+    captured = {"files": []}
+    monkeypatch.setattr("hallmark.remote.download._download_into_store",
+                        _fake_store_download(captured["files"], 123))
     repo = SimpleNamespace(
+        objects=Objects(tmp_path / ".hm"),
         state=SimpleNamespace(
             config={
                 "data": [{
@@ -462,19 +473,8 @@ def test_download_aggregates_successes_and_failures(monkeypatch, tmp_path):
                 {"name": "origin", "url": "https://origin.test/data"},
                 {"name": "mirror", "url": "https://mirror.test/base/"}]})
     calls = []
-    def fake_download(context, relative_path, destination, sha1, chunk_size,
-                 **kwargs):
-        url = context.remote.file_url(relative_path.as_posix())
-        """A fake _download_and_verify_file function that records its arguments and
-        simulates a failure for a specific file"""
-        calls.append((url, destination, sha1))
-        if destination.name == "bad.bin":
-            raise DownloadError("bad download")
-        return 7
-
-    monkeypatch.setattr(
-        "hallmark.remote.download._download_and_verify_file", fake_download
-    )
+    monkeypatch.setattr("hallmark.remote.download._download_into_store",
+                        _fake_store_download(calls, 7, failing={"bad.bin"}))
     result = download_selection(
         repo,
         tmp_path,
@@ -500,7 +500,7 @@ def test_download_aggregates_successes_and_failures(monkeypatch, tmp_path):
             None,
         ),
     }, (
-        f"Expected calls to _download_and_verify_file to match the selected files, \
+        f"Expected calls to _download_into_store to match the selected files, \
                 but got {calls}"
     )
 
@@ -603,17 +603,8 @@ def test_download_deduplicates_selected_paths(monkeypatch, tmp_path):
                 "name": "origin",
                 "url": "https://example.test/data"}})
     calls = []
-    def fake_download(context, relative_path, destination, checksum, chunk_size,
-                 **kwargs):
-        url = context.remote.file_url(relative_path.as_posix())
-        """A fake _download_and_verify_file function that records its arguments and
-        simulates a download."""
-        calls.append((url, destination, checksum))
-        return 4
-
-    monkeypatch.setattr(
-        "hallmark.remote.download._download_and_verify_file", fake_download
-    )
+    monkeypatch.setattr("hallmark.remote.download._download_into_store",
+                        _fake_store_download(calls, 4))
     result = download_selection(
         repo,
         tmp_path,
@@ -754,16 +745,8 @@ def test_download_deduplicates_equivalent_checksum_tuples(
                 "name": "origin",
                 "url": "https://example.test/data"}})
     calls = []
-    def fake_download(context, relative_path, destination, checksum, chunk_size,
-                 **kwargs):
-        url = context.remote.file_url(relative_path.as_posix())
-        """Record download requests and return a fixed byte count."""
-        calls.append((url, destination, checksum))
-        return 11
-
-    monkeypatch.setattr(
-        "hallmark.remote.download._download_and_verify_file", fake_download
-    )
+    monkeypatch.setattr("hallmark.remote.download._download_into_store",
+                        _fake_store_download(calls, 11))
     checksum_upper = ("SHA256", "A" * 64)
     checksum_lower = ("sha256", "a" * 64)
     result = download_selection(
@@ -1237,7 +1220,7 @@ def test_remote_file_url_escapes_filename_characters():
 @pytest.mark.parametrize("algorithm", ["md5", "sha1", "sha256", "sha512"])
 def test_verify_checksum_supports_builder_algorithms(tmp_path, algorithm):
     """
-    Test that _verify_file_checksum correctly computes and verifies checksums
+    Test that calculate_file_checksums correctly computes the checksums
     using various algorithms supported by hashlib, ensuring that the function can
     handle different checksum types as specified in the repo's configuration.
     Args:
@@ -1249,7 +1232,7 @@ def test_verify_checksum_supports_builder_algorithms(tmp_path, algorithm):
     path.write_bytes(content)
     expected = hashlib.new(algorithm, content).hexdigest()
 
-    _verify_file_checksum(path, (algorithm, expected), chunk_size=2)
+    assert calculate_file_checksums(path, {algorithm}, 2)[algorithm] == expected
 
 
 def test_entry_checksum_prefers_strongest_named_checksum():

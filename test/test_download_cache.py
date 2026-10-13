@@ -1,4 +1,4 @@
-"""Downloads pass through .hm/cache: Worktree <-> Cache <-> State <-> Dothm."""
+"""Downloads pass through .hm/objects: Worktree <-> Objects <-> State <-> Dothm."""
 
 import errno
 import hashlib
@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from hallmark import Repo
-from hallmark.repo import cache as cache_module
+from hallmark.repo import objects as objects_module
 from hallmark.transport import OperationContext
 from hallmark.transport.base import RemoteObjectMissing
 from hallmark.transport.http import HttpBackend
@@ -63,11 +63,11 @@ def test_downloads_are_read_only_links_to_cached_objects(repo, server):
     for name, data in FILES.items():
         path = repo.worktree / name
         assert path.read_bytes() == data
-        assert repo.cache.is_linked(sha1(data), path)
+        assert repo.objects.is_linked(sha1(data), path)
         assert not os.stat(path).st_mode & stat.S_IWUSR
     # Identical content is stored once and linked twice.
-    assert repo.cache.object_path(sha1(b"alpha")).stat().st_nlink == 3
-    assert list(repo.cache.tmp.iterdir()) == []
+    assert repo.objects.object_path(sha1(b"alpha")).stat().st_nlink == 3
+    assert list(repo.objects.tmp.iterdir()) == []
     assert sorted(p.name for p in repo.worktree.iterdir()) == [
         ".hm", "a.fits", "b.fits", "c.fits"]
 
@@ -100,7 +100,7 @@ def test_known_content_is_placed_from_the_cache(repo, server):
     assert result["from_cache"] == ["b.fits"]
     assert result["succeeded"] == 1
     assert fetched == []
-    assert repo.cache.is_linked(sha1(b"bravo"), repo.worktree / "b.fits")
+    assert repo.objects.is_linked(sha1(b"bravo"), repo.worktree / "b.fits")
 
 
 def test_a_vanished_cached_object_is_not_fetched_without_approval(repo, server):
@@ -110,7 +110,7 @@ def test_a_vanished_cached_object_is_not_fetched_without_approval(repo, server):
     download(repo)
     (repo.worktree / "b.fits").unlink()
     plan = repo.plan_download(all_files=True)
-    obj = repo.cache.object_path(sha1(b"bravo"))
+    obj = repo.objects.object_path(sha1(b"bravo"))
     obj.unlink()
     fetched.clear()
     result = repo.download(plan, approved=True)
@@ -129,14 +129,14 @@ def test_files_are_copied_where_links_are_unavailable(repo, server, monkeypatch)
             raise OSError(errno.EXDEV, "Invalid cross-device link")
         return real_link(source, destination)
 
-    monkeypatch.setattr(cache_module.os, "link", link)
+    monkeypatch.setattr(objects_module.os, "link", link)
     _, result = download(repo, file_paths=["a.fits"])
     assert result["copied"] == ["a.fits"]
     path = repo.worktree / "a.fits"
     assert path.read_bytes() == b"alpha"
     assert os.stat(path).st_mode & stat.S_IWUSR
-    assert not repo.cache.is_linked(sha1(b"alpha"), path)
-    assert repo.cache.contains(sha1(b"alpha"))
+    assert not repo.objects.is_linked(sha1(b"alpha"), path)
+    assert repo.objects.contains(sha1(b"alpha"))
 
 
 def test_foreign_files_without_a_digest_block_the_download(repo, server):
@@ -148,13 +148,13 @@ def test_foreign_files_without_a_digest_block_the_download(repo, server):
 
 
 def test_stale_temporary_files_are_swept_before_downloading(repo, server):
-    repo.cache.tmp.mkdir(parents=True)
-    stale = repo.cache.tmp / ".a.fits.crashed"
+    repo.objects.tmp.mkdir(parents=True)
+    stale = repo.objects.tmp / ".a.fits.crashed"
     stale.write_bytes(b"alp")
-    old = stale.stat().st_mtime - cache_module.STALE_TEMP_SECONDS - 60
+    old = stale.stat().st_mtime - objects_module.STALE_TEMP_SECONDS - 60
     os.utime(stale, (old, old))
     download(repo, file_paths=["a.fits"])
-    assert list(repo.cache.tmp.iterdir()) == []
+    assert list(repo.objects.tmp.iterdir()) == []
 
 
 def test_interrupted_transfers_leave_nothing_in_the_worktree(repo, server,
@@ -167,14 +167,14 @@ def test_interrupted_transfers_leave_nothing_in_the_worktree(repo, server,
     with pytest.raises(KeyboardInterrupt):
         download(repo, file_paths=["a.fits"])
     assert sorted(p.name for p in repo.worktree.iterdir()) == [".hm"]
-    assert list(repo.cache.tmp.iterdir()) == []
-    assert not repo.cache.contains(sha1(b"alpha"))
+    assert list(repo.objects.tmp.iterdir()) == []
+    assert not repo.objects.contains(sha1(b"alpha"))
 
 
 def test_output_folders_also_link_to_the_cache(repo, server, tmp_path):
     plan = repo.plan_download(tmp_path / "elsewhere", all_files=True)
     repo.download(plan, approved=True)
-    assert repo.cache.is_linked(sha1(b"bravo"), tmp_path / "elsewhere" / "b.fits")
+    assert repo.objects.is_linked(sha1(b"bravo"), tmp_path / "elsewhere" / "b.fits")
 
 
 def test_downloads_stage_each_files_sha1_for_commit(repo, server):
@@ -185,9 +185,11 @@ def test_downloads_stage_each_files_sha1_for_commit(repo, server):
     assert dict(zip(repo.state.data.path, repo.state.data.sha1)) == expected
     saved = Repo(repo.worktree)
     assert dict(zip(saved.state.data.path, saved.state.data.sha1)) == expected
+    stored = sorted(repo.objects.root.rglob("*"))
     assert repo.commit("Record downloaded content")
     assert Repo(repo.worktree).status()["staged"]["modified"] == []
-    assert not repo.objects.root.exists()
+    # Committing a remote catalogue stores nothing beyond the downloads.
+    assert sorted(repo.objects.root.rglob("*")) == stored
     # Later runs skip the linked files without hashing them.
     import hallmark.remote.download as module
 
