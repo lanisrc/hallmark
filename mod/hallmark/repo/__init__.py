@@ -235,13 +235,15 @@ class Repo:
             Worktree.init(worktree_path)
         return cls(path)
 
-    def _download_cloned_files(self, *, approve, max_workers, progress,
+    def _download_cloned_files(self, *, approve, approved, max_workers, progress,
                                  filter=None, fmt=None):
         """Run an approved transfer after catalog creation has completed."""
         from ..remote.download import DownloadError
 
         plan = self.plan_download(filter=filter, fmt=fmt)
-        if plan.file_count and approve is not None and not approve(plan):
+        # As for Repo.download, files are only transferred with approval.
+        if plan.file_count and not (
+                approved is True or (approve is not None and approve(plan))):
             return
         self.download_result = self.download(
             plan, approved=True, max_workers=max_workers, progress=progress)
@@ -266,15 +268,17 @@ class Repo:
         progress: bool = False,
         download: bool = True,
         approve=None,
+        approved: bool = False,
         max_workers: int = 4,
     ) -> "Repo":
         """
         Clone an existing Hallmark Git catalog or published snapshot.
 
         Git sources retain their history. Published catalog snapshots
-        start new local history. Dataset files download by default after
-        catalog creation, without prompting unless an approval callback is supplied.
-        Declining approval leaves the catalog available without dataset files.
+        start new local history. After the catalog is created, dataset files
+        are downloaded only with approval, as ``Repo.download`` requires:
+        ``approve(plan)`` returning True, or ``approved=True``. Without
+        approval, or when it is declined, the catalog is kept without files.
         Nonempty catalogs without a data server are rejected before creating
         the destination. Empty repositories can be cloned.
 
@@ -294,8 +298,9 @@ class Repo:
             download (bool): Request downloads after preparing the catalog.
                 Defaults to True. Bare destinations require ``download=False``.
             approve (callable, optional): Called with a nonempty download plan.
-                Return True to permit the transfer. Without a callback,
-                downloads proceed without prompting. Declining keeps the catalog.
+                Return True to permit the transfer. Declining keeps the catalog.
+            approved (bool): Permit the transfer without a callback, as
+                ``Repo.download(plan, approved=True)`` does. Defaults to False.
             max_workers (int): Maximum download workers. Defaults to 4.
 
         Returns:
@@ -324,8 +329,8 @@ class Repo:
         repo = clone_catalog(cls, url, path, auth=auth, source_type=source_type)
         if download:
             repo._download_cloned_files(
-                approve=approve, max_workers=max_workers, progress=progress,
-                filter=filter, fmt=fmt)
+                approve=approve, approved=approved, max_workers=max_workers,
+                progress=progress, filter=filter, fmt=fmt)
         return repo
 
     def plan_download(self, output_path=None, *, file_paths=None, tsv_names=None,

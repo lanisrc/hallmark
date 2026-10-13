@@ -25,7 +25,7 @@ from git.exc import GitError
 from . import Repo
 from .remote.download import DownloadError
 from .remote.discovery import path_matches
-from .error import CheckoutError, CloneError
+from .error import CheckoutError, CloneError, HallmarkError
 from .utils import CHECKSUM_ALGORITHMS
 
 
@@ -156,7 +156,25 @@ def _run_download(repo, plan, *, max_workers):
     _report_download_results(results)
 
 
-@click.group(name="hm")
+# Errors a user causes or can fix, such as a typo in config.yml, a missing
+# file, a full disk or a git failure. Every command reports them in one line;
+# anything else is a bug and keeps its traceback.
+_USER_ERRORS = (HallmarkError, GitError, OSError, yaml.YAMLError, ValueError)
+
+
+class _HallmarkGroup(click.Group):
+    """Report user-fixable errors from any command without a traceback."""
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except (click.exceptions.Exit, click.exceptions.Abort, ClickException):
+            raise
+        except _USER_ERRORS as exc:
+            raise ClickException(str(exc) or type(exc).__name__) from exc
+
+
+@click.group(name="hm", cls=_HallmarkGroup)
 @click.version_option()
 @click.pass_context
 def hallmark(ctx):
@@ -170,7 +188,8 @@ def hallmark(ctx):
         # return early without attempting to open a repository
         return
     # attempt to open the hallmark repository in the current directory
-    with _translate_cli_errors(GitError, prefix="Failed to open hallmark repository"):
+    with _translate_cli_errors(*_USER_ERRORS,
+                               prefix="Failed to open hallmark repository"):
         # cwd is the current working directory
         cwd = Path.cwd()
         # start with the current working directory as the default repository path

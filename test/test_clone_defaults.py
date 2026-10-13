@@ -36,10 +36,20 @@ def clone_source(tmp_path, monkeypatch):
     return source, calls, server
 
 
-def test_python_clone_downloads_by_default(clone_source, tmp_path):
+def test_python_clone_downloads_nothing_without_approval(clone_source, tmp_path):
     source, calls, server = clone_source
     target = tmp_path / 'copy'
     repo = Repo.clone(str(source.dothm.path), target)
+    # As with Repo.download, a transfer needs approval; the catalogue is kept.
+    assert repo.download_result is None
+    assert calls == [] and not (target / 'item1.txt').exists()
+    assert repo.dothm.head.commit.hexsha == source.dothm.head.commit.hexsha
+
+
+def test_python_clone_downloads_when_approved(clone_source, tmp_path):
+    source, calls, server = clone_source
+    target = tmp_path / 'copy'
+    repo = Repo.clone(str(source.dothm.path), target, approved=True)
     assert (target / 'item1.txt').read_bytes() == b'science'
     assert repo.state.data.iloc[0]['sha1'] == sha1(b'science').hexdigest()
     assert repo.download_result['succeeded'] == 1
@@ -175,7 +185,7 @@ def test_clone_download_failure_keeps_catalog_and_valid_files(
         message = result.output
     else:
         with pytest.raises(DownloadError) as error:
-            Repo.clone(str(source.dothm.path), target)
+            Repo.clone(str(source.dothm.path), target, approved=True)
         message = str(error.value)
     assert 'Failed to download 1 file(s)' in message
     assert 'Checksum mismatch' in message

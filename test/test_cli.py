@@ -1265,3 +1265,24 @@ def test_cli_set_config_and_add_dot():
                 "Expected remote URL in config"
             assert r"aspin: m([0-9]+(\.[0-9]+)?|\.[0-9]+)" in config, \
                 "Expected encoding regex in config"
+
+
+def test_user_errors_are_reported_without_a_traceback(tmp_path, monkeypatch):
+    repo = Repo.init(tmp_path / "repo")
+    monkeypatch.chdir(repo.worktree)
+    (repo.dothm.path / "config.yml").write_text("data: [unclosed\n")
+    result = CliRunner().invoke(hallmark, ["status"])
+    assert result.exit_code == 1
+    assert result.output.startswith("Error: Failed to open hallmark repository:")
+    assert isinstance(result.exception, SystemExit)
+
+    (repo.dothm.path / "config.yml").write_text("data: []\n")
+
+    def full_disk(self, message, allow_empty=False):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Repo, "commit", full_disk)
+    result = CliRunner().invoke(hallmark, ["commit", "-m", "Full"])
+    assert result.exit_code == 1
+    assert "No space left on device" in result.output
+    assert isinstance(result.exception, SystemExit)
