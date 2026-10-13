@@ -670,3 +670,26 @@ def test_equal_contents_at_different_paths_stay_independent(local_repo):
     assert changed[paths[0]] != versions[paths[0]]
     assert changed[paths[1]] == versions[paths[1]]
     _assert_status(repo, state=["data.tsv"], modified=[paths[0]])
+
+
+def test_a_source_field_keeps_a_catalogue_of_local_files(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    path = repo.worktree / "SR1_M87_2017.uvfits"
+    path.write_text("visibilities\n", encoding="utf-8")
+    repo.add("{release}_{source}_{year}.uvfits")
+    assert repo.commit("Local data")
+    # The commit stored the file; a remote catalogue would have stored nothing.
+    assert repo.objects.checksums() == [Repo.checksum(path)]
+    path.write_text("edited\n", encoding="utf-8")
+    assert repo.status()["worktree"]["modified"] == ["SR1_M87_2017.uvfits"]
+
+
+@pytest.mark.parametrize("field", ["sha1", "checksum", "size_bytes", "mtime", "md5"])
+def test_local_patterns_cannot_reuse_catalogue_columns(tmp_path, field):
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "x_1.h5").write_text("one\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=f"Rename the pattern field.*{field}"):
+        repo.add(f"x_{{{field}}}.h5")
+    with pytest.raises(ValueError, match="Rename the pattern field"):
+        repo.set_config(fmt=f"x_{{{field}}}.h5")
+    assert repo.state.data.empty

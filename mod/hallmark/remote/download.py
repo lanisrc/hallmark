@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -16,7 +17,7 @@ import pandas as pd
 from ..transport import OperationContext, RemoteSpec
 from ..transport.base import DownloadError, validate_remote_path
 from .plan import DownloadItem, DownloadPlan
-from .sources import effective_sources
+from .sources import effective_sources, materialize_sources
 from ..repo.state import is_remote_catalog
 from ..utils import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
@@ -1105,12 +1106,26 @@ def _stage_download_sha1(repo, plan, sha1_by_path, results) -> None:
     Only remote catalogue rows without a SHA-1 are updated, and only while
     their catalogued digest still matches the plan; the change is staged,
     not committed. A failure to save is reported in ``staging_error``.
+
+    A catalogue written before sources existed is given its source first,
+    as ``hm add URL`` does: with a ``sha1`` column and no sources it would
+    look like a catalogue of local files. One naming several remotes cannot
+    say which remote each row came from, so its SHA-1s are not recorded and
+    ``staging_note`` says why.
     """
     if not sha1_by_path:
         return
-    state = repo.state
-    if not is_remote_catalog(state) or "path" not in state.data.columns:
+    if not is_remote_catalog(repo.state) or "path" not in repo.state.data.columns:
         return
+    state = deepcopy(repo.state)
+    upgraded = False
+    if "sha1" not in state.data.columns and "sources" not in state.config:
+        if not materialize_sources(state):
+            results["staging_note"] = (
+                "SHA-1s not recorded: this catalog predates sources and names "
+                "several remotes; update it with hm add URL first")
+            return
+        upgraded = True
     planned = {item.relative_path.as_posix(): item for item in
                plan.items + plan.stored_items + plan.skipped_items}
     data = state.data.copy()
@@ -1139,7 +1154,10 @@ def _stage_download_sha1(repo, plan, sha1_by_path, results) -> None:
             f"Downloaded files are in place, but their SHA-1 could not be "
             f"recorded: {exc}")
         return
+    repo.state = state
     results["staged"] = updates
+    if upgraded:
+        results["catalog_upgraded"] = True
 
 
 def _transfer_by_remote(plan, items, results, store, *, max_workers,

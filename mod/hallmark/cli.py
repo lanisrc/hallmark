@@ -86,9 +86,13 @@ def _report_download_results(results: dict) -> None:
         click.echo("Copied instead of linked (links unavailable):")
         for path in copied[:10]:
             click.echo(f"  {path}")
+    if results.get("catalog_upgraded"):
+        click.echo("Recorded this older catalog's source, as hm add URL does")
     if results.get("staged"):
         click.echo(f"Staged SHA-1 for {results['staged']} file(s); "
                    "run hm commit to record them")
+    if results.get("staging_note"):
+        click.echo(results["staging_note"])
     if results.get("staging_error"):
         click.echo(results["staging_error"], err=True)
         click.echo("Run hm download again; no transfer is needed.", err=True)

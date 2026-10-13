@@ -59,18 +59,20 @@ def is_remote_catalog(state) -> bool:
     """
     Return whether a state catalogs files on a data server.
 
-    Remote catalogue rows record their ``source`` and are keyed by ``path``;
-    their ``sha1``, when known, describes downloaded content rather than a
+    A remote catalogue records its ``sources`` in ``config.yml``; its rows'
+    ``sha1``, when known, describes downloaded content rather than a
     committed object. Catalogues written before sources existed are
-    recognized by a ``path`` column without ``sha1``.
+    recognized by a ``path`` column without ``sha1``, and are given their
+    sources before a ``sha1`` column is ever added. Column names alone never
+    decide: a local filename pattern may have a ``{source}`` field.
 
     Args:
         state (State): Repository state to classify.
     """
     config = state.config if isinstance(state.config, dict) else {}
-    columns = state.data.columns
-    if config.get("sources") or "source" in columns:
+    if isinstance(config.get("sources"), list):
         return True
+    columns = state.data.columns
     return "path" in columns and "sha1" not in columns
 
 

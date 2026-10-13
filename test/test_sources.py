@@ -175,7 +175,8 @@ def test_rows_of_selects_rows_by_source():
     ({}, ["path", "checksum"], True),
     ({}, ["sha1", "path", "x"], False),
     ({}, ["sha1", "x"], False),
-    ({}, ["path", "sha1", "source"], True),
+    # A {source} field in a local pattern does not make a catalogue remote.
+    ({}, ["path", "sha1", "source"], False),
     ({"sources": [{"name": "a", "remote": "origin"}]}, ["sha1"], True),
 ])
 def test_remote_catalogue_predicate(config, columns, remote):

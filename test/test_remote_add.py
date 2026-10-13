@@ -194,9 +194,10 @@ def test_cli_init_add_commit_status(tmp_path, monkeypatch, remote_listing):
 def test_remote_parameter_cannot_turn_catalog_into_local_objects(
         tmp_path, remote_listing):
     repo = Repo.init(tmp_path / "data")
-    repo.add("https://example.test/data/{sha1}_{day}.fits")
-    assert "sha1" not in repo.state.data.columns
-    assert repo.commit("Record remote files")
+    for field in ("sha1", "source", "size_bytes", "sha256"):
+        with pytest.raises(ValueError, match=f"Rename the pattern field.*{field}"):
+            repo.add(f"https://example.test/data/{{{field}}}_{{day}}.fits")
+    assert repo.state.data.empty
     assert not repo.objects.root.exists()
 
 
@@ -741,3 +742,54 @@ def test_unstaging_a_folder_returns_its_rows_to_head(tmp_path, remote_listing):
     assert repo.dothm.git.show(":data.tsv") == head_tsv
     with pytest.raises(ValueError, match="No staged or committed path matches"):
         repo.restore_staged(["missing"])
+
+
+def _legacy_catalogue(tmp_path, remote, data):
+    """Write a catalogue as Hallmark wrote one before sources existed."""
+    repo = Repo.init(tmp_path / "data")
+    rows = repo.add(ROOT + "{src}_{day:03d}.fits").drop(
+        columns=["source", "checksum_source"])
+    repo.state.config = {"data": data, "remote": remote}
+    repo.state.data = rows
+    repo.dothm.save_state(repo.state)
+    repo.commit("Legacy catalogue")
+    legacy = Repo(repo.worktree)
+    assert "sources" not in legacy.state.config
+    return legacy
+
+
+@pytest.mark.parametrize("remote, data", [
+    ([{"name": "origin", "url": ROOT, "backend": "http"}],
+     [{"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"}]),
+    ({"url": ROOT}, [{"fmt": "{src}_{day:03d}.fits"}]),
+])
+def test_downloading_a_legacy_catalogue_records_its_source_first(
+        tmp_path, remote_listing, fetched, remote, data):
+    legacy = _legacy_catalogue(tmp_path, remote, data)
+    result = legacy.download(legacy.plan_download(all_files=True), approved=True)
+    assert result["staged"] == 2 and result["catalog_upgraded"]
+    assert legacy.state.config["sources"] == [
+        {"name": "origin", "remote": "origin", "fmt": "{src}_{day:03d}.fits"}]
+    assert legacy.state.data["source"].tolist() == ["origin", "origin"]
+    # Still a catalogue of server files: committing stores no payload, files
+    # never downloaded are not "deleted", and the next add works.
+    assert legacy.status()["worktree"]["deleted"] == []
+    assert legacy.commit("Record checksums")
+    reopened = Repo(legacy.worktree)
+    assert reopened.state.data["sha1"].str.len().tolist() == [40, 40]
+    reopened.add(ROOT, filter="*.txt")
+    assert reopened.state.data["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits", "notes.txt"]
+
+
+def test_a_legacy_catalogue_with_several_remotes_is_left_as_it_was(
+        tmp_path, remote_listing, fetched):
+    legacy = _legacy_catalogue(
+        tmp_path, [{"name": "origin", "url": ROOT},
+                   {"name": "mirror", "url": "https://mirror.test/data/"}],
+        [{"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"}])
+    result = legacy.download(legacy.plan_download(all_files=True), approved=True)
+    assert result["succeeded"] == 2 and "staged" not in result
+    assert "predates sources" in result["staging_note"]
+    assert not legacy.dothm.index.diff("HEAD")
+    assert "sha1" not in Repo(legacy.worktree).state.data.columns

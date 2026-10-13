@@ -383,6 +383,7 @@ def set_config(
     if fmt is not None:
         # ensure the new format string is a nonempty string
         fmt = require_nonempty_string(fmt, label="fmt")
+        check_pattern_fields(fmt)
         if config.get("sources"):
             raise ValueError(
                 "Each remote source keeps its own pattern; change it with "
@@ -547,6 +548,31 @@ def filename_fields(fmt: str) -> list[str]:
             seen.add(field_name)
             fields.append(field_name)
     return fields
+
+
+# Catalogue columns that downloads read for themselves. A local filename
+# field with one of these names would be taken for a size or checksum.
+LOCAL_RESERVED_FIELDS = frozenset({
+    "path", "sha1", "md5", "sha256", "sha512", "checksum", "checksum_algorithm",
+    "checksum_source", "size_bytes", "mtime"})
+
+
+def check_pattern_fields(fmt: str, reserved=LOCAL_RESERVED_FIELDS) -> None:
+    """
+    Refuse a filename pattern whose fields reuse catalogue column names.
+
+    Args:
+        fmt (str): Filename pattern.
+        reserved (Collection[str]): Names the catalogue uses itself.
+
+    Raises:
+        ValueError: If a field name is reserved.
+    """
+    clashes = sorted(set(filename_fields(fmt)) & set(reserved))
+    if clashes:
+        raise ValueError(
+            "Rename the pattern field(s) " + ", ".join(clashes)
+            + ": the catalogue uses these names for its own columns")
 
 
 def literal_format(fmt: str) -> str:

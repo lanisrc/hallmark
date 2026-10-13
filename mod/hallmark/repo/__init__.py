@@ -48,7 +48,8 @@ from .config import (
     set_config,
     single_data_format,
     filename_fields,
-    literal_fields)
+    literal_fields,
+    check_pattern_fields)
 
 @dataclass(init=False)
 class Repo:
@@ -776,6 +777,7 @@ class Repo:
 
         # Normalize the format string to ensure it is a non-empty string
         fmt = require_nonempty_string(fmt, label="format")
+        check_pattern_fields(fmt)
         # if the format string has no filename fields, treat it as a literal path
         if not filename_fields(fmt):
             # return early since there are no filename fields to parse

@@ -15,7 +15,9 @@ from .sources import (
     validate_source_name,
 )
 from ..utils import as_list_of_dicts
-from ..repo.config import literal_fields, normalize_remotes, validate_tsv_filename
+from ..repo.config import (
+    LOCAL_RESERVED_FIELDS, check_pattern_fields, literal_fields, normalize_remotes,
+    validate_tsv_filename)
 from ..repo.state import cell_text, is_remote_catalog
 from ..transport import OperationContext, RemoteSpec
 from ..transport.base import (
@@ -26,7 +28,7 @@ from ..transport.base import (
 # these names are not stored.
 CATALOG_COLUMNS = ["path", "checksum_algorithm", "checksum", "size_bytes", "mtime",
                    "checksum_source", "source"]
-_RESERVED_FIELDS = {*CATALOG_COLUMNS, "sha1"}
+_RESERVED_FIELDS = {*CATALOG_COLUMNS, *LOCAL_RESERVED_FIELDS}
 # A kept sha1 must describe the same server file as the new row.
 _SAME_FILE = ("size_bytes", "mtime", "checksum_algorithm", "checksum")
 
@@ -229,6 +231,8 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
     value, backend = _expand_webdav_scheme(value, backend)
     url, fmt = split_remote_pattern(value, fmt)
     path_matches("validation", filter=filter, fmt=fmt)
+    if fmt:
+        check_pattern_fields(fmt, _RESERVED_FIELDS)
     specs = as_list_of_dicts(repo.state.config.get("data", []))
     if specs is None or any(not isinstance(spec, dict) for spec in specs):
         raise ValueError("Catalog data must be a mapping or list of mappings")
@@ -309,9 +313,7 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
                "source": selected.name}
         if fmt:
             # Field values keep the text of the name, as for local files.
-            named = literal_fields(fmt, item.path) or {}
-            row.update({key: value for key, value in named.items()
-                        if key not in _RESERVED_FIELDS})
+            row.update(literal_fields(fmt, item.path) or {})
         rows.append(row)
     frame = pd.DataFrame(rows)
     others = data[~mine]
