@@ -17,10 +17,24 @@ from requests.auth import AuthBase
 
 from ..utils import REMOTE_REQUEST_TIMEOUT
 from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
-                   RemoteObjectMissing, DataBackend, reject_control_characters)
+                   RemoteObjectMissing, DataBackend, decode_metadata,
+                   reject_control_characters)
+from .auth import LOOPBACK_HOSTS
 from .index import _parse_directory_listing, _redirected_directory
 
-LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _declared_charset(content_type):
+    """
+    Return the charset a Content-Type header declares, or None.
+
+    Requests assumes ISO-8859-1 for undeclared text; Hallmark assumes UTF-8.
+    """
+    for parameter in (content_type or "").split(";")[1:]:
+        key, _, value = parameter.strip().partition("=")
+        if key.strip().lower() == "charset" and value.strip():
+            return value.strip().strip("\"'")
+    return None
 
 
 class HostBoundAuth(AuthBase):
@@ -224,8 +238,8 @@ class HttpBackend(DataBackend):
                     content.extend(chunk)
                     if len(content) > limit:
                         raise DownloadError("Remote text exceeds the configured limit")
-                encoding = response.encoding or "utf-8"
-            text = content.decode(encoding, errors="replace")
+                charset = _declared_charset(response.headers.get("Content-Type"))
+            text = decode_metadata(content, charset)
             self.text_urls[relative_path] = final_url
             return text
         except requests.RequestException as exc:

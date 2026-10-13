@@ -159,3 +159,10 @@ def test_boto3_is_optional(s3, monkeypatch):
         backend.__init__(context)
         with pytest.raises(CapabilityError, match=r"hallmark\[s3\]"):
             backend.prepare()
+
+
+def test_an_empty_metadata_object_reads_as_empty_text(s3):
+    s3.put_object(Bucket=BUCKET, Key="m87/SHA256SUMS", Body=b"")
+    remote = RemoteSpec.from_url(f"s3://{BUCKET}/m87/")
+    with OperationContext(remote) as context:
+        assert context.read_text("SHA256SUMS") == ""

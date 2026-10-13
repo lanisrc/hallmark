@@ -132,3 +132,40 @@ def test_downloads_keep_a_files_content_encoding(tmp_path):
         server.close()
     assert (tmp_path / "a.fits.gz").read_bytes() == payload
     assert headers == ["identity"]
+
+
+@pytest.mark.parametrize("content_type, body, text", [
+    ("text/plain", "ünï.fits\n".encode(), "ünï.fits\n"),
+    ("text/plain; charset=ISO-8859-1", "ünï.fits\n".encode("latin-1"), "ünï.fits\n"),
+])
+def test_metadata_uses_the_declared_charset_or_utf8(content_type, body, text):
+    from hallmark.transport import OperationContext, RemoteSpec
+
+    server = LocalServer()
+
+    def get(handler, path):
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    server.handlers["GET"] = get
+    try:
+        with OperationContext(RemoteSpec.from_url(server.url)) as context:
+            assert context.read_text("SHA256SUMS") == text
+    finally:
+        server.close()
+
+
+def test_metadata_that_is_not_text_is_refused_not_garbled():
+    from hallmark.transport import OperationContext, RemoteSpec
+
+    server = LocalServer()
+    server.files["SHA256SUMS"] = b"\xff\xfe broken\n"
+    try:
+        with OperationContext(RemoteSpec.from_url(server.url)) as context:
+            with pytest.raises(DownloadError, match="not valid utf-8"):
+                context.read_text("SHA256SUMS")
+    finally:
+        server.close()

@@ -134,6 +134,31 @@ def reject_url_secrets(url: str) -> None:
             "percent-encode ? and # in file names")
 
 
+def decode_metadata(content: bytes, charset: str | None = None) -> str:
+    """
+    Decode remote metadata, such as an index page or checksum file, strictly.
+
+    The server's declared charset is used, otherwise UTF-8, the same rule on
+    every backend. Undecodable bytes raise rather than become replacement
+    characters, which would garble file names.
+
+    Args:
+        content (bytes): Text as received.
+        charset (str, optional): Charset the server declared.
+
+    Raises:
+        DownloadError: If the charset is unknown or the bytes do not decode.
+    """
+    encoding = charset or "utf-8"
+    try:
+        return bytes(content).decode(encoding)
+    except LookupError:
+        raise DownloadError(
+            f"Remote text declares an unknown charset {charset!r}") from None
+    except UnicodeDecodeError:
+        raise DownloadError(f"Remote text is not valid {encoding}") from None
+
+
 def validate_remote_path(value) -> Path:
     """Validate a literal catalog path without decoding or trimming it."""
     raw = str(value)

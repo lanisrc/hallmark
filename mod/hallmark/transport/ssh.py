@@ -22,6 +22,7 @@ from .base import (
     RemoteEntry,
     DataBackend,
     TransferCancelled,
+    decode_metadata,
     validate_remote_path,
     reject_control_characters,
 )
@@ -438,10 +439,7 @@ class SshBackend(DataBackend):
             self._download_file(relative_path, destination, file_limit=limit)
             if destination.stat().st_size > limit:
                 raise DownloadError("Remote text exceeds its size limit")
-            try:
-                return destination.read_text(encoding="utf-8")
-            except UnicodeError:
-                raise DownloadError("Remote manifest must contain UTF-8 text") from None
+            return decode_metadata(destination.read_bytes())
 
     def _open_metadata_session(self):
         """Create an SFTP metadata session on the shared connection."""

@@ -21,6 +21,7 @@ from .base import (
     RemoteConfigurationError,
     RemoteEntry,
     RemoteObjectMissing,
+    decode_metadata,
     validate_remote_path,
 )
 
@@ -250,11 +251,16 @@ class S3Backend(DataBackend):
                 Range=f"bytes=0-{limit}")
             with response["Body"] as body:
                 content = body.read(limit + 1)
-        except (BotoCoreError, ClientError) as exc:
+        except ClientError as exc:
+            # A ranged read of an empty object has no bytes to return.
+            if exc.response.get("Error", {}).get("Code") == "InvalidRange":
+                return ""
+            raise self._error(exc) from None
+        except BotoCoreError as exc:
             raise self._error(exc) from None
         if len(content) > limit:
             raise DownloadError("Remote text exceeds the configured limit")
-        return content.decode("utf-8", errors="replace")
+        return decode_metadata(content)
 
     def close(self):
         client, self._client = self._client, None
