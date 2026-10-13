@@ -18,6 +18,7 @@ from ..utils import as_list_of_dicts
 from ..repo.config import (
     LOCAL_RESERVED_FIELDS, check_pattern_fields, literal_fields, normalize_remotes,
     validate_tsv_filename)
+from ..repo.dothm import data_tsv_text
 from ..repo.state import cell_text, is_remote_catalog
 from ..transport import OperationContext, RemoteSpec
 from ..transport.base import (
@@ -177,6 +178,12 @@ def _parents(path):
     return ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
 
 
+def _saved_catalogue(repo):
+    """Return the saved catalogue as comparable text: config, meta and rows."""
+    saved = repo.dothm.load_state()
+    return (repr(saved.config), repr(saved.meta), data_tsv_text(saved.data))
+
+
 def _keep_sha1(frame, previous):
     """Carry each file's known sha1 forward when the server reports it unchanged."""
     if "sha1" not in previous.columns or previous.empty:
@@ -244,6 +251,8 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
         raise ValueError(
             "Use a separate repository for local files and remote catalogs")
 
+    # What was saved when the scan began; compared again before saving.
+    scanned_from = _saved_catalogue(repo)
     state = deepcopy(repo.state)
     materialize_sources(state)
     remotes = normalize_remotes(state.config.get("remote"))
@@ -331,8 +340,14 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
     state.config["remote"] = remotes
     state.config["sources"] = [item.to_config() for item in sources]
     state.config["data"] = [{"db": "data.tsv"}]
-    repo.dothm.save_state(state)
-    repo.state = repo.dothm.load_state()
+    with repo.dothm.state_lock():
+        # A scan can take minutes; never save over a change made meanwhile.
+        if _saved_catalogue(repo) != scanned_from:
+            raise ValueError(
+                "The catalogue changed while the server was scanned "
+                "(previous catalogue kept); run hm add again")
+        repo.dothm.save_state(state)
+    repo.state = state
     result = pd.DataFrame(rows)
     result.attrs["removed"] = sorted(set(previous.get("path", [])) - set(frame["path"]))
     return result

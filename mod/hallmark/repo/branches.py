@@ -65,7 +65,9 @@ def checkout(repo, target_branch):
 
     if repo.worktree is None:
         raise CheckoutError("cannot checkout without a worktree")
-    target_state = load_branch_state(repo, target_branch)
+    # Resolve the target once and load the state of exactly that revision.
+    target_kind, resolved_target = resolve_checkout_target(repo, target_branch)
+    target_state = _load_revision_state(repo, resolved_target)
     if is_remote_catalog(repo.state) or is_remote_catalog(target_state):
         if any(not state.data.empty and not is_remote_catalog(state)
                for state in (repo.state, target_state)):
@@ -73,25 +75,19 @@ def checkout(repo, target_branch):
                 "Cannot switch between local files and remote catalogs")
         if repo.dothm.index.diff("HEAD") or repo.dothm.index.diff(None):
             raise CheckoutError("Commit hallmark state changes before checkout")
-        catalog_kind, catalog_target = resolve_checkout_target(repo, target_branch)
-        if catalog_kind == "commit":
-            repo.dothm.git.checkout("--detach", catalog_target)
+        if target_kind == "commit":
+            repo.dothm.git.checkout("--detach", resolved_target)
         else:
             repo.dothm.git.checkout(target_branch)
         repo.state = repo.dothm.load_state()
         return True
     ensure_clean_tracked_files(repo)
 
-    target_kind, resolved_target = resolve_checkout_target(repo, target_branch)
     has_local = target_kind == "branch"
     has_remote = target_kind == "remote"
     remote_revision = resolved_target if has_remote else None
 
     current_tracked = tracked_paths(repo)
-    if target_kind == "commit":
-        target_state = _load_revision_state(repo, resolved_target)
-    else:
-        target_state = load_branch_state(repo, target_branch)
     # Get the data format string for the target branch configuration
     target_fmt = single_data_format(target_state.config)
     if target_fmt is None:

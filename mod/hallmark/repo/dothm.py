@@ -16,12 +16,19 @@
 from __future__ import annotations
 
 from configparser import NoOptionError, NoSectionError
+from contextlib import contextmanager
 from functools import cached_property
 from pathlib import Path
 from typing import Optional, Union
 from io import BytesIO
 import json
 import os
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 
 from git import Repo
 from git.exc import GitCommandError
@@ -310,6 +317,30 @@ remote:
             sha = self.git.hash_object("-w", "--stdin", istream=handle)
         self.git.update_index("--add", "--cacheinfo", "100644", sha, path)
 
+
+    @contextmanager
+    def state_lock(self):
+        """
+        Hold an advisory lock while the state is re-read, changed and saved.
+
+        Commands that run for minutes, such as downloads and scans, re-read
+        the state under this lock before saving, so a change another command
+        saved in the meantime is kept rather than overwritten.
+        """
+        with open(Path(self.git_dir) / "hallmark.lock", "a+b") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            else:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                else:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
     def _legacy_record_paths(self) -> list[str]:
         """Return the index's per-row ``versions/`` records from older layouts."""

@@ -838,3 +838,27 @@ def test_remote_urls_with_secrets_are_refused_wherever_they_come_from(
     with pytest.raises(ValueError):
         Repo.clone(url, tmp_path / "copy", download=False)
     assert not (tmp_path / "copy").exists()
+
+
+def test_an_add_never_saves_over_a_change_made_during_its_scan(
+        tmp_path, remote_listing, monkeypatch):
+    from hallmark.transport import OperationContext
+
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    pages, _ = remote_listing
+    real_read = OperationContext.read_text
+
+    def read_text(context, path):
+        # Another command saves metadata while this scan lists the server.
+        other = Repo(repo.worktree)
+        other.state.meta["owner"] = "eht"
+        other.dothm.save_state(other.state)
+        return real_read(context, path)
+
+    monkeypatch.setattr(OperationContext, "read_text", read_text)
+    with pytest.raises(ValueError, match="changed while the server was scanned"):
+        repo.add(ROOT, filter="*.txt", source="notes")
+    saved = Repo(repo.worktree).state
+    assert saved.meta == {"owner": "eht"}
+    assert "notes.txt" not in set(saved.data["path"])

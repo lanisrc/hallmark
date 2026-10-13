@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -1105,7 +1104,8 @@ def _stage_download_sha1(repo, plan, sha1_by_path, results) -> None:
 
     Only remote catalogue rows without a SHA-1 are updated, and only while
     their catalogued digest still matches the plan; the change is staged,
-    not committed. A failure to save is reported in ``staging_error``.
+    not committed. Any failure here, after the files are in place, is
+    reported in ``staging_error`` rather than raised.
 
     A catalogue written before sources existed is given its source first,
     as ``hm add URL`` does: with a ``sha1`` column and no sources it would
@@ -1117,7 +1117,22 @@ def _stage_download_sha1(repo, plan, sha1_by_path, results) -> None:
         return
     if not is_remote_catalog(repo.state) or "path" not in repo.state.data.columns:
         return
-    state = deepcopy(repo.state)
+    # A download can take hours, so the catalogue is read again under the
+    # lock: only SHA-1 cells are filled in, and other changes are kept.
+    try:
+        with repo.dothm.state_lock():
+            _stage_into_current_state(repo, plan, sha1_by_path, results)
+    except Exception as exc:
+        results["staging_error"] = (
+            f"Downloaded files are in place, but their SHA-1 could not be "
+            f"recorded: {exc}")
+
+
+def _stage_into_current_state(repo, plan, sha1_by_path, results) -> None:
+    """Used by _stage_download_sha1, with the state lock held."""
+    state = repo.dothm.load_state()
+    if not is_remote_catalog(state) or "path" not in state.data.columns:
+        return
     upgraded = False
     if "sha1" not in state.data.columns and "sources" not in state.config:
         if not materialize_sources(state):
@@ -1147,13 +1162,7 @@ def _stage_download_sha1(repo, plan, sha1_by_path, results) -> None:
     if not updates:
         return
     state.data = data
-    try:
-        repo.dothm.save_state(state)
-    except Exception as exc:
-        results["staging_error"] = (
-            f"Downloaded files are in place, but their SHA-1 could not be "
-            f"recorded: {exc}")
-        return
+    repo.dothm.save_state(state)
     repo.state = state
     results["staged"] = updates
     if upgraded:

@@ -368,3 +368,24 @@ def test_a_changed_object_is_transferred_again_not_relinked(repo, server):
     assert plan.stored_items == ()
     assert fetched == ["b.fits"] and result["failed"] == 0
     assert (repo.worktree / "b.fits").read_bytes() == b"bravo"
+
+
+def test_a_change_saved_during_a_download_is_kept(repo, server, monkeypatch):
+    files, fetched = server
+    real_fetch = HttpBackend.fetch
+    changed = []
+
+    def fetch(self, relative_path, destination, *, chunk_size=8192):
+        if not changed:
+            # Another command catalogues a second source mid-download.
+            changed.append(True)
+            Repo(repo.worktree).add(ROOT, filter="b.fits", source="extra",
+                                    prefix="extra")
+        return real_fetch(self, relative_path, destination, chunk_size=chunk_size)
+
+    monkeypatch.setattr(HttpBackend, "fetch", fetch)
+    _, result = download(repo)
+    assert result["staged"] == 3
+    saved = Repo(repo.worktree).state.data.set_index("path")
+    assert "extra/b.fits" in saved.index
+    assert saved.loc["a.fits", "sha1"] == sha1(b"alpha")
