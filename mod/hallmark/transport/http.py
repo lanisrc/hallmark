@@ -122,11 +122,17 @@ class HttpBackend(DataBackend):
                 on_directory(canonical)
 
     def _open_file_response(self, path):
-        """Open a streaming response with the configured request timeout."""
+        """
+        Open a streaming response for a file's bytes as the server stores them.
+
+        Asking for the identity encoding keeps servers from compressing a file
+        on the fly, so its checksums still match.
+        """
         return self.context.session().get(
             self.context.remote.file_url(path),
             stream=True,
             timeout=REMOTE_REQUEST_TIMEOUT,
+            headers={"Accept-Encoding": "identity"},
             **self._auth_option(),
         )
 
@@ -196,7 +202,9 @@ class HttpBackend(DataBackend):
             with self._open_file_response(relative_path) as response:
                 response.raise_for_status()
                 with destination.open("wb") as handle:
-                    for chunk in response.iter_content(chunk_size=chunk_size):
+                    # A .gz file served with Content-Encoding: gzip is stored as
+                    # sent; undoing the encoding would change its bytes.
+                    for chunk in response.raw.stream(chunk_size, decode_content=False):
                         self.context.check_cancelled()
                         if chunk:
                             handle.write(chunk)

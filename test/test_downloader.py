@@ -46,6 +46,11 @@ class _Response:
     def iter_content(self, chunk_size):
         return iter(self.chunks)
 
+    @property
+    def raw(self):
+        return SimpleNamespace(
+            stream=lambda amt, decode_content=True: iter(self.chunks))
+
 
 def _fake_store_download(calls, size, failing=()):
     """

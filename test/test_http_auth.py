@@ -105,3 +105,30 @@ def test_credentials_do_not_follow_redirects_to_other_servers(
         assert mirror.requests == [("GET", "/data/b.fits", None)]
     finally:
         mirror.close()
+
+
+def test_downloads_keep_a_files_content_encoding(tmp_path):
+    import gzip
+    from hallmark.transport import OperationContext, RemoteSpec
+
+    payload = gzip.compress(b"visibilities\n")
+    server = LocalServer()
+    headers = []
+
+    def get(handler, path):
+        headers.append(handler.headers.get("Accept-Encoding"))
+        handler.send_response(200)
+        # Apache's AddEncoding labels .gz files this way.
+        handler.send_header("Content-Encoding", "gzip")
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.end_headers()
+        handler.wfile.write(payload)
+
+    server.handlers["GET"] = get
+    try:
+        with OperationContext(RemoteSpec.from_url(server.url)) as context:
+            context.transport.fetch("a.fits.gz", tmp_path / "a.fits.gz")
+    finally:
+        server.close()
+    assert (tmp_path / "a.fits.gz").read_bytes() == payload
+    assert headers == ["identity"]

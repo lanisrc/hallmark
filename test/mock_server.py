@@ -37,7 +37,8 @@ class MockServer:
         """Provide the Requests session cleanup interface for tests."""
         pass
 
-    def get(self, url, timeout=None, stream=False, allow_redirects=True):
+    def get(self, url, timeout=None, stream=False, allow_redirects=True,
+            headers=None):
         """Return a registered response through the Requests session interface."""
         return self.fake_get(url, timeout=timeout)
 
@@ -107,6 +108,7 @@ class MockServer:
             raise AssertionError(f"MockServer: no registered response for GET {url}")
         resp.encoding = "utf-8"
         resp.iter_content = lambda chunk_size: iter([resp.content])
+        resp.raw.stream = lambda amt, decode_content=True: iter([resp.content])
         resp.__enter__.return_value = resp
         return resp
 
