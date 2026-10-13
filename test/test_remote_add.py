@@ -891,3 +891,23 @@ def test_an_unnamed_remote_is_origin_everywhere(tmp_path, remote_listing):
     plan = Repo(repo.worktree).plan_download(all_files=True, remote_name="origin")
     assert plan.remote_name == "origin"
     assert list(plan.remotes) == ["origin"]
+
+
+def test_checkout_explains_how_to_clear_unstaged_hallmark_state(
+        tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    repo.commit("FITS files")
+    repo.create_branch("other")
+    repo.set_config(remote_name="renamed")
+    with pytest.raises(CheckoutError, match="Commit or unstage.*config.yml"):
+        repo.checkout("other")
+    repo.restore_staged(["."])
+    with pytest.raises(CheckoutError) as error:
+        repo.checkout("other")
+    assert "Unstaged changes in .hm block checkout: config.yml" in str(error.value)
+    assert f"git -C {repo.dothm.path} restore config.yml" in str(error.value)
+    repo.dothm.git.restore("config.yml")
+    reopened = Repo(repo.worktree)
+    assert reopened.checkout("other")
+    assert reopened.state.config["remote"][0]["name"] == "origin"

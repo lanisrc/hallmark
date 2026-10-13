@@ -1,3 +1,4 @@
+import shlex
 from pathlib import Path
 from shutil import rmtree
 from tempfile import TemporaryDirectory
@@ -59,6 +60,30 @@ def resolve_checkout_target(repo, target):
     raise CheckoutError(f'no branch or commit named "{target}"')
 
 
+def _refuse_pending_state_changes(repo):
+    """
+    Used by checkout for remote catalogues.
+    Refuse to switch while .hm holds changes, saying how to resolve them.
+
+    Unstaging keeps .hm files changed on disk, as git keeps the working copy,
+    so the message names the git command that discards them.
+    """
+    staged = sorted({diff.a_path or diff.b_path
+                     for diff in repo.dothm.index.diff("HEAD")})
+    if staged:
+        raise CheckoutError(
+            "Commit or unstage hallmark state changes before checkout: "
+            + ", ".join(staged)
+            + " (hm commit -m MESSAGE, or hm restore --staged .)")
+    unstaged = sorted({diff.a_path or diff.b_path
+                       for diff in repo.dothm.index.diff(None)})
+    if unstaged:
+        raise CheckoutError(
+            "Unstaged changes in .hm block checkout: " + ", ".join(unstaged)
+            + ". Discard them with: git -C " + shlex.quote(str(repo.dothm.path))
+            + " restore " + " ".join(shlex.quote(path) for path in unstaged))
+
+
 def checkout(repo, target_branch):
     # Validate and normalize the target branch name
     target_branch = repo._validate_branch_name(target_branch)
@@ -73,8 +98,7 @@ def checkout(repo, target_branch):
                for state in (repo.state, target_state)):
             raise CheckoutError(
                 "Cannot switch between local files and remote catalogs")
-        if repo.dothm.index.diff("HEAD") or repo.dothm.index.diff(None):
-            raise CheckoutError("Commit hallmark state changes before checkout")
+        _refuse_pending_state_changes(repo)
         if target_kind == "commit":
             repo.dothm.git.checkout("--detach", resolved_target)
         else:
