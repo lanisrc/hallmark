@@ -2,7 +2,6 @@ from copy import deepcopy
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import pandas as pd
-import parse
 
 from .discovery import discover_remote_files, path_matches
 from .sources import (
@@ -16,8 +15,8 @@ from .sources import (
     validate_source_name,
 )
 from ..utils import as_list_of_dicts
-from ..repo.config import normalize_remotes, validate_tsv_filename
-from ..repo.state import is_remote_catalog
+from ..repo.config import literal_fields, normalize_remotes, validate_tsv_filename
+from ..repo.state import cell_text, is_remote_catalog
 from ..transport import OperationContext, RemoteSpec
 from ..transport.base import (
     DownloadError, RemoteConfigurationError, copy_backend_options,
@@ -186,8 +185,7 @@ def _keep_sha1(frame, previous):
         sha1 = ""
         if record["path"] in old.index:
             before = old.loc[record["path"]]
-            if all(str(before.get(key, "")) == str(record.get(key) if record.get(key)
-                                                  is not None else "")
+            if all(cell_text(before.get(key)) == cell_text(record.get(key))
                    for key in _SAME_FILE):
                 sha1 = before.get("sha1", "")
         kept.append(sha1)
@@ -310,8 +308,9 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
                "mtime": item.mtime, "checksum_source": item.checksum_source,
                "source": selected.name}
         if fmt:
-            matched = parse.parse(fmt, item.path, case_sensitive=True)
-            row.update({key: value for key, value in matched.named.items()
+            # Field values keep the text of the name, as for local files.
+            named = literal_fields(fmt, item.path) or {}
+            row.update({key: value for key, value in named.items()
                         if key not in _RESERVED_FIELDS})
         rows.append(row)
     frame = pd.DataFrame(rows)

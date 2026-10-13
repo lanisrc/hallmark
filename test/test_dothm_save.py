@@ -57,3 +57,47 @@ def test_unchanged_records_are_not_rewritten(tmp_path):
     assert after["a.h5"] == before["a.h5"]
     assert after["b.h5"] != before["b.h5"]
     assert repo.status()["staged"]["added"] == ["a.h5", "b.h5"]
+
+
+def test_saving_a_loaded_catalogue_changes_nothing(tmp_path, monkeypatch):
+    from hallmark.transport import OperationContext
+
+    listing = ('<h1>Index of data</h1><a href="M87_002.fits" data-size="12">'
+               'M87_002.fits</a><a href="M87_001.fits">M87_001.fits</a>')
+    monkeypatch.setattr(OperationContext, "read_text", lambda context, path: listing)
+    repo = Repo.init(tmp_path / "repo")
+    repo.add("https://x.test/d/{src}_{day:03d}.fits")
+    repo.commit("Catalogue")
+    repo.dothm.save_state(repo.dothm.load_state())
+    assert not repo.dothm.index.diff("HEAD")
+    # One size known and one missing must not turn into "12.0" and "nan".
+    assert (repo.dothm.path / "data.tsv").read_text().splitlines()[1:] == [
+        "M87_001.fits\t\t\t\t\t\torigin\tM87\t001",
+        "M87_002.fits\t\t\t12\t\t\torigin\tM87\t002"]
+
+
+def test_adding_a_source_leaves_other_rows_untouched(tmp_path, monkeypatch):
+    from hallmark.transport import OperationContext
+
+    listing = ('<h1>Index of data</h1><a href="M87_001.fits">M87_001.fits</a>'
+               '<a href="notes.txt">notes.txt</a>')
+    monkeypatch.setattr(OperationContext, "read_text", lambda context, path: listing)
+    repo = Repo.init(tmp_path / "repo")
+    repo.add("https://x.test/d/{src}_{day:03d}.fits")
+    repo.commit("Catalogue")
+    repo.add("https://x.test/d/", filter="*.txt", source="notes")
+    changed = {diff.a_path or diff.b_path for diff in repo.dothm.index.diff("HEAD")}
+    assert changed == {"config.yml", "data.tsv", "versions/notes.txt"}
+
+
+def test_local_patterns_and_paths_record_the_same_field_text(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "x_005.h5").write_text("five\n")
+    repo.add("x_{doy:03d}.h5")
+    repo.commit("Catalogue")
+    assert repo.state.data["doy"].tolist() == ["005"]
+    repo.add(".")
+    repo.add("x_005.h5")
+    assert not repo.dothm.index.diff("HEAD")
+    repo.set_config(fmt="x_{day:03d}.h5")
+    assert repo.state.data["day"].tolist() == ["005"]

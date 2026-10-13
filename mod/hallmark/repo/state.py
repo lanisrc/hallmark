@@ -17,8 +17,42 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from ..utils import string_or_none
+
 # Define the default columns for the state DataFrame
 COLUMNS = ["sha1"]
+
+
+def cell_text(value) -> str:
+    """
+    Return a catalogue value as the text it is saved and loaded as.
+
+    Missing values become ``""`` and whole-number floats lose their ``.0``,
+    which pandas adds when a numeric column has gaps.
+    """
+    text = string_or_none(value)
+    return "" if text is None else text
+
+
+def normalize_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return catalogue rows in their one saved form: text, sorted by path.
+
+    Every writer goes through this, so saving rows that were just loaded
+    changes nothing.
+
+    Args:
+        frame (pd.DataFrame): Catalogue rows.
+
+    Returns:
+        pd.DataFrame: A copy with text values, sorted by ``path`` if present.
+    """
+    rows = frame.copy()
+    for column in rows.columns:
+        rows[column] = rows[column].map(cell_text).astype(object)
+    if "path" in rows.columns:
+        rows = rows.sort_values("path", kind="stable")
+    return rows.reset_index(drop=True)
 
 
 def is_remote_catalog(state) -> bool:
@@ -70,10 +104,7 @@ def _prepare_file_rows(frame: pd.DataFrame) -> pd.DataFrame:
     # normalize the data by retaining only the relevant columns
     normalized = frame.loc[:, columns].copy()
     for column in parameter_columns:
-        # normalize non-checksum columns to string type,
-        # replacing NaN values with empty strings
-        normalized[column] = normalized[column].map(
-            lambda value: (""if pd.isna(value) else str(value)))
+        normalized[column] = normalized[column].map(cell_text)
 
     return normalized
 

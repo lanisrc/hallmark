@@ -36,7 +36,7 @@ from ..utils import (replace_file_on_success,
                      validate_path_name,
                      resolve_path_in_root,
                      load_yaml)
-from .state import State
+from .state import State, normalize_rows
 from .config import row_to_path, single_data_format
 
 
@@ -89,6 +89,11 @@ def write_yaml(data, handle) -> None:
         Dumper=_HallmarkYamlDumper,
         sort_keys=False,
         width=float("inf"))
+
+
+def data_tsv_text(data: pd.DataFrame) -> str:
+    """Return catalogue rows as ``data.tsv`` text: normalized, sorted, LF endings."""
+    return normalize_rows(data).to_csv(sep="\t", index=False, lineterminator="\n")
 
 
 class Dothm(Repo):
@@ -465,12 +470,7 @@ remote:
                         head, paths=reset_paths, working_tree=False
                     )
                 else:
-                    self.stage_text(
-                        "data.tsv",
-                        state.data.to_csv(
-                            sep="\t", index=False, lineterminator="\n"
-                        ),
-                    )
+                    self.stage_text("data.tsv", data_tsv_text(state.data))
         except Exception:
             index = self.index
             index.entries = original
@@ -481,7 +481,9 @@ remote:
     def save_state(self, state: State) -> None:
         fmt = single_data_format(state.config)
         paths = set()
-        records = state.data.fillna("").to_dict(orient="records")
+        # Rows are saved, and kept in memory, in the form load_state returns.
+        state.data = normalize_rows(state.data)
+        records = state.data.to_dict(orient="records")
 
         for record in records:
             record["path"] = row_to_path(record, fmt).as_posix()
@@ -584,32 +586,15 @@ remote:
             encoding="utf-8",
             keep_default_na=False)
 
-    def write_tsv(
-            self,
-            data: pd.DataFrame,
-            stem: Union[Path, str],
-            *,
-            na_rep: str = ""
-            ) -> None:
+    def write_tsv(self, data: pd.DataFrame, stem: Union[Path, str]) -> None:
         """
-        Dump a pandas DataFrame to a TSV file, ensuring atomic write operations.
+        Write catalogue rows to a TSV file atomically, as ``data_tsv_text`` does.
 
         Args:
-            data (pd.DataFrame): The DataFrame to be dumped to TSV.
+            data (pd.DataFrame): The rows to write.
             stem (Union[Path, str]): The stem of the file name (without extension).
-            na_rep (str, optional): String representation for missing values.
-                Defaults to an empty string.
         """
         path = self._storage_path(stem, ".tsv")
-
-        # Use a temporary file to ensure atomic write operations, preventing
-        # data corruption in case of interruptions during the write process.
         with replace_file_on_success(path) as temp_path:
-            # Write the DataFrame to a temporary file in TSV format, ensuring that
-            # the index is not included and UTF-8 encoding is used for compatibility.
-            data.to_csv(
-                temp_path,
-                sep="\t",
-                index=False,
-                encoding="utf-8",
-                na_rep=na_rep)
+            with temp_path.open("w", encoding="utf-8", newline="") as handle:
+                handle.write(data_tsv_text(data))

@@ -401,8 +401,6 @@ def set_config(
             if not repo.state.data.empty and old_fmt is None:
                 raise ValueError("Cannot verify catalog without its saved pattern")
 
-            # parse the new filename format using the parse library
-            parser = parse.compile(fmt, case_sensitive=True)
             # iterate over each record in the existing data as a dictionary
             for record in repo.state.data.to_dict(orient="records"):
                 # convert the record to a path using the old filename format
@@ -411,17 +409,17 @@ def set_config(
                 # otherwise, use just the filename
                 target = old_path.as_posix() if "/" in fmt else old_path.name
                 # match the target string against the new format
-                match = parser.parse(target)
+                named = literal_fields(fmt, target)
 
                 # if it does not match the new format, it is considered incompatible
-                if match is None:
+                if named is None:
                     incompatible += 1
                     # skip this record as it is incompatible with the new format
                     continue
                 # construct a new row for the migrated data based on the named groups
                 rows.append({
                     "sha1": record["sha1"],
-                    **match.named,
+                    **named,
                     "path": old_path.as_posix()})
 
             # if there are any incompatible records, raise an error
@@ -549,6 +547,43 @@ def filename_fields(fmt: str) -> list[str]:
             seen.add(field_name)
             fields.append(field_name)
     return fields
+
+
+def literal_format(fmt: str) -> str:
+    """
+    Return a filename format without its format specs.
+
+    Field values are stored as the text the filename holds, so ``005`` in
+    ``x_{doy:03d}.h5`` stays ``005``, as ``hm add PATTERN`` records it.
+    Parse with the full format to validate a name and with this one to read
+    its values.
+
+    Args:
+        fmt (str): Format string, possibly with specs such as ``{doy:03d}``.
+
+    Returns:
+        str: The same format with every ``{name:spec}`` reduced to ``{name}``.
+    """
+    parts = []
+    for literal, field_name, _, _ in Formatter().parse(fmt):
+        parts.append(literal.replace("{", "{{").replace("}", "}}"))
+        if field_name is not None:
+            parts.append("{" + field_name + "}")
+    return "".join(parts)
+
+
+def literal_fields(fmt: str, target: str):
+    """
+    Return the field text of a name that matches ``fmt``, or None.
+
+    Args:
+        fmt (str): Format string with optional specs, used to validate.
+        target (str): Name or relative path to parse.
+    """
+    if parse.parse(fmt, target, case_sensitive=True) is None:
+        return None
+    match = parse.parse(literal_format(fmt), target, case_sensitive=True)
+    return None if match is None else match.named
 
 
 def validate_tsv_filename(value) -> str:

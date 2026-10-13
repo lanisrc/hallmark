@@ -448,7 +448,7 @@ def test_two_patterns_in_one_folder_are_two_sources(tmp_path, remote_listing):
     repo.add(ROOT, filter="*.txt")
     assert [s["name"] for s in repo.state.config["sources"]] == ["origin", "origin-2"]
     data = repo.state.data.set_index("path")
-    assert data.loc["M87_002.fits", "day"] == "2"
+    assert data.loc["M87_002.fits", "day"] == "002"
     assert data.loc["notes.txt", "source"] == "origin-2"
     assert data.loc["notes.txt", "day"] == ""
     with pytest.raises(ValueError, match="choose one with --source"):

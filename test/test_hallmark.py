@@ -1523,28 +1523,20 @@ def test_dump_yml_preserves_existing_file_when_serialization_fails(monkeypatch,
         "Expected no temporary files to remain after failed write_yaml"
 
 
-def test_dump_tsv_supports_missing_value_representation(tmp_path):
+def test_write_tsv_writes_missing_values_as_empty_text(tmp_path):
     """
-    Test that the Dothm.write_tsv() method correctly represents missing values in the
-    output TSV file. This test creates a repository, constructs a DataFrame with missing
-    values, and calls write_tsv() with a custom na_rep argument. It checks that
-    the output TSV file is created and that the missing values are represented as
-    specified in the na_rep argument.
-    Args:
-        tmp_path (Path): A temporary directory provided by pytest.
+    Dothm.write_tsv writes catalogue rows in their one saved form: missing
+    values as empty fields, whole-number floats without ".0", rows sorted by
+    path and LF line endings on every platform.
     """
     repo = Repo.init(tmp_path / "repo")
     frame = pd.DataFrame({
-        "path": ["first.dat", "second.dat"], "value": ["present", None]})
-    repo.dothm.write_tsv(frame, "custom.TSV", na_rep="None")
+        "path": ["second.dat", "first.dat"], "value": [None, 5.0]})
+    repo.dothm.write_tsv(frame, "custom.TSV")
     output_path = repo.dothm.path / "custom.TSV"
 
-    assert output_path.is_file(), \
-        f"Expected TSV file {output_path} to be created, but it does not exist"
-    assert output_path.read_text(encoding="utf-8") == (
-        "path\tvalue\n""first.dat\tpresent\n""second.dat\tNone\n"), \
-        f"Expected TSV output with 'None' for missing values, \
-            got:\n{output_path.read_text(encoding='utf-8')}"
+    assert output_path.read_bytes() == (
+        b"path\tvalue\nfirst.dat\t5\nsecond.dat\t\n")
 
 
 @pytest.mark.parametrize(

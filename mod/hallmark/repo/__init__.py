@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 import os
-import parse
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -48,7 +47,8 @@ from .config import (
     branch_filename_format,
     set_config,
     single_data_format,
-    filename_fields)
+    filename_fields,
+    literal_fields)
 
 @dataclass(init=False)
 class Repo:
@@ -471,8 +471,7 @@ class Repo:
         # find the encoding settings and parse format for the branch
         yaml_encodings, parse_fmt = ParaFrame._find_encoding_settings(
             fmt, encodings, encoding=encoding)
-        # compile the parse format into a parser object
-        parser = parse.compile(parse_fmt.lstrip("/"), case_sensitive=True)
+        parse_fmt = parse_fmt.lstrip("/")
         matched = {}
         unmatched = set()
         add_all = False
@@ -528,10 +527,10 @@ class Repo:
                 if encoding:
                     target = apply_regex_replacement(target, yaml_encodings)
 
-                # parse the target using the branch format parser
-                match = parser.parse(target)
+                # read the field text the same way hm add PATTERN does
+                named = literal_fields(parse_fmt, target)
                 # if the target does not match the branch format, handle it accordingly
-                if match is None:
+                if named is None:
                     # if the file was explicitly named and doesn't match, raise an error
                     if named_file:
                         raise ValueError(
@@ -542,7 +541,7 @@ class Repo:
                 # if the target matches the format, add it to the matched dictionary
                 else:
                     matched[relative] = {
-                        **match.named,
+                        **named,
                         "path": relative,
                         "sha1": self.checksum(path)}
 
