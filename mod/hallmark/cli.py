@@ -78,12 +78,12 @@ def _report_download_results(results: dict) -> None:
     # Report the results of the download operation to the user.
     for path in results.get("skipped", []):
         click.echo(f"Already downloaded: {path}")
-    from_cache = results.get("from_cache", [])
-    if from_cache:
-        click.echo(f"Placed {len(from_cache)} file(s) from the local cache")
+    from_store = results.get("from_store", [])
+    if from_store:
+        click.echo(f"Placed {len(from_store)} file(s) from .hm/objects")
     copied = results.get("copied", [])
     if copied:
-        click.echo("Copied instead of linked to the cache (links unavailable):")
+        click.echo("Copied instead of linked (links unavailable):")
         for path in copied[:10]:
             click.echo(f"  {path}")
     if results.get("staged"):
@@ -96,10 +96,10 @@ def _report_download_results(results: dict) -> None:
     failed = results["failed"]
     total_mb = results["total_bytes"] / (1024 * 1024)
     # If there were no failed downloads, report success and exit.
-    # Files placed from the cache were not downloaded again.
-    transferred = succeeded - len(from_cache)
+    # Files placed from the store were not downloaded again.
+    transferred = succeeded - len(from_store)
     if failed == 0:
-        if transferred or not (from_cache or results.get("staged")):
+        if transferred or not (from_store or results.get("staged")):
             click.echo(
                 f"Successfully downloaded {transferred} files "f"({total_mb:.1f} MB)")
         if results.get("staging_error"):
@@ -602,7 +602,7 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
         if dry_run:
             click.echo(plan.summary())
             listed = [(item, "") for item in plan.items] + [
-                (item, " (from the local cache)") for item in plan.cached_items]
+                (item, " (from .hm/objects)") for item in plan.stored_items]
             for item, note in listed[:20]:
                 click.echo(f"  {item.relative_path.as_posix()}{note}")
             if plan.file_count > 20:

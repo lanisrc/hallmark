@@ -632,11 +632,11 @@ def test_plan_summary_counts_cached_files_per_remote(tmp_path):
                "mirror": {"url": "https://b.test/"}}
     plan = DownloadPlan(
         (DownloadItem("a", remote="origin"),), None, tmp_path, remotes=remotes,
-        cached_items=(DownloadItem("b", remote="mirror", sha1="1" * 40),))
+        stored_items=(DownloadItem("b", remote="mirror", sha1="1" * 40),))
     summary = plan.summary()
     assert "origin: https://a.test/ (1 file(s))" in summary
     assert "mirror: https://b.test/ (1 file(s))" in summary
-    assert "From the local cache: 1 file(s) (no transfer)" in summary
+    assert "Already in .hm/objects: 1 file(s) (no transfer)" in summary
 
 
 def test_plans_reject_items_naming_unrecorded_remotes(tmp_path):

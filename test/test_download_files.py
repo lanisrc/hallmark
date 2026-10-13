@@ -162,7 +162,7 @@ def test_file_created_during_transfer_is_not_overwritten(download_repo):
     assert 'appeared at its destination' in result['errors'][0]
     assert target.read_bytes() == b'created during transfer'
     assert sorted(path.name for path in target.parent.iterdir()) == ['a.txt']
-    # The verified download stays cached for a later run.
+    # The verified download stays in the object store for a later run.
     assert repo.objects.contains(sha1(b'first').hexdigest())
 
 

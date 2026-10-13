@@ -77,7 +77,7 @@ def test_a_rerun_recognises_its_own_files_without_transfers(repo, server):
     files, fetched = server
     fetched.clear()
     plan, result = download(repo)
-    assert plan.items == () and plan.cached_items == ()
+    assert plan.items == () and plan.stored_items == ()
     assert sorted(item.relative_path.name for item in plan.skipped_items) == sorted(
         FILES)
     assert {item.relative_path.name: item.sha1 for item in plan.skipped_items} == {
@@ -94,10 +94,10 @@ def test_known_content_is_placed_from_the_cache(repo, server):
     (repo.worktree / "b.fits").unlink()
     fetched.clear()
     plan, result = download(repo)
-    assert [item.relative_path.name for item in plan.cached_items] == ["b.fits"]
+    assert [item.relative_path.name for item in plan.stored_items] == ["b.fits"]
     assert plan.items == () and plan.file_count == 1 and plan.has_changes
-    assert "From the local cache: 1 file(s) (no transfer)" in plan.summary()
-    assert result["from_cache"] == ["b.fits"]
+    assert "Already in .hm/objects: 1 file(s) (no transfer)" in plan.summary()
+    assert result["from_store"] == ["b.fits"]
     assert result["succeeded"] == 1
     assert fetched == []
     assert repo.objects.is_linked(sha1(b"bravo"), repo.worktree / "b.fits")
@@ -115,7 +115,7 @@ def test_a_vanished_cached_object_is_not_fetched_without_approval(repo, server):
     fetched.clear()
     result = repo.download(plan, approved=True)
     assert result["failed"] == 1
-    assert "cached copy of b.fits is missing" in result["errors"][0]
+    assert "stored copy of b.fits is missing" in result["errors"][0]
     assert fetched == []
     with pytest.raises(Exception, match="approval"):
         repo.download(plan)
@@ -316,9 +316,9 @@ def test_dry_run_lists_files_coming_from_the_cache(repo, server, monkeypatch):
     monkeypatch.chdir(repo.worktree)
     result = CliRunner().invoke(hallmark, ["download", "--all", "--dry-run"])
     assert result.exit_code == 0, result.output
-    assert "From the local cache: 1 file(s) (no transfer)" in result.output
-    assert "  b.fits (from the local cache)" in result.output
+    assert "Already in .hm/objects: 1 file(s) (no transfer)" in result.output
+    assert "  b.fits (from .hm/objects)" in result.output
     result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
     assert result.exit_code == 0, result.output
-    assert "Placed 1 file(s) from the local cache" in result.output
+    assert "Placed 1 file(s) from .hm/objects" in result.output
     assert "Successfully downloaded" not in result.output

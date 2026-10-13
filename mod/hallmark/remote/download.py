@@ -774,14 +774,14 @@ def _check_existing_files(items, output_root, store=None):
 
     Returns:
         tuple[list, list, list]: Items to transfer, items whose content is
-        already cached, and items already at their destination.
+        already stored, and items already at their destination.
 
     Raises:
         DownloadError: If any destination holds something else, so that
             nothing is downloaded until the user removes it.
     """
     pending = []
-    cached = []
+    stored = []
     skipped = []
     conflicts = []
     for item in items:
@@ -800,7 +800,7 @@ def _check_existing_files(items, output_root, store=None):
             elif not os.path.lexists(destination):
                 if (store is not None and item.sha1 is not None
                         and store.contains(item.sha1)):
-                    cached.append(item)
+                    stored.append(item)
                 else:
                     pending.append(item)
             else:
@@ -816,7 +816,7 @@ def _check_existing_files(items, output_root, store=None):
             "Existing paths conflict with the catalog or cannot be verified:\n"
             + "\n".join(conflicts)
             + "\nNothing downloaded. Delete these paths first to replace them.")
-    return pending, cached, skipped
+    return pending, stored, skipped
 
 
 def _remote_summary(remote: dict) -> dict:
@@ -971,7 +971,7 @@ def plan_download(
         remote = {}
     remotes = {name: _remote_summary(config) for name, config in used.items()}
     pinned = _remote_summary(remote) if remote.get("url") else {}
-    items, cached, skipped = _check_existing_files(
+    items, stored, skipped = _check_existing_files(
         items, output_root, getattr(repo, "objects", None))
     return DownloadPlan(
         tuple(items), remote.get("url"), output_root,
@@ -979,7 +979,7 @@ def plan_download(
         estimated_bytes_per_second=estimated_bytes_per_second,
         remote_backend=pinned.get("backend"),
         backend_options=remote.get("backend_options"), skipped_items=tuple(skipped),
-        remotes=remotes, cached_items=tuple(cached))
+        remotes=remotes, stored_items=tuple(stored))
 
 
 def execute_download_plan(
@@ -1028,30 +1028,30 @@ def execute_download_plan(
     if plan.output_path.resolve() != plan.output_path:
         raise DownloadError("Download destination changed since planning")
     store.cleanup_stale_temps()
-    items, cached, skipped = _check_existing_files(
-        _unique_items(plan.items + plan.cached_items), plan.output_path, store)
+    items, stored, skipped = _check_existing_files(
+        _unique_items(plan.items + plan.stored_items), plan.output_path, store)
     if skipped:
         results["skipped"] = [item.relative_path.as_posix() for item in skipped]
 
     results.update(sha1={}, copied=[])
     try:
         # A file planned from the store is never transferred without approval.
-        planned_from_cache = {item.relative_path for item in plan.cached_items}
+        planned_from_store = {item.relative_path for item in plan.stored_items}
         for item in items:
-            if item.relative_path in planned_from_cache:
+            if item.relative_path in planned_from_store:
                 results["failed"] += 1
                 results["errors"].append(
-                    f"The cached copy of {item.relative_path.as_posix()} is "
+                    f"The stored copy of {item.relative_path.as_posix()} is "
                     "missing; run hm download again")
         items = [item for item in items
-                 if item.relative_path not in planned_from_cache]
-        for item in cached:
+                 if item.relative_path not in planned_from_store]
+        for item in stored:
             _record_placed(results, _place_from_store(
                 plan.output_path, store, [item], item.sha1))
-        placed_from_cache = [item.relative_path.as_posix() for item in cached
+        placed_from_store = [item.relative_path.as_posix() for item in stored
                              if item.relative_path.as_posix() in results["sha1"]]
-        if placed_from_cache:
-            results["from_cache"] = placed_from_cache
+        if placed_from_store:
+            results["from_store"] = placed_from_store
         _transfer_by_remote(plan, items, results, store,
                             max_workers=max_workers, show_progress=show_progress)
     finally:
@@ -1100,7 +1100,7 @@ def _stage_download_sha1(repo, plan, sha1_by_path, results) -> None:
     if not is_remote_catalog(state) or "path" not in state.data.columns:
         return
     planned = {item.relative_path.as_posix(): item for item in
-               plan.items + plan.cached_items + plan.skipped_items}
+               plan.items + plan.stored_items + plan.skipped_items}
     data = state.data.copy()
     if "sha1" not in data.columns:
         data["sha1"] = ""
@@ -1294,7 +1294,7 @@ def _place_from_store(output_root, store, items, sha1):
                            "download; the existing file was kept"))
         except FileNotFoundError:
             placed.append((item, sha1, None,
-                           f"The cached copy of {name} is missing; "
+                           f"The stored copy of {name} is missing; "
                            "run hm download again"))
         except (OSError, ValueError) as exc:
             placed.append((item, sha1, None, f"Failed to place {name}: {exc}"))
