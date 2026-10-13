@@ -19,6 +19,8 @@ import pandas as pd
 
 # Define the default columns for the state DataFrame
 COLUMNS = ["sha1"]
+# TSV that holds the rows of a lone data entry without a "db" name
+DEFAULT_DB = "data.tsv"
 
 
 def _prepare_file_rows(frame: pd.DataFrame) -> pd.DataFrame:
