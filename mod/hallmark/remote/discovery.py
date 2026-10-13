@@ -11,7 +11,8 @@ from pathlib import PurePosixPath
 import parse
 from tqdm import tqdm
 
-from ..utils import CHECKSUM_ALGORITHMS_BY_STRENGTH, is_valid_checksum
+from ..utils import (
+    CHECKSUM_ALGORITHMS_BY_STRENGTH, infer_checksum_algorithm, is_valid_checksum)
 from ..transport.base import (
     DownloadError, RemoteEntry, RemoteObjectMissing, validate_remote_path,
 )
@@ -69,7 +70,12 @@ def path_matches(path: str, filter=None, fmt: str | None = None) -> bool:
 
 
 def _checksum_file_algorithm(path):
-    """Identify checksum manifests by their conventional filenames."""
+    """
+    Identify checksum manifests by their conventional filenames.
+
+    A plain ``checksums.txt`` does not say its algorithm; each digest's
+    length tells it instead (``"unknown"`` here).
+    """
     name = PurePosixPath(path).name.lower()
     if re.fullmatch(r"checksums?(?:\.txt)?", name):
         return "unknown"
@@ -85,8 +91,8 @@ def _attach_published_checksums(context, entries):
     strength = {name: index for index, name in
                 enumerate(CHECKSUM_ALGORITHMS_BY_STRENGTH)}
     for path in sorted(entries):
-        algorithm = _checksum_file_algorithm(path)
-        if algorithm is None:
+        manifest_algorithm = _checksum_file_algorithm(path)
+        if manifest_algorithm is None:
             continue
         try:
             text = context.read_text(path)
@@ -100,7 +106,9 @@ def _attach_published_checksums(context, entries):
             if not match:
                 continue
             digest, filename = match.groups()
-            if not is_valid_checksum(algorithm, digest, allow_unknown_algorithm=True):
+            algorithm = (infer_checksum_algorithm(digest)
+                         if manifest_algorithm == "unknown" else manifest_algorithm)
+            if algorithm is None or not is_valid_checksum(algorithm, digest):
                 continue
             while filename.startswith("./"):
                 filename = filename[2:]

@@ -17,12 +17,13 @@ from urllib.parse import unquote
 
 import pandas as pd
 
-from ..repo.config import normalize_remotes, single_data_format
+from ..repo.config import normalize_remotes, remote_name_of, single_data_format
 from ..transport.base import RemoteSpec, validate_remote_path
+from ..utils import CHECKSUM_ALGORITHMS
 
 SOURCE_FIELDS = ("name", "remote", "root", "prefix", "fmt", "filter",
                  "server_checksum")
-SERVER_CHECKSUMS = ("md5", "sha1", "sha256", "sha512")
+SERVER_CHECKSUMS = CHECKSUM_ALGORITHMS
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
@@ -141,7 +142,7 @@ class SourceSpec:
 def remote_names(config) -> list:
     """Return the configured remote names, naming a single unnamed remote origin."""
     remotes = normalize_remotes(config.get("remote"))
-    return [remote.get("name") or "origin" for remote in remotes]
+    return [remote_name_of(remote) for remote in remotes]
 
 
 def normalize_sources(value, remotes: Sequence[str] = ()) -> list:
@@ -269,7 +270,7 @@ def match_remote(folder: RemoteSpec, remotes: Sequence[dict]):
         if not _same_server(spec, folder) or not target.startswith(base):
             continue
         if best is None or len(base) > len(best[2]):
-            name = remote.get("name") or "origin"
+            name = remote_name_of(remote)
             best = (name, target[len(base):], base)
     return None if best is None else best[:2]
 

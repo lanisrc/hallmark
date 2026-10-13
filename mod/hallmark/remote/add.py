@@ -17,6 +17,7 @@ from .sources import (
 from ..utils import as_list_of_dicts
 from ..repo.config import (
     LOCAL_RESERVED_FIELDS, check_pattern_fields, literal_fields, normalize_remotes,
+    remote_name_of,
     validate_tsv_filename)
 from ..repo.dothm import data_tsv_text
 from ..repo.state import cell_text, is_remote_catalog
@@ -91,7 +92,7 @@ def _choose_remote(remotes, folder, name):
     An explicit name selects or creates that remote; otherwise the deepest
     configured remote containing the URL is used.
     """
-    names = [remote.get("name") or "origin" for remote in remotes]
+    names = [remote_name_of(remote) for remote in remotes]
     if name is not None:
         if name in names:
             entry = remotes[names.index(name)]

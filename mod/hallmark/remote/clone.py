@@ -18,6 +18,7 @@ from ..utils import as_list_of_dicts
 from ..repo.config import (
     filename_fields,
     normalize_remotes,
+    remote_name_of,
     validate_tsv_filename,
     row_to_path,
 )
@@ -42,7 +43,7 @@ def _catalog_filenames(config):
             validate_remote_path(entry["file"])
     remotes = normalize_remotes(config.get("remote"))
     normalize_sources(config.get("sources"),
-                      [remote.get("name") or "origin" for remote in remotes])
+                      [remote_name_of(remote) for remote in remotes])
     return sorted(names)
 
 

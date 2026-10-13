@@ -26,6 +26,7 @@ from . import Repo
 from .remote.download import DownloadError
 from .remote.discovery import path_matches
 from .error import CheckoutError, CloneError
+from .utils import CHECKSUM_ALGORITHMS
 
 
 # use a context manager to translate application errors into clean Click errors
@@ -295,7 +296,7 @@ def status(repo):
 @click.option("--source", help="Catalog source to update or create.")
 @click.option("--prefix", help="Local folder for this source's files.")
 @click.option("--server-checksum",
-              type=click.Choice(["md5", "sha1", "sha256", "sha512"]),
+              type=click.Choice(CHECKSUM_ALGORITHMS),
               help="Have an SSH server hash files that have no published "
                    "checksum. Reads every such file on the server.")
 @click.argument("inputs", nargs=-1, required=True)

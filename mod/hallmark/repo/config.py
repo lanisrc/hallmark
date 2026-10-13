@@ -152,6 +152,16 @@ def _single_data_config(config) -> Optional[dict]:
     return data[0]
 
 
+def remote_name_of(remote: dict) -> str:
+    """
+    Return a data remote's name.
+
+    A catalogue with one remote may leave it unnamed; it is then ``origin``
+    everywhere a remote is chosen or reported.
+    """
+    return remote.get("name") or "origin"
+
+
 def normalize_remotes(remotes) -> list[dict]:
     """
     Normalize remote configuration into a list of dictionaries.

@@ -1245,3 +1245,16 @@ def test_entry_checksum_prefers_strongest_named_checksum():
         "Expected strongest checksum to be sha512, "
         f"but got {_checksum_from_config(entry)}"
     )
+
+
+@pytest.mark.parametrize("algorithm", ["unknown", "", None])
+def test_catalogued_digests_without_an_algorithm_are_named_by_length(algorithm):
+    from hallmark.remote.download import _parse_checksum
+
+    digest = hashlib.sha256(b"x").hexdigest()
+    if algorithm is None:
+        # Without an algorithm column a bare value keeps its old meaning.
+        assert _parse_checksum(digest) == digest
+    else:
+        assert _parse_checksum(digest.upper(), algorithm) == ("sha256", digest)
+        assert _parse_checksum("abc123", algorithm) is None

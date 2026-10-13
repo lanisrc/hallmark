@@ -862,3 +862,32 @@ def test_an_add_never_saves_over_a_change_made_during_its_scan(
     saved = Repo(repo.worktree).state
     assert saved.meta == {"owner": "eht"}
     assert "notes.txt" not in set(saved.data["path"])
+
+
+def test_a_plain_checksums_file_is_verified_by_digest_length(
+        tmp_path, remote_listing, fetched):
+    import hashlib
+
+    pages, _ = remote_listing
+    good = hashlib.sha256((ROOT + "M87_001.fits").encode()).hexdigest()
+    pages[""] += '<a href="checksums.txt">checksums.txt</a>'
+    pages["checksums.txt"] = (f"{good}  M87_001.fits\n"
+                              f"{'0' * 64}  M87_002.fits\n")
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    rows = repo.state.data.set_index("path")
+    assert rows.loc["M87_001.fits", "checksum_algorithm"] == "sha256"
+    assert rows.loc["M87_001.fits", "checksum_source"] == "published"
+    result = repo.download(repo.plan_download(all_files=True), approved=True)
+    assert result["succeeded"] == 1
+    assert result["errors"] == ["Checksum mismatch for M87_002.fits (sha256)"]
+
+
+def test_an_unnamed_remote_is_origin_everywhere(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    repo.state.config["remote"] = {"url": ROOT}
+    repo.dothm.save_state(repo.state)
+    plan = Repo(repo.worktree).plan_download(all_files=True, remote_name="origin")
+    assert plan.remote_name == "origin"
+    assert list(plan.remotes) == ["origin"]

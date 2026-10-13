@@ -24,11 +24,13 @@ from ..utils import (
     FILE_IO_CHUNK_SIZE,
     as_list_of_dicts,
     calculate_file_checksums,
+    infer_checksum_algorithm,
     require_nonempty_string,
     resolve_path_in_root,
     is_valid_checksum)
 from ..repo.config import (
     normalize_remotes,
+    remote_name_of,
     validate_tsv_filename,
     row_to_path)
 
@@ -154,9 +156,11 @@ def _parse_checksum(value, algorithm=None) -> Optional[ChecksumSpec]:
 
     # Clean the algorithm value to ensure it is usable
     algorithm_text = _clean_checksum(algorithm)
-    # If the algorithm is None, return None to indicate no valid algorithm is available
+    # A digest catalogued without its algorithm, or as "unknown", is still
+    # verified: its length names the algorithm.
     if algorithm_text is None:
-        return None
+        inferred = infer_checksum_algorithm(checksum)
+        return None if inferred is None else (inferred, checksum.lower())
     # Normalize the algorithm to lowercase and check if it is supported
     algorithm_text = algorithm_text.lower()
     if algorithm_text not in SUPPORTED_CHECKSUM_ALGORITHMS:
@@ -406,7 +410,7 @@ def _select_remote_config(repo, remote_name: Optional[str] = None) -> Optional[d
         raise DownloadError(str(exc)) from exc
 
     # Count the number of unnamed remotes in the configuration
-    named_remotes = {remote["name"]: remote for remote in remotes if "name" in remote}
+    named_remotes = {remote_name_of(remote): remote for remote in remotes}
     # if a specific remote name is provided, attempt to select it from the named remotes
     if remote_name is not None:
         # Normalize the requested remote name to ensure it is a non-empty string
@@ -856,7 +860,7 @@ def _route_items(repo, items, remote_name, source_names=None):
     """
     try:
         sources = effective_sources(repo.state)
-        configured = {remote.get("name") or "origin": remote for remote in
+        configured = {remote_name_of(remote): remote for remote in
                       normalize_remotes(_repository_config(repo).get("remote"))}
     except ValueError as exc:
         raise DownloadError(str(exc)) from exc
@@ -894,7 +898,7 @@ def _route_items(repo, items, remote_name, source_names=None):
             remote = default
         if remote is None or not remote.get("url"):
             raise DownloadError("No remote URL is configured in config.yml")
-        name = remote.get("name") or "origin"
+        name = remote_name_of(remote)
         used[name] = remote
         remote_path = source.remote_path(path) if source is not None else path
         routed.append(replace(
@@ -987,7 +991,8 @@ def plan_download(
         items, output_root, getattr(repo, "objects", None))
     return DownloadPlan(
         tuple(items), remote.get("url"), output_root,
-        remote_auth=remote.get("auth"), remote_name=remote.get("name"),
+        remote_auth=remote.get("auth"),
+        remote_name=remote_name_of(remote) if remote.get("url") else None,
         estimated_bytes_per_second=estimated_bytes_per_second,
         remote_backend=pinned.get("backend"),
         backend_options=remote.get("backend_options"), skipped_items=tuple(skipped),

@@ -32,6 +32,25 @@ CHECKSUM_ALGORITHMS_BY_STRENGTH = tuple(
     sorted(CHECKSUM_ALGORITHMS, key=CHECKSUM_LENGTHS.__getitem__, reverse=True))
 # create a frozenset of supported checksum algorithms for efficient membership testing.
 SUPPORTED_CHECKSUM_ALGORITHMS = frozenset(CHECKSUM_ALGORITHMS)
+
+
+def infer_checksum_algorithm(digest) -> str | None:
+    """
+    Return the algorithm a hexadecimal digest's length identifies, or None.
+
+    Each supported algorithm has its own digest length, so a digest published
+    without its algorithm, as in a plain ``checksums.txt``, still names it.
+
+    Args:
+        digest: Hexadecimal digest.
+    """
+    text = str(digest).strip().lower()
+    for algorithm, length in CHECKSUM_LENGTHS.items():
+        if len(text) == length and is_valid_checksum(algorithm, text):
+            return algorithm
+    return None
+
+
 # remote request timeout settings for network operations (connect timeout, read timeout)
 REMOTE_REQUEST_TIMEOUT = (10, 30)
 # define a frozenset of internal repo names that should be ignored during processing.
