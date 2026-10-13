@@ -39,24 +39,38 @@ def test_saved_paths_are_literal_not_pathspecs(tmp_path):
     paths = ["a*b [1].h5", "ab [1].h5", "ünï code/x?.h5", ":(glob)y.h5"]
     repo.dothm.save_state(remote_state(repo, paths))
     staged = {path for path, _ in repo.dothm.index.entries}
-    assert {f"versions/{path}" for path in paths} <= staged
+    assert staged == {"README.md", "config.yml", "meta.yml", "data.tsv"}
     assert sorted(repo.status()["staged"]["added"]) == sorted(paths)
     assert repo.commit("Literal names")
     assert sorted(Repo(repo.worktree).state.data["path"]) == sorted(paths)
 
 
-def test_unchanged_records_are_not_rewritten(tmp_path):
+def test_saving_drops_per_row_records_and_keeps_old_commits_readable(tmp_path):
     repo = Repo.init(tmp_path / "repo")
-    state = remote_state(repo, ["a.h5", "b.h5"], sha1=["", ""])
-    repo.dothm.save_state(state)
+    state = remote_state(repo, ["b.h5", "a.h5"], sha1=["", ""])
+    # Write the layout older versions committed: one JSON record per row.
+    import json
     versions = repo.dothm.path / "versions"
-    before = {name: (versions / name).stat().st_ino for name in ("a.h5", "b.h5")}
-    state.data.loc[state.data["path"] == "b.h5", "sha1"] = "1" * 40
-    repo.dothm.save_state(state)
-    after = {name: (versions / name).stat().st_ino for name in ("a.h5", "b.h5")}
-    assert after["a.h5"] == before["a.h5"]
-    assert after["b.h5"] != before["b.h5"]
-    assert repo.status()["staged"]["added"] == ["a.h5", "b.h5"]
+    versions.mkdir()
+    for record in state.data.to_dict(orient="records"):
+        (versions / record["path"]).write_text(json.dumps(record, sort_keys=True))
+    (repo.dothm.path / "versions.yml").write_text(
+        "columns: [path, source, sha1]\n")
+    (repo.dothm.path / "data.tsv").write_text("unused\n")
+    repo.dothm.write_yaml(state.config, "config")
+    repo.dothm.git.add("config.yml", "data.tsv", "versions.yml", "versions")
+    repo.commit("Older layout")
+    old = repo.dothm.load_state("HEAD")
+    assert sorted(old.data["path"]) == ["a.h5", "b.h5"]
+
+    repo.dothm.save_state(Repo(repo.worktree).state)
+    staged = {path for path, _ in repo.dothm.index.entries}
+    assert staged == {"README.md", "config.yml", "meta.yml", "data.tsv"}
+    assert not versions.exists() and not (repo.dothm.path / "versions.yml").exists()
+    assert repo.dothm.load_state(staged=True).data["path"].tolist() == ["a.h5", "b.h5"]
+    assert repo.status()["staged"]["added"] == []
+    repo.commit("Keep the catalogue in data.tsv")
+    assert repo.dothm.load_state("HEAD~1").data["path"].tolist() == ["a.h5", "b.h5"]
 
 
 def test_saving_a_loaded_catalogue_changes_nothing(tmp_path, monkeypatch):
@@ -87,7 +101,12 @@ def test_adding_a_source_leaves_other_rows_untouched(tmp_path, monkeypatch):
     repo.commit("Catalogue")
     repo.add("https://x.test/d/", filter="*.txt", source="notes")
     changed = {diff.a_path or diff.b_path for diff in repo.dothm.index.diff("HEAD")}
-    assert changed == {"config.yml", "data.tsv", "versions/notes.txt"}
+    assert changed == {"config.yml", "data.tsv"}
+    head = repo.dothm.git.show("HEAD:data.tsv").splitlines()
+    staged = repo.dothm.git.show(":data.tsv").splitlines()
+    # Existing rows keep their exact lines; only the new row and column appear.
+    assert [line.split("\t")[:9] for line in staged if "M87" in line] == [
+        line.split("\t") for line in head[1:]]
 
 
 def test_local_patterns_and_paths_record_the_same_field_text(tmp_path):

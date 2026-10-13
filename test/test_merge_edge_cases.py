@@ -175,7 +175,7 @@ def test_checkout_after_unstaging_preserves_unstaged_metadata(tmp_path):
     assert not repo.dothm.index.diff("HEAD")
     metadata_before = {
         name: (repo.dothm.path / name).read_bytes()
-        for name in ("data.tsv", "versions/data_2.txt")}
+        for name in ("data.tsv",)}
     index_before = repo.dothm.index.entries.copy()
     head_before = repo.dothm.head.commit.hexsha
 

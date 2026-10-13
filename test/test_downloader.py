@@ -776,12 +776,11 @@ def test_select_download_items_combines_explicit_and_tsv_and_upgrades_checksum(
     """
     repo = _repo(
         tmp_path,
-        {"data": [{"fmt": "{name}.fits", "db": "data.tsv"}]})
-    pd.DataFrame(
-        [
+        {"data": [{"fmt": "{name}.fits", "db": "data.tsv"}]},
+        pd.DataFrame([
             {"path": "same.fits", "sha1": "abc123"},
             {"path": "other.fits", "sha1": "unknown"},
-        ]).to_csv(repo.dothm.path / "data.tsv", sep="\t", index=False)
+        ]))
     selected = _selected(
         repo,
         file_paths=["same.fits"],
@@ -962,14 +961,15 @@ def test_select_download_items_preserves_default_pandas_na_tokens(tmp_path):
         tmp_path,{
             "data": [{
                 "fmt": "data/{source}.fits",
-                "db": "data.tsv"}]})
-    (repo.dothm.path / "data.tsv").write_text(
+                "db": "survey.tsv"}]})
+    # Extra catalogue TSVs, unlike data.tsv, are read from disk.
+    (repo.dothm.path / "survey.tsv").write_text(
         "sha1\tsource\n"
         f"{'a' * 40}\tNA\n"
         f"{'b' * 40}\tNone\n"
         f"{'c' * 40}\tnull\n",
         encoding="utf-8")
-    selected = _selected(repo, tsv_names=["data.tsv"])
+    selected = _selected(repo, tsv_names=["survey.tsv"])
 
     assert [path.as_posix() for path, _ in selected] == [
         "data/NA.fits", "data/None.fits", "data/null.fits"], f"Expected files with \
@@ -986,8 +986,8 @@ def test_select_download_items_reads_tsv_in_chunks(monkeypatch, tmp_path):
         tmp_path: A pytest fixture providing a temporary directory.
     """
     repo = _repo(
-        tmp_path, {"data": [{"fmt": "data/{source}.fits", "db": "data.tsv"}]})
-    (repo.dothm.path / "data.tsv").write_text("placeholder\n", encoding="utf-8")
+        tmp_path, {"data": [{"fmt": "data/{source}.fits", "db": "survey.tsv"}]})
+    (repo.dothm.path / "survey.tsv").write_text("placeholder\n", encoding="utf-8")
     captured = {}
     def fake_read_csv(path, **kwargs):
         """A fake pd.read_csv function that records its arguments and returns
@@ -998,10 +998,10 @@ def test_select_download_items_reads_tsv_in_chunks(monkeypatch, tmp_path):
             pd.DataFrame([{"sha1": "a" * 40, "source": "M87"}]),
             pd.DataFrame([{"sha1": "b" * 40, "source": "SGRA"}])])
     monkeypatch.setattr("hallmark.remote.download.pd.read_csv", fake_read_csv)
-    selected = _selected(repo, tsv_names=["data.tsv"])
+    selected = _selected(repo, tsv_names=["survey.tsv"])
 
-    assert captured["path"] == repo.dothm.path / "data.tsv", f"Expected TSV path to be \
-        {repo.dothm.path / 'data.tsv'}, but got {captured['path']}"
+    assert captured["path"] == repo.dothm.path / "survey.tsv", \
+        f"Expected TSV path {repo.dothm.path / 'survey.tsv'}, got {captured['path']}"
     assert captured["kwargs"]["chunksize"] == TSV_READ_CHUNK_SIZE, f"Expected chunksize\
           {TSV_READ_CHUNK_SIZE}, but got {captured['kwargs']['chunksize']}"
     assert [path.as_posix() for path, _ in selected] == [
@@ -1116,11 +1116,8 @@ def test_select_download_items_accepts_single_data_mapping(tmp_path):
         tmp_path,{
             "data": {
                 "fmt": "{name}.fits",
-                "db": "data.tsv"}})
-    pd.DataFrame([{
-            "path": "image.fits",
-            "sha1": "abc123",
-        }]).to_csv(repo.dothm.path / "data.tsv", sep="\t", index=False)
+                "db": "data.tsv"}},
+        pd.DataFrame([{"path": "image.fits", "sha1": "abc123"}]))
     selected = _selected(repo, tsv_names=["data.tsv"])
 
     assert selected == [(Path("image.fits"), "abc123")], f"Expected selected files to \

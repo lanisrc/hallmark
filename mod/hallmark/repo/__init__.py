@@ -889,7 +889,7 @@ class Repo:
         if not base.is_relative_to(root):
             base = root
 
-        targets = []
+        files, rows = [], []
         for value in paths:
             raw = require_nonempty_string(str(value), label="restore path")
             candidate = root if Path(raw) == Path(".") else Path(
@@ -901,7 +901,7 @@ class Repo:
                 )
 
             if candidate in (root, self.dothm.path):
-                targets.append(".")
+                files.append(".")
             elif candidate.is_relative_to(self.dothm.path):
                 relative = candidate.relative_to(self.dothm.path)
                 relative = validate_relative_path(
@@ -913,14 +913,13 @@ class Repo:
                     raise ValueError(
                         "Use dataset paths to restore file versions"
                     )
-                targets.append(relative.as_posix())
+                files.append(relative.as_posix())
             else:
-                relative = validate_relative_path(
+                rows.append(validate_relative_path(
                     candidate.relative_to(root), label="restore path"
-                )
-                targets.append(f"versions/{relative.as_posix()}")
+                ).as_posix())
 
-        self.dothm.restore_index(targets)
+        self.dothm.restore_index(files, rows)
         self.state = self.dothm.load_state()
 
     def log(self) -> str:

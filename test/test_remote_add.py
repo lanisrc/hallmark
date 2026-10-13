@@ -713,3 +713,31 @@ def test_catalogued_checksum_is_verified_before_a_known_sha1(
     assert (result["succeeded"], result["failed"]) == (1, 1)
     assert "b.fits (sha1)" in result["errors"][0]
     assert (repo.worktree / "a.fits").read_bytes() == b"right"
+
+
+def test_downloads_select_the_staged_catalogue_not_the_file_on_disk(
+        tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    repo.commit("FITS files")
+    repo.add(ROOT, filter="*.txt", source="notes", prefix="notes")
+    repo.restore_staged(["."])
+    # Unstaging keeps .hm/data.tsv on disk as it was, like a git working copy.
+    assert "notes/notes.txt" in (repo.dothm.path / "data.tsv").read_text()
+    plan = repo.plan_download(all_files=True)
+    assert sorted(item.relative_path.as_posix() for item in plan.items) == [
+        "M87_001.fits", "M87_002.fits"]
+
+
+def test_unstaging_a_folder_returns_its_rows_to_head(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    repo.commit("FITS files")
+    head_tsv = repo.dothm.git.show("HEAD:data.tsv")
+    repo.add(ROOT, filter="*.txt", source="notes", prefix="notes")
+    assert repo.status()["staged"]["added"] == ["notes/notes.txt"]
+    repo.restore_staged(["notes"])
+    assert repo.status()["staged"]["added"] == []
+    assert repo.dothm.git.show(":data.tsv") == head_tsv
+    with pytest.raises(ValueError, match="No staged or committed path matches"):
+        repo.restore_staged(["missing"])

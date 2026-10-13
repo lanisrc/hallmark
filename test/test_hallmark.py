@@ -3219,9 +3219,6 @@ def test_load_head_state_reads_committed_versions_and_metadata(tmp_path):
     repo.add("a{a}_i{i}.h5")
     committed_config = repo.dothm.read_yaml("config")
 
-    data_path = repo.dothm.path / "data.tsv"
-    data_path.write_text("unrelated file contents\n", encoding="utf-8")
-    repo.dothm.index.add(["data.tsv"])
     repo.commit("Committed versions")
 
     path.write_text("changed\n", encoding="utf-8")

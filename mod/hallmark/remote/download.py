@@ -657,6 +657,12 @@ def _select_download_items(
                 f"TSV {tsv_name!r} is not configured. "
                 f"Configured TSVs: {configured}")
 
+        if tsv_name == "data.tsv":
+            # The catalogue is the state, loaded from the index; data.tsv on
+            # disk can hold unstaged rows.
+            add_frame(repo.state.data, fmt_entries,
+                      explicit_only=tsv_name not in requested_tsvs)
+            continue
         # Construct the path to the TSV file in the repository's dothm directory.
         tsv_path = repo.dothm.path / tsv_name
         # if the TSV file does not exist at the constructed path, raise an error
