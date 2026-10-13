@@ -687,8 +687,7 @@ def test_checkout_rewrites_tracked_files_and_shares_objects(tmp_path):
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
 
-    main_objects = sorted(p.relative_to(repo.dothm.path)
-            for p in (repo.dothm.path / "objects").rglob("*") if p.is_file())
+    main_objects = repo.objects.checksums()
     assert len(main_objects) == 2
 
     repo.create_branch("experiment")
@@ -708,8 +707,7 @@ def test_checkout_rewrites_tracked_files_and_shares_objects(tmp_path):
                 for path in Path(str(repo.worktree)).glob("*.h5"))
     assert main_files == ["a0_i0.h5", "a0_i30.h5"]
 
-    objects_after = [p for p in (repo.dothm.path /
-                            "objects").rglob("*") if p.is_file()]
+    objects_after = repo.objects.checksums()
     assert len(objects_after) == 4
 
     repo.checkout("experiment")

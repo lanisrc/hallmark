@@ -174,7 +174,7 @@ def test_committed_and_downloaded_content_share_one_object(tmp_path):
     source.write_bytes(b"payload")
     assert store.store(source, sha1_of(b"payload")) == downloaded
     assert downloaded.stat().st_nlink == 1
-    assert len([path for path in store.root.rglob("*") if path.is_file()]) == 1
+    assert store.checksums() == [sha1_of(b"payload")]
 
 
 def test_storing_replaces_an_object_edited_in_place(tmp_path):
@@ -206,3 +206,60 @@ def test_checkout_restores_local_files_as_writable_copies(tmp_path):
     assert path.stat().st_ino != repo.objects.object_path(
         sha1_of(b"first\n")).stat().st_ino
     assert not writable(repo.objects.object_path(sha1_of(b"first\n")))
+
+
+def later(path, seconds=10):
+    """Move a file's modification time forward, as an edit made later would."""
+    info = os.stat(path)
+    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + seconds * 10**9))
+
+
+def test_published_objects_record_their_stat(tmp_path):
+    store = Objects(tmp_path)
+    target = published(store)
+    digest = sha1_of(b"payload")
+    record = tmp_path / "objects" / "stat" / digest[:2] / digest[2:]
+    info = target.stat()
+    assert record.read_text() == f"{info.st_size} {info.st_mtime_ns}\n"
+    assert store.verify(digest)
+    assert not store.changed(digest)
+
+
+def test_a_touched_object_is_rehashed_once_and_kept(tmp_path):
+    store = Objects(tmp_path)
+    target = published(store)
+    digest = sha1_of(b"payload")
+    later(target)
+    assert store.changed(digest)
+    assert store.verify(digest)
+    assert not store.changed(digest)
+    assert target.read_bytes() == b"payload"
+
+
+def test_an_object_edited_in_place_is_discarded(tmp_path):
+    store = Objects(tmp_path)
+    target = published(store)
+    digest = sha1_of(b"payload")
+    linked = tmp_path / "linked"
+    store.materialize(digest, linked)
+    os.chmod(linked, 0o600)
+    linked.write_bytes(b"PAYLOAD")
+    later(linked)
+    assert store.changed(digest)
+    assert not store.verify(digest)
+    assert not target.exists()
+    assert not (tmp_path / "objects" / "stat" / digest[:2] / digest[2:]).exists()
+    # The edited file keeps the user's bytes; only the store forgets them.
+    assert linked.read_bytes() == b"PAYLOAD"
+    assert not store.verify(digest)
+
+
+def test_objects_without_a_record_are_trusted_once(tmp_path):
+    store = Objects(tmp_path)
+    published(store)
+    digest = sha1_of(b"payload")
+    record = tmp_path / "objects" / "stat" / digest[:2] / digest[2:]
+    record.unlink()
+    assert not store.changed(digest)
+    assert store.verify(digest)
+    assert record.is_file()

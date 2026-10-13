@@ -738,7 +738,8 @@ def _existing_file_status(item, destination, store):
     if not destination.is_file() or destination.is_symlink():
         return None
     if store is not None and item.sha1 is not None:
-        if store.is_linked(item.sha1, destination):
+        # A link is the object itself, trusted while the object is unchanged.
+        if store.is_linked(item.sha1, destination) and store.verify(item.sha1):
             if (item.size_bytes is not None
                     and destination.stat().st_size != item.size_bytes):
                 return None
@@ -799,14 +800,19 @@ def _check_existing_files(items, output_root, store=None):
                 conflicts.append(item.relative_path.as_posix())
             elif not os.path.lexists(destination):
                 if (store is not None and item.sha1 is not None
-                        and store.contains(item.sha1)):
+                        and store.verify(item.sha1)):
                     stored.append(item)
                 else:
                     pending.append(item)
             else:
+                edited = (store is not None and item.sha1 is not None
+                          and store.is_linked(item.sha1, destination)
+                          and store.changed(item.sha1))
                 status = _existing_file_status(item, destination, store)
                 if status is None:
-                    conflicts.append(item.relative_path.as_posix())
+                    conflicts.append(item.relative_path.as_posix() + (
+                        " (edited in place; delete it to download a fresh copy)"
+                        if edited else ""))
                 else:
                     skipped.append(status)
         except (OSError, ValueError) as exc:

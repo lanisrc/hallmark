@@ -667,6 +667,8 @@ class Repo:
                 worktree_modified, worktree_deleted = find_changed_and_missing_files(
                     self, staged_map
                 )
+            else:
+                worktree_modified = self._downloads_changed_in_place(staged_state)
             worktree_root = Path(self.worktree)
             # generator that yields relative paths of all files in the worktree
             worktree_files = (full_path.relative_to(worktree_root).as_posix()
@@ -704,6 +706,30 @@ class Repo:
             "untracked": sorted(untracked),
             "remote_catalog": remote_catalog,
         }
+
+    def _downloads_changed_in_place(self, state) -> list[str]:
+        """
+        Used by status.
+        List downloaded files whose object changed since it was stored.
+
+        A download is a hard link to its object, so an in-place edit changes
+        both. Only recorded stats are compared; nothing is hashed.
+        """
+        data = state.data
+        if not {"path", "sha1"} <= set(data.columns):
+            return []
+        changed = []
+        for path, sha1 in zip(data["path"].astype(str), data["sha1"].astype(str)):
+            if not sha1:
+                continue
+            try:
+                destination = resolve_path_in_root(
+                    self.worktree, path, label="downloaded path")
+            except ValueError:
+                continue
+            if self.objects.is_linked(sha1, destination) and self.objects.changed(sha1):
+                changed.append(path)
+        return changed
 
     def add(self, fmt: str, encoding: bool = False, *, filter=None,
             remote_fmt=None, auth=None, backend=None, backend_options=None,

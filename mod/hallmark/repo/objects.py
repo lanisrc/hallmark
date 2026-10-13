@@ -11,6 +11,12 @@ same bytes are never stored twice.
 
 Every object is read-only. Some objects are the only copy of a committed
 local file, so nothing in the store may be deleted by hand.
+
+A download stays hard-linked to its object, so writing to it in place, after
+``chmod`` or as root, would change the object too. Each object therefore has
+a record of its size and modification time in ``objects/stat/``, as git's
+index and git-annex's inode cache keep for the files they track. A link is
+only trusted while its object still matches that record.
 """
 
 import hashlib
@@ -70,6 +76,7 @@ class Objects:
         """
         self.root = Path(path) / name
         self.tmp = self.root / "tmp"
+        self.stats = self.root / "stat"
 
     @staticmethod
     def _copy_and_verify_file(
@@ -215,6 +222,22 @@ class Objects:
         """
         return self._path_for_checksum(sha1)
 
+    def checksums(self) -> list[str]:
+        """
+        Return the SHA-1 of every stored object, sorted.
+
+        Stat records and unfinished downloads are not objects and are left out.
+        """
+        if not self.root.is_dir():
+            return []
+        found = []
+        for folder in self.root.iterdir():
+            if len(folder.name) != 2 or not folder.is_dir():
+                continue
+            found.extend(folder.name + entry.name for entry in folder.iterdir()
+                         if is_valid_checksum("sha1", folder.name + entry.name))
+        return sorted(found)
+
     def missing_checksums(self, checksums: Iterable[str]) -> list[str]:
         """
         Return a sorted list of checksums that are not present in the object store.
@@ -243,6 +266,84 @@ class Objects:
             return True
         target.unlink()
         return False
+
+    def _stat_path(self, sha1: str) -> Path:
+        normalized = self._validate_sha1(sha1)
+        return self.stats / normalized[:2] / normalized[2:]
+
+    def _record_stat(self, sha1: str) -> None:
+        """Record the size and modification time of a verified object."""
+        info = self.object_path(sha1).stat()
+        record = self._stat_path(sha1)
+        record.parent.mkdir(parents=True, exist_ok=True)
+        with replace_file_on_success(record) as temp:
+            temp.write_text(f"{info.st_size} {info.st_mtime_ns}\n", encoding="ascii")
+
+    def _recorded_stat(self, sha1: str) -> Optional[tuple]:
+        try:
+            size, mtime_ns = self._stat_path(sha1).read_text(encoding="ascii").split()
+            return int(size), int(mtime_ns)
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def changed(self, sha1: str) -> bool:
+        """
+        Return whether an object no longer matches its recorded stat.
+
+        Nothing is hashed or removed, so this suits read-only reports. An
+        object without a record, or a missing object, is not reported.
+
+        Args:
+            sha1 (str): Object to check.
+        """
+        recorded = self._recorded_stat(sha1)
+        try:
+            info = self.object_path(sha1).stat()
+        except FileNotFoundError:
+            return False
+        return recorded is not None and recorded != (info.st_size, info.st_mtime_ns)
+
+    def verify(self, sha1: str) -> bool:
+        """
+        Return whether an object can be trusted to hold its named content.
+
+        An object matching its recorded stat is trusted without hashing. One
+        that differs is hashed: if the bytes still match, as after ``touch``,
+        the record is renewed; otherwise the object was changed in place and
+        is discarded, so it is downloaded again rather than linked anywhere
+        else. An object stored before records existed is trusted and recorded.
+
+        Args:
+            sha1 (str): Object to check.
+
+        Returns:
+            bool: True if the object exists and holds its content.
+        """
+        path = self.object_path(sha1)
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            return False
+        recorded = self._recorded_stat(sha1)
+        if recorded == (info.st_size, info.st_mtime_ns):
+            return True
+        if recorded is not None and self._calculate_sha1(path) != sha1.lower():
+            self.discard(sha1)
+            return False
+        self._record_stat(sha1)
+        return True
+
+    def discard(self, sha1: str) -> None:
+        """
+        Remove an object and its record from the store.
+
+        Worktree files hard-linked to it keep their bytes.
+
+        Args:
+            sha1 (str): Object to remove.
+        """
+        self.object_path(sha1).unlink(missing_ok=True)
+        self._stat_path(sha1).unlink(missing_ok=True)
 
     def store(self, src: Path, sha1: str, *, actual_sha1: Optional[str] = None) -> Path:
         """
@@ -278,11 +379,10 @@ class Objects:
                 f'File "{src}" changed after it was added: '
                 f"expected SHA-1 {expected_sha1}, got {actual_sha1}. "
                 "Run hm add again before committing.")
-        if stored.is_file() and self._keep_or_replace(stored, expected_sha1):
-            return stored
-
-        self._copy_and_verify_file(src, stored, expected_sha1=expected_sha1)
-        _make_read_only(stored)
+        if not (stored.is_file() and self._keep_or_replace(stored, expected_sha1)):
+            self._copy_and_verify_file(src, stored, expected_sha1=expected_sha1)
+            _make_read_only(stored)
+        self._record_stat(expected_sha1)
         return stored
 
     def restore(self, sha1: str, dest: Path) -> Path:
@@ -351,6 +451,7 @@ class Objects:
         except FileExistsError:
             if not self._keep_or_replace(target, sha1):
                 os.replace(temp, target)
+        self._record_stat(sha1)
         return target
 
     def is_linked(self, sha1: str, path: Path) -> bool:

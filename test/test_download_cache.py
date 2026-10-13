@@ -322,3 +322,49 @@ def test_dry_run_lists_files_coming_from_the_cache(repo, server, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Placed 1 file(s) from .hm/objects" in result.output
     assert "Successfully downloaded" not in result.output
+
+
+def later(path, seconds=10):
+    """Move a file's modification time forward, as an edit made later would."""
+    info = os.stat(path)
+    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + seconds * 10**9))
+
+
+def test_a_download_edited_in_place_is_reported_and_fetched_again(repo, server):
+    files, fetched = server
+    download(repo)
+    repo.commit("Record downloaded content")
+    path = repo.worktree / "b.fits"
+    os.chmod(path, 0o644)
+    path.write_bytes(b"BRAVO")
+    later(path)
+    assert repo.status()["worktree"]["modified"] == ["b.fits"]
+    with pytest.raises(Exception, match=r"b\.fits \(edited in place"):
+        repo.plan_download(all_files=True)
+    # The changed object was dropped, so it can never be linked again.
+    assert not repo.objects.contains(sha1(b"bravo"))
+    path.unlink()
+    fetched.clear()
+    plan, result = download(repo)
+    assert [item.relative_path.name for item in plan.items] == ["b.fits"]
+    assert plan.stored_items == ()
+    assert fetched == ["b.fits"] and result["failed"] == 0
+    assert path.read_bytes() == b"bravo"
+    assert repo.objects.is_linked(sha1(b"bravo"), path)
+    assert repo.status()["worktree"]["modified"] == []
+
+
+def test_a_changed_object_is_transferred_again_not_relinked(repo, server):
+    files, fetched = server
+    download(repo)
+    repo.commit("Record downloaded content")
+    (repo.worktree / "b.fits").unlink()
+    obj = repo.objects.object_path(sha1(b"bravo"))
+    os.chmod(obj, 0o644)
+    obj.write_bytes(b"BRAVO")
+    later(obj)
+    fetched.clear()
+    plan, result = download(repo)
+    assert plan.stored_items == ()
+    assert fetched == ["b.fits"] and result["failed"] == 0
+    assert (repo.worktree / "b.fits").read_bytes() == b"bravo"
