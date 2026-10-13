@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from threading import Lock
 
-from ..utils import names_repository_metadata
+from ..utils import CHECKSUM_ALGORITHMS_BY_STRENGTH, names_repository_metadata
 from .base import (
     CapabilityError,
     DataBackend,
@@ -29,6 +31,8 @@ OPTIONS = {"endpoint_url", "region", "addressing_style", "anonymous", "etag_md5"
            "page_size"}
 # Object checksums worth a HEAD request; CRC values are not content digests.
 _HEAD_CHECKSUMS = {"SHA256": "sha256", "SHA1": "sha1"}
+# Concurrent HEAD requests; botocore's default connection pool holds ten.
+_HEAD_WORKERS = 10
 _MISSING = {"NoSuchKey", "404", "NotFound", "NoSuchBucket"}
 _DENIED = {"AccessDenied", "403", "InvalidAccessKeyId", "SignatureDoesNotMatch",
            "ExpiredToken", "InvalidToken"}
@@ -91,6 +95,8 @@ class S3Backend(DataBackend):
         self.prefix = root + "/" if root else ""
         self._client = None
         self._lock = Lock()
+        # Keys whose listing names a SHA checksum only a HEAD request returns.
+        self._checksum_keys = {}
 
     def prepare(self):
         """Create the client, reading profile secrets once."""
@@ -190,7 +196,11 @@ class S3Backend(DataBackend):
             raise DownloadError("S3 listing contains an unsafe key") from None
         if path != relative:
             raise DownloadError("S3 listing contains an unsafe key")
-        algorithm, digest = self._listed_checksum(item)
+        listed = {name.upper() for name in item.get("ChecksumAlgorithm", ())}
+        wanted = [name for name in _HEAD_CHECKSUMS if name in listed]
+        if wanted:
+            self._checksum_keys[path] = (key, wanted)
+        algorithm, digest = self._etag_checksum(item)
         return RemoteEntry(
             path=path, size=item.get("Size"),
             mtime=int(item["LastModified"].timestamp()) if item.get("LastModified")
@@ -198,19 +208,50 @@ class S3Backend(DataBackend):
             checksum_algorithm=algorithm, checksum=digest,
             checksum_source="server" if digest else None)
 
-    def _listed_checksum(self, item):
-        """Return a whole-object digest the store keeps for a listed object."""
-        listed = {name.upper() for name in item.get("ChecksumAlgorithm", ())}
-        wanted = [name for name in _HEAD_CHECKSUMS if name in listed]
-        if wanted:
-            head = self._client.head_object(
-                Bucket=self.bucket, Key=item["Key"], ChecksumMode="ENABLED")
+    def complete_entries(self, entries):
+        """Ask for the SHA checksums of selected objects, several at a time."""
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        strength = {name: index for index, name in
+                    enumerate(CHECKSUM_ALGORITHMS_BY_STRENGTH)}
+        needed = []
+        for entry in entries:
+            key, wanted = self._checksum_keys.get(entry.path, (None, ()))
+            best = min((strength[_HEAD_CHECKSUMS[name]] for name in wanted),
+                       default=None)
+            # A published checksum at least as strong needs no request.
+            if best is None or (entry.checksum and best >= strength.get(
+                    entry.checksum_algorithm, len(strength))):
+                continue
+            needed.append((entry, key, wanted))
+        if not needed:
+            return entries
+
+        def head(job):
+            entry, key, wanted = job
+            self.context.check_cancelled()
+            response = self._client.head_object(
+                Bucket=self.bucket, Key=key, ChecksumMode="ENABLED")
             # Multipart uploads report a checksum of part checksums instead.
-            if head.get("ChecksumType", "FULL_OBJECT") == "FULL_OBJECT":
-                for name in wanted:
-                    digest = _hex_digest(head.get(f"Checksum{name}"))
-                    if digest:
-                        return _HEAD_CHECKSUMS[name], digest
+            if response.get("ChecksumType", "FULL_OBJECT") != "FULL_OBJECT":
+                return entry
+            for name in wanted:
+                digest = _hex_digest(response.get(f"Checksum{name}"))
+                if digest:
+                    return replace(entry, checksum_algorithm=_HEAD_CHECKSUMS[name],
+                                   checksum=digest, checksum_source="server")
+            return entry
+
+        try:
+            workers = min(len(needed), _HEAD_WORKERS)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                done = {result.path: result for result in pool.map(head, needed)}
+        except (BotoCoreError, ClientError) as exc:
+            raise self._error(exc) from None
+        return [done.get(entry.path, entry) for entry in entries]
+
+    def _etag_checksum(self, item):
+        """Return a listed object's ETag as MD5 where the remote allows it."""
         etag = str(item.get("ETag", "")).strip('"').lower()
         # A single-part upload's ETag is its MD5 unless the object is encrypted
         # with KMS or customer keys, so it is used only when the remote says so.

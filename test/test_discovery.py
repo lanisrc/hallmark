@@ -230,7 +230,8 @@ def test_sftp_metadata_and_progress_callback():
         on_directory("nested")
         yield RemoteEntry(path="nested/file.bin", size=20)
 
-    source.transport = SimpleNamespace(iter_entries=entries, prepare=lambda: None)
+    source.transport = SimpleNamespace(iter_entries=entries, prepare=lambda: None,
+                                       complete_entries=lambda found: found)
     snapshots = []
     selected = discover_remote_files(
         source, filter="**/*.fits", progress=snapshots.append

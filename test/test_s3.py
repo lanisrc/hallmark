@@ -166,3 +166,25 @@ def test_an_empty_metadata_object_reads_as_empty_text(s3):
     remote = RemoteSpec.from_url(f"s3://{BUCKET}/m87/")
     with OperationContext(remote) as context:
         assert context.read_text("SHA256SUMS") == ""
+
+
+def test_checksums_are_requested_only_for_selected_objects(s3):
+    for index in range(5):
+        s3.put_object(Bucket=BUCKET, Key=f"many/run{index}.h5", Body=b"x" * index,
+                      ChecksumAlgorithm="SHA256")
+    heads = []
+    remote = RemoteSpec.from_url(f"s3://{BUCKET}/many/")
+    with OperationContext(remote) as context:
+        context.transport.prepare()
+        client = context.transport._client
+        original = client.head_object
+
+        def head_object(**kwargs):
+            heads.append(kwargs["Key"])
+            return original(**kwargs)
+
+        client.head_object = head_object
+        found = discover_remote_files(context, filter="run[12].h5")
+    assert [entry.path for entry in found] == ["run1.h5", "run2.h5"]
+    assert sorted(heads) == ["many/run1.h5", "many/run2.h5"]
+    assert {entry.checksum_algorithm for entry in found} == {"sha256"}

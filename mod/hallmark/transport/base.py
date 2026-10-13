@@ -454,6 +454,21 @@ class DataBackend:
         """
         raise NotImplementedError
 
+    def complete_entries(self, entries):
+        """
+        Fill in metadata that costs a request per file, for selected files.
+
+        Discovery calls this after filtering, so a backend that must ask for
+        each file's checksum only asks for the files a source keeps.
+
+        Args:
+            entries (list[RemoteEntry]): Selected entries.
+
+        Returns:
+            list[RemoteEntry]: The entries, completed where the backend can.
+        """
+        return entries
+
     def iter_entries(self, on_directory=None):
         """
         Yield file metadata from a recursive directory listing.

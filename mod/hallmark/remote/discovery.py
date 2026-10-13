@@ -217,6 +217,7 @@ def discover_remote_files(
         _attach_published_checksums(context, entries)
         selected = [entries[path] for path in sorted(entries)
                     if path_matches(path, filter=filter, fmt=fmt)]
+        selected = context.transport.complete_entries(selected)
         if server_checksum is not None:
             selected = _attach_server_checksums(context, selected, server_checksum)
         return selected
