@@ -273,30 +273,33 @@ the whole selection before transfer. Delete conflicting paths yourself before
 retrying. There is no overwrite option. ``--dry-run`` performs the same local
 checks without downloading or creating files.
 
-Downloads pass through a cache in ``.hm/cache``:
+Downloads pass through the object store in ``.hm/objects``, where
+``hm commit`` also keeps your local files:
 
-1. Each file is transferred to a temporary file in ``.hm/cache/tmp`` and is
+1. Each file is transferred to a temporary file in ``.hm/objects/tmp`` and is
    stored under its SHA-1 only once its size and checksums are verified. An
    interrupted download never leaves a partial file in the data folder, and its
    temporary file is removed a day later.
-2. The cached file is hard-linked into the data folder (or copied where links
+2. The stored file is hard-linked into the data folder (or copied where links
    are unavailable, for example on another filesystem). Files with identical
    contents are stored once.
 3. The SHA-1 of every file now in place is recorded in the catalog and staged.
    ``download`` prints ``Staged SHA-1 for N file(s); run hm commit to record
    them``. Commit them to share the hashes: later downloads, including your
    collaborators', are then verified against them, and a deleted file is
-   restored from the cache without a transfer. Until you commit or run
+   restored from ``.hm/objects`` without a transfer. Until you commit or run
    ``hm restore --staged``, ``checkout`` refuses to switch branches.
 
-Downloaded files are read-only links to the cache, so editing one in place
-cannot silently change the cached copy. To change a downloaded file, copy it to
-a new name, or delete it and write a new file. Everything in ``.hm/cache`` can
-be downloaded again, so deleting that folder is always safe; it only means the
-next download transfers the files again. Linked worktrees share the cache.
-After an interruption, run the same download again: files already linked to the
-cache are recognised as complete, even without a catalog checksum, and only the
-rest are transferred.
+Downloaded files are read-only links into ``.hm/objects``. A link and its
+object are the same data on disk, so making a file writable and editing it in
+place changes the stored copy too. Hallmark records each object's size and
+modification time and notices: ``hm status`` lists the file, the next download
+refuses to touch it and drops the changed object, and deleting the file lets a
+fresh copy be downloaded. To change a downloaded file, copy it to a new name.
+Never delete ``.hm/objects`` by hand: it also holds committed local files that
+may exist nowhere else. Linked worktrees share it. After an interruption, run
+the same download again: files already linked into the store are recognised as
+complete, even without a catalog checksum, and only the rest are transferred.
 
 After committing the catalog, use ``download`` to review and approve a transfer.
 Declining keeps the catalog available; an empty selection needs no approval:

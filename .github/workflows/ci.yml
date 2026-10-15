@@ -88,7 +88,7 @@ jobs:
     - name: Install Hallmark with S3 support and moto
       run: python -m pip install -e ".[s3]" pytest "moto[s3]>=5"
     - name: Test the S3 backend against moto
-      run: python -m pytest -q test/test_s3.py
+      run: python -m pytest -q test/test_s3.py "test/test_demo_notebooks.py::test_demo_notebook_workflow[demo_private_data.ipynb]"
 
   ssh-oldest-openssh:
     runs-on: ubuntu-latest

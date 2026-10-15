@@ -17,6 +17,35 @@ import pytest
 
 DEMO_DIR = Path(__file__).resolve().parents[1] / "demo"
 DEMO_URL = "ssh://hallmark-demo/srv/hallmark_demo_data"
+_CHECKS_BEFORE_CLEANUP = {
+    "demo_python.ipynb": """
+assert plan.file_count == 2
+for downloaded_repo in (eht, full_copy):
+    for source in ("M87", "SgrA"):
+        for day in (1, 2):
+            name = f"{source}_{day:03d}.txt"
+            assert (downloaded_repo.worktree / name).read_text() == (
+                f"demo data for {name}\\n")
+assert full_copy.download_result["failed"] == 0
+assert later_copy.download_result is None
+for metadata_only_repo in (catalog_only, later_copy):
+    assert not list(metadata_only_repo.worktree.glob("*.txt"))
+""",
+    # S3 adds two files when boto3 and moto are installed.
+    "demo_private_data.ipynb": """
+assert first_download["failed"] == 0
+assert first_download["succeeded"] == (11 if s3_mock else 9)
+assert (checked["succeeded"], checked["failed"]) == (1, 1)
+assert restored["from_store"] == ["SgrA_001.txt"]
+assert modified == ["SgrA_001.txt"]
+assert refetched["succeeded"] == 1 and "from_store" not in refetched
+assert from_mirror["succeeded"] == len(sent["mirror"]) == 3
+assert clone_result["failed"] == 0
+assert (copy.worktree / "copy/M87_001.txt").read_text() == "EHT data M87_001.txt\\n"
+assert "M87_004.txt" not in set(eht.state.data.path)
+assert (eht.worktree / "M87_004.txt").exists()
+""",
+}
 
 
 class _QuietHandler(SimpleHTTPRequestHandler):
@@ -94,20 +123,8 @@ def test_demo_notebook_workflow(tmp_path, request, notebook):
     else:
         # API downloads return result dictionaries; verify payloads too so an
         # unsuccessful transfer cannot pass merely because no exception arose.
-        validation = """
-assert plan.file_count == 2
-for downloaded_repo in (eht, full_copy):
-    for source in ("M87", "SgrA"):
-        for day in (1, 2):
-            name = f"{source}_{day:03d}.txt"
-            assert (downloaded_repo.worktree / name).read_text() == (
-                f"demo data for {name}\\n")
-assert full_copy.download_result["failed"] == 0
-assert later_copy.download_result is None
-for metadata_only_repo in (catalog_only, later_copy):
-    assert not list(metadata_only_repo.worktree.glob("*.txt"))
-"""
-        if notebook == "demo_python.ipynb":
+        validation = _CHECKS_BEFORE_CLEANUP.get(notebook)
+        if validation is not None:
             cells = [
                 (index, validation + source if "shutil.rmtree(workspace)" in source
                  else source) for index, source in cells]

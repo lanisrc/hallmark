@@ -34,7 +34,7 @@ Architecture
 
 A |hallmark|_ repository is the entry point for a version-controlled
 dataset index.
-It has three architecture components with different responsibilities:
+It has four architecture components with different responsibilities:
 
 1.  ``State``:
     the canonical in-memory data container, where all index mutations
@@ -48,9 +48,11 @@ It has three architecture components with different responsibilities:
     an on-disk working tree/directory, where data files are discovered
     and consumed; and
 
-4.  ``Cache``:
-    re-downloadable file contents in ``.hm/cache``, stored by SHA-1 and
-    hard-linked into the ``Worktree``.
+4.  ``Objects``:
+    file contents in ``.hm/objects``, stored by SHA-1 as git stores blobs.
+    ``commit`` copies local files in and ``checkout`` copies them out as
+    writable files; downloads are published there and hard-linked into the
+    ``Worktree``, read-only.
 
 The data flow can be summarized as::
 
@@ -72,19 +74,23 @@ The data flow can be summarized as::
                            v
                          Other tools
 
-Downloads keep ``Worktree``, ``Cache``, ``State`` and ``Dothm`` in step
-(``Worktree <-> Cache <-> State <-> Dothm``), moving between them only in
+Downloads keep ``Worktree``, ``Objects``, ``State`` and ``Dothm`` in step
+(``Worktree <-> Objects <-> State <-> Dothm``), moving between them only in
 this order:
 
-1.  download to the ``Cache``, into a temporary file that gets its final
+1.  download into ``Objects``, into a temporary file that gets its final
     name only once complete and verified;
-2.  hard-link the cached file into the ``Worktree``;
-3.  record its SHA-1 in the in-memory ``State``; and
+2.  hard-link the stored object into the ``Worktree``;
+3.  record its SHA-1 in the ``State``, read again under a lock; and
 4.  save the ``State`` to ``Dothm``, staged for the user to commit.
 
 A crash between any two steps leaves the repository consistent: at worst a
-temporary file, a cached file not yet linked, or a linked file whose SHA-1
+temporary file, a stored object not yet linked, or a linked file whose SHA-1
 the next download records without transferring it again.
+
+The catalogue itself is ``config.yml``, ``meta.yml`` and ``data.tsv``, with
+one line per file. See ``doc/data_backend.md`` for every command's effect on
+these files and on ``.hm/objects``.
 
 
 API

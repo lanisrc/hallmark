@@ -118,10 +118,11 @@ formats cannot be combined with this flag and leave the complete catalog unchang
 Declining clone's prompt keeps the catalog and exits successfully.
 A filter or filename format never authorizes a transfer.
 
-``Repo.clone(url, path)`` downloads by default without prompting. Pass
-``download=False`` for catalog-only or bare clones. An optional ``approve(plan)``
-callback gates a nonempty transfer: only Boolean True downloads; refusal keeps
-the catalog. A bare destination with downloads enabled fails before cloning.
+Like ``Repo.download``, ``Repo.clone(url, path)`` transfers data only with
+approval: an ``approve(plan)`` callback returning Boolean True, or
+``approved=True``. Without approval, or when it is declined, the catalog is
+cloned without data. Pass ``download=False`` for catalog-only or bare clones. A
+bare destination with downloads enabled fails before cloning.
 
 For separate Python downloads, first inspect the selected files::
 

@@ -42,7 +42,7 @@ Features:
 
 Examples of using ``ParaFrame`` with Python API or Command Line Interface (CLI)
 can be found in the Jupyter Notebook tutorials in the ``demo`` folder.
-``demo/demo_private_data.ipynb`` shows several sources, the download cache and
+``demo/demo_private_data.ipynb`` shows several sources, the object store and
 private servers.
 
 ``Installation``
@@ -111,8 +111,9 @@ server while their data remotes point elsewhere. Git clones preserve the full
 catalog and its history. Clone displays a data download plan and asks for
 confirmation by default; declining keeps the catalog. Use ``hm clone CATALOG
 PATH --no-download`` for catalog only. Filters narrow the download and cannot
-accompany ``--no-download``. Python ``Repo.clone`` downloads without prompting
-unless an ``approve(plan)`` callback is supplied; use ``download=False`` to skip.
+accompany ``--no-download``. Python ``Repo.clone`` downloads only with
+approval, an ``approve(plan)`` callback or ``approved=True``, as
+``Repo.download`` requires; use ``download=False`` to skip.
 Bare destinations require ``--no-download`` / ``download=False``.
 
 The public ``DataBackend`` interface supports generic HTTP/SSH, WebDAV,
