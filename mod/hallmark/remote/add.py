@@ -1,10 +1,12 @@
 from copy import deepcopy
+from pathlib import Path
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import pandas as pd
 
 from .discovery import discover_remote_files, path_matches
-from ..utils import as_list_of_dicts
+from ..fmt_detection import KNOWN_STATIC_FILE_STEMS
+from ..utils import SUPPORTED_CHECKSUM_ALGORITHMS, as_list_of_dicts
 from ..repo.config import (
     filename_fields, fmt_entries_from_config, match_file, normalize_remotes,
     validate_tsv_filename)
@@ -147,6 +149,8 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
     table_entries = fmt_entries or [{"db": "data.tsv"}]
     # make rows for each fmt entry to be filled with parsed data from matching files
     rows_by_fmt: list[list[dict]] = [[] for _ in table_entries]
+    # list of rows that could not be matched to any format, to be processed later
+    unmatched_rows = []
     # iterate over each discovered remote file and match it against the format entries
     for entry in entries:
         row = dict(zip(columns, (entry.path, entry.checksum_algorithm,
@@ -155,16 +159,58 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
         if fmt_entries:
             # match the file path against the provided format entries
             i, result = match_file(entry.path, fmt_entries)
-            # skip files that do not match any format entry
             if result is None:
+                # if no format matched, add to the unmatched rows for later processing
+                unmatched_rows.append(row)
                 continue
             # update the row with additional fields extracted from the format entry
             row.update({key: value for key, value in result.items()
                         if key not in {*columns, "sha1"}})
         rows_by_fmt[i].append(row)
-    # if no rows were matched to any format entry, return an empty DataFrame
-    if not any(rows_by_fmt):
+    # if no files were listed at all, return an empty DataFrame
+    if not any(rows_by_fmt) and not unmatched_rows:
         return pd.DataFrame(columns=columns)
+
+    # process unmatched paths to identify static files and the meta file
+    static_file_entries = []
+    meta_file_entries: list[dict] = []
+    for row in unmatched_rows:
+        rel_path = row["path"]
+        path = Path(rel_path)
+        stem_name = path.stem.split(".")[-1]
+
+        # get the stem name of the file and check if it is a meta file
+        is_meta_file = stem_name.lower() == "meta"
+        # for each unmatched path, look up its checksum from the listing
+        algo, checksum = row["checksum_algorithm"], row["checksum"]
+
+        # create an entry for the static file with its relative path
+        entry = {"file": rel_path}
+        # if the file is not a meta file and its stem name a known static file
+        if (not is_meta_file and stem_name.lower() in KNOWN_STATIC_FILE_STEMS):
+            # add the stem name as the "name" in the entry for known static files
+            entry = {"name": stem_name.lower(), **entry}
+
+        # if a valid checksum algorithm and checksum are available, include them
+        if algo is not None and checksum is not None:
+            if algo in SUPPORTED_CHECKSUM_ALGORITHMS:
+                entry[algo] = checksum
+
+        # if the file is a meta file, store it separately
+        if is_meta_file:
+            meta_file_entries.append(entry)
+        # otherwise, add it to the list of static file entries for the config.yml
+        else:
+            static_file_entries.append(entry)
+
+    # file: and meta: entries from earlier adds stay, unless this listing found
+    # their file again, in which case its new entry or fmt row replaces them
+    listed = {entry.path for entry in entries}
+    static_file_entries = [spec for spec in specs if spec.get("file")
+                           and spec["file"] not in listed] + static_file_entries
+    meta_file_entries = [spec for spec in as_list_of_dicts(
+        repo.state.config.get("meta")) or [] if isinstance(spec, dict)
+        and spec.get("file") and spec["file"] not in listed] + meta_file_entries
 
     # initialize dictionaries to group rows and fields by their target database
     rows_by_target_db: dict[str, list[dict]] = {}
@@ -208,9 +254,14 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
         remote["auth"] = source.auth
     if source.backend_options:
         remote["backend_options"] = copy_backend_options(source.backend_options)
-    state.config["data"] = [{"db": entry["db"], "fmt": entry["fmt"]}
-                            for entry in fmt_entries] or [{"db": "data.tsv"}]
+    # config.yml: static files, then fmt entries, then remote/meta
+    state.config["data"] = [*static_file_entries,
+                            *([{"db": entry["db"], "fmt": entry["fmt"]}
+                               for entry in fmt_entries] or [{"db": "data.tsv"}])]
     state.config["remote"] = [remote]
+    # if a meta file entry exists, add it to the config
+    if meta_file_entries:
+        state.config["meta"] = meta_file_entries
     repo.dothm.save_state(state)
     # TSVs other than data.tsv are written and staged next to it
     for db, frame in tables.items():

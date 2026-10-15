@@ -66,7 +66,8 @@ def test_empty_filtered_add_is_valid(tmp_path, metadata_server):
     repo = Repo.init(tmp_path / "clone")
     repo.add(root, remote_fmt="run{run:d}.h5")
     assert repo.state.data.empty
-    assert repo.plan_download().file_count == 0
+    assert repo.state.config["data"][0] == {"file": "notes.txt"}
+    assert repo.plan_download().file_count == 1
 
 
 def test_template_enriches_and_filters_inventory(tmp_path, metadata_server):

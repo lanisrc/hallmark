@@ -46,7 +46,7 @@ def test_remote_add_stages_without_payload_or_commit(tmp_path, remote_listing):
     assert repo.commit("Add remote EHT data")
     assert repo.dothm.head.commit.message.strip() == "Add remote EHT data"
     assert not repo.commit("No changes")
-    assert repo.plan_download().file_count == 2
+    assert repo.plan_download().file_count == 3
 
 
 def test_remote_add_merges_paths_and_leaves_unmatched_rows(tmp_path, remote_listing):
@@ -164,7 +164,7 @@ def test_remote_add_preserves_other_catalog_tables(tmp_path, remote_listing):
     repo.dothm.save_state(repo.state)
     repo.add("https://example.test/data/")
     assert repo.state.config["data"] == [
-        {"db": "other.tsv", "fmt": "{src}_{day:03d}.fits"}]
+        {"file": "notes.txt"}, {"db": "other.tsv", "fmt": "{src}_{day:03d}.fits"}]
     assert repo.dothm.read_tsv("other.tsv")["path"].tolist() == [
         "M87_001.fits", "M87_002.fits"]
     assert repo.state.data.empty
@@ -206,6 +206,44 @@ def test_cli_add_repeated_fmt_flags(tmp_path, monkeypatch, remote_listing):
         {"db": "fits.tsv", "fmt": "{src}_{day:03d}.fits"},
         {"db": "notes.tsv", "fmt": "notes.{ext}"}]
     assert repo.dothm.read_tsv("notes.tsv")["path"].tolist() == ["notes.txt"]
+
+
+def test_remote_add_turns_unmatched_files_into_file_entries(tmp_path, remote_listing):
+    remote_listing[0][""] = ('<h1>Index of data</h1>'
+                             '<a href="M87_001.fits">M87_001.fits</a>'
+                             '<a href="README.md">README.md</a>'
+                             '<a href="meta.yml">meta.yml</a>'
+                             '<a href="notes.txt">notes.txt</a>')
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    assert repo.state.config["data"] == [
+        {"name": "readme", "file": "README.md"}, {"file": "notes.txt"},
+        {"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"}]
+    assert repo.state.config["meta"] == [{"file": "meta.yml"}]
+    assert repo.state.data["path"].tolist() == ["M87_001.fits"]
+    assert repo.plan_download(all_files=True).file_count == 4
+
+
+def test_remote_add_keeps_earlier_file_entries(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    root = "https://example.test/data/"
+    repo.add(root + "{src}_{day:03d}.fits", filter="*.txt")
+    repo.add(root, filter="*.fits")
+    assert repo.state.config["data"] == [
+        {"file": "notes.txt"}, {"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"}]
+    assert repo.state.data["path"].tolist() == ["M87_001.fits", "M87_002.fits"]
+
+
+def test_remote_add_records_listed_checksum_on_file_entries(tmp_path, remote_listing):
+    digest = "0123456789abcdef0123456789abcdef"
+    remote_listing[0][""] = ('<h1>Index of data</h1>'
+                             '<a href="M87_001.fits">M87_001.fits</a>'
+                             '<a href="notes.txt">notes.txt</a>'
+                             '<a href="md5sums">md5sums</a>')
+    remote_listing[0]["md5sums"] = f"{digest}  notes.txt\n"
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    assert {"file": "notes.txt", "md5": digest} in repo.state.config["data"]
 
 
 @pytest.mark.parametrize("options", ["[]\n", "scalar\n", "options: [\n"])

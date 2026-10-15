@@ -486,7 +486,7 @@ def test_nested_remote_add_keeps_url_workflow_and_download_discovery(
     assert not (repo.worktree / "M87_001.txt").exists()
     _invoke("commit", "-m", "Remote catalog from subfolder")
     assert "nothing to commit, remote catalog unchanged" in _invoke("status")
-    assert "1 file(s)" in _invoke("download", "--all", "--dry-run")
+    assert "2 file(s)" in _invoke("download", "--all", "--dry-run")
     assert reads == [""]
 
 
