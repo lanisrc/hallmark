@@ -260,11 +260,12 @@ def status(repo):
 @click.option("--backend-options", type=click.Path(exists=True, dir_okay=False),
               help="YAML mapping of backend-specific options.")
 @click.option("--filter", "filters", multiple=True, help="Select remote paths by glob.")
-@click.option("--fmt", "remote_fmt",
-              help="Remote filename format; otherwise use a URL pattern.")
+@click.option("--fmt", "remote_fmts", multiple=True,
+              help="Remote filename format, as FMT or FMT=DB. May be repeated "
+                   "for multiple fmts; otherwise use a URL pattern.")
 @click.argument("inputs", nargs=-1, required=True)
 @click.pass_obj
-def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmt):
+def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmts):
     """Add files to the hallmark index.
 
     A remote URL or URL pattern stages a catalog without downloading files
@@ -277,9 +278,21 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     """
     with _translate_cli_errors(ValueError, OSError, yaml.YAMLError):
         options = _load_backend_options(backend_options)
+    fmt_entries = []
+    for entry in remote_fmts:
+        # split the fmt entry into its format and database name components
+        fmt, separator, db = entry.rpartition("=")
+        # without "=DB" the whole value is the fmt, and its db is chosen later
+        if not separator or any(char in db for char in "{}/"):
+            fmt, db = entry, None
+        fmt = fmt.strip()
+        # Validate that the fmt is not empty or whitespace-only
+        if not fmt:
+            raise ClickException("--fmt must define a non-empty format")
+        fmt_entries.append({"fmt": fmt, "db": db} if db else {"fmt": fmt})
     remote_options = dict(auth=auth, backend=backend,
                           backend_options=options,
-                          filter=filters or None, remote_fmt=remote_fmt)
+                          filter=filters or None, remote_fmt=fmt_entries or None)
     if len(inputs) != 1 and any(value is not None for value in remote_options.values()):
         raise ClickException("Remote add accepts one URL at a time")
     # attempt to add the specified files to the hallmark index, handling any errors

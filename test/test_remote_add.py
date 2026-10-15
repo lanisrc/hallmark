@@ -6,6 +6,7 @@ from click.testing import CliRunner
 from hallmark import Repo
 from hallmark.cli import hallmark
 from hallmark.error import CheckoutError, DestinationExistsError
+from hallmark.remote.add import is_remote_catalog
 from hallmark.transport import OperationContext
 from hallmark.transport.base import RemoteObjectMissing
 
@@ -159,12 +160,52 @@ def test_remote_parameter_cannot_turn_catalog_into_local_objects(
 
 def test_remote_add_preserves_other_catalog_tables(tmp_path, remote_listing):
     repo = Repo.init(tmp_path / "data")
-    repo.state.config["data"] = [{"db": "other.tsv"}]
+    repo.state.config["data"] = [{"fmt": "{src}_{day:03d}.fits", "db": "other.tsv"}]
     repo.dothm.save_state(repo.state)
-    with pytest.raises(ValueError, match="only the data.tsv"):
-        repo.add("https://example.test/data/")
-    assert repo.state.config["data"] == [{"db": "other.tsv"}]
-    assert remote_listing[1] == []
+    repo.add("https://example.test/data/")
+    assert repo.state.config["data"] == [
+        {"db": "other.tsv", "fmt": "{src}_{day:03d}.fits"}]
+    assert repo.dothm.read_tsv("other.tsv")["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits"]
+    assert repo.state.data.empty
+    assert is_remote_catalog(repo.state)
+
+
+def test_remote_add_sorts_fmts_into_their_own_tsvs(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    frame = repo.add("https://example.test/data/", remote_fmt=[
+        {"fmt": "{src}_{day:03d}.fits", "db": "data.tsv"}, {"fmt": "notes.{ext}"}])
+    assert repo.state.config["data"] == [
+        {"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"},
+        {"db": "notes.{ext}.tsv", "fmt": "notes.{ext}"}]
+    assert repo.state.data["path"].tolist() == ["M87_001.fits", "M87_002.fits"]
+    assert repo.dothm.read_tsv("notes.{ext}.tsv")["ext"].tolist() == ["txt"]
+    assert sorted(frame["path"]) == ["M87_001.fits", "M87_002.fits", "notes.txt"]
+
+
+def test_remote_add_keeps_earlier_rows_in_each_tsv(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.state.config["data"] = [{"fmt": "{src}_{day:03d}.fits", "db": "fits.tsv"}]
+    repo.dothm.save_state(repo.state)
+    root = "https://example.test/data/"
+    repo.add(root, filter="*001.fits")
+    repo.add(root, filter="*002.fits")
+    assert repo.dothm.read_tsv("fits.tsv")["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits"]
+
+
+def test_cli_add_repeated_fmt_flags(tmp_path, monkeypatch, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, [
+        "add", "https://example.test/data/",
+        "--fmt", "{src}_{day:03d}.fits=fits", "--fmt", "notes.{ext}=notes"])
+    assert result.exit_code == 0, result.output
+    repo = Repo(repo.worktree)
+    assert repo.state.config["data"] == [
+        {"db": "fits.tsv", "fmt": "{src}_{day:03d}.fits"},
+        {"db": "notes.tsv", "fmt": "notes.{ext}"}]
+    assert repo.dothm.read_tsv("notes.tsv")["path"].tolist() == ["notes.txt"]
 
 
 @pytest.mark.parametrize("options", ["[]\n", "scalar\n", "options: [\n"])
@@ -208,7 +249,7 @@ def test_add_cli_forwards_backend_and_selection(monkeypatch, tmp_path):
     assert captured == {
         "value": "ssh://lab-data/export/", "encoding": False,
         "auth": "lab", "backend": "ssh", "backend_options": {"collection": "latest"},
-        "filter": ("**/*.fits", "README*"), "remote_fmt": "{name}.fits",
+        "filter": ("**/*.fits", "README*"), "remote_fmt": [{"fmt": "{name}.fits"}],
         "progress": True}
 
 

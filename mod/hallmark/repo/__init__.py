@@ -712,7 +712,8 @@ class Repo:
             fmt (string): Local filename format, "." to rescan, or remote URL.
             encoding (boolean): Apply local filename encoding rules.
             filter (string | list[string], optional): Remote path selection globs.
-            remote_fmt (string, optional): Remote filename format for parameters.
+            remote_fmt (string | list, optional): Remote filename format for
+                parameters, or a list of {"fmt", "db"} entries, one per --fmt.
             auth (string, optional): Local profile for remote authentication.
             backend (string, optional): Registered data backend name.
             backend_options (dict, optional): Backend configuration.
