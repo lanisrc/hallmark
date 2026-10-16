@@ -845,3 +845,120 @@ def test_decimal_point_is_treated_as_a_delimiter():
 
     assert tokens == ["a0", "75", "i30"], \
         f"expected the decimal point to fracture '0.75' into two tokens, got {tokens}"
+
+
+### detect_fmt on real EHT file names ###
+
+def test_detect_fmt_eht_splits_paths_linked_by_a_bijection():
+    """
+    Paths whose pipeline folder and pipeline token always agree are split into
+    families first, so the pipeline becomes one repeated parameter.
+    (Subset of EHTC_FirstSgrAPol_Mar2024.)
+    """
+    paths = [
+        "casa_data/April06/ER6_SGRA_2017_096_lo_casa_netcal_LMTcal_10s_ALMArot_dtermcal.uvfits",
+        "casa_data/April07/ER6_SGRA_2017_097_hi_casa_netcal_LMTcal_10s_ALMArot_dtermcal.uvfits",
+        "casa_data/April07/ER6_SGRA_2017_097_lo_casa_netcal_LMTcal_10s_ALMArot_dtermcal.uvfits",
+        "hops_data/April06/ER6_SGRA_2017_096_hi_hops_netcal_LMTcal_10s_ALMArot_dtermcal.uvfits",
+        "hops_data/April06/ER6_SGRA_2017_096_lo_hops_netcal_LMTcal_10s_ALMArot_dtermcal.uvfits",
+        "hops_data/April07/ER6_SGRA_2017_097_hi_hops_netcal_LMTcal_10s_ALMArot_dtermcal.uvfits"]
+
+    assert detect_fmt(paths) == [
+        "{pipeline}_data/{p0}/ER6_SGRA_2017_{scan}_{band}_{pipeline}"
+        "_netcal_LMTcal_10s_ALMArot_dtermcal.uvfits"]
+
+
+def test_detect_fmt_eht_drops_files_without_siblings():
+    """
+    Files that share no structure with any other file are dropped instead of
+    becoming literal fmts. (Subset of EHTC_M87mwl2017_Apr2021.)
+    """
+    paths = ["m87_2017_mwl_spectrum.csv", "observations_and_data_description.txt"]
+
+    assert detect_fmt(paths) == []
+
+
+def test_detect_fmt_eht_keeps_a_literal_family_beside_a_generic_one():
+    """
+    Light curves from one instrument keep their literal tokens, while the other
+    instruments' files are combined into a generic fmt.
+    (Subset of EHTC_SgrAmwl2017_May2022.)
+    """
+    paths = [
+        "lc_Chandra/sgra_20170411_chandra_bb.csv",
+        "lc_Chandra/sgra_20170412_chandra_bb.csv",
+        "lc_NuSTAR/sgra_20170406_nustar.csv",
+        "lc_Swift/sgra_2017_swiftxrt.csv",
+        "observations_and_data_description.txt",
+        "sgra_2017_Xray_model_MCMC_posterior.fits"]
+
+    assert detect_fmt(paths) == [
+        "lc_Chandra/sgra_{date}_chandra_bb.csv", "lc_{p0}/sgra_{p1}_{p2}.csv"]
+
+
+def test_detect_fmt_eht_collapses_freeform_table_names():
+    """
+    Table files whose names differ freely between a shared prefix and suffix are
+    collapsed into one fmt with renumbered generic parameters.
+    (Subset of EHTC_M87mwl2018_Dec2024.)
+    """
+    paths = [
+        "table_C1_summary_radio_observations.tex",
+        "table_C4_Kanata_NIR_obs.tex",
+        "table_C5_Swift_UVOT_flux_densities.tex",
+        "table_C6_flux_densities_host_galaxy.tex"]
+
+    assert detect_fmt(paths) == ["table_{p0}_{p1}_{p2}_{p3}.tex"]
+
+
+def test_detect_fmt_eht_merges_fmts_sharing_all_literals():
+    """
+    Products stored by format, with and without a method suffix, merge into one
+    fmt per layout with the format repeated in the folder and the extension.
+    (Subset of EHTC_FirstSgrAResults_May2022.)
+    """
+    paths = [
+        "txt/ER6_SGRA_2017_097_lo_hops_netcal-LMTcal_StokesI.txt",
+        "txt_besttime/ER6_SGRA_2017_097_lo_casa_netcal-LMTcal-besttime_StokesI.txt",
+        "txt_norm/ER6_SGRA_2017_096_hi_hops_netcal-LMTcal-norm_StokesI.txt",
+        "uvfits/ER6_SGRA_2017_096_lo_hops_netcal-LMTcal_StokesI.uvfits",
+        "uvfits/ER6_SGRA_2017_097_hi_casa_netcal-LMTcal_StokesI.uvfits",
+        "uvfits_norm/ER6_SGRA_2017_097_lo_hops_netcal-LMTcal-norm_StokesI.uvfits"]
+
+    assert detect_fmt(paths) == [
+        "{format}/ER6_SGRA_2017_{scan}_{band}_{pipeline}_netcal-LMTcal_StokesI.{format}",
+        "{format}_{method}/ER6_SGRA_2017_{scan}_{band}_{pipeline}"
+        "_netcal-LMTcal-{method}_StokesI.{format}"]
+
+
+def test_detect_fmt_eht_combines_alike_metadata_families():
+    """
+    Station metadata in nested folders is split into families and alike fmts are
+    combined, keeping a station-specific fmt where its literals differ.
+    (Subset of EHTC_metadata2018_Dec2023.)
+    """
+    paths = [
+        "raw/EHT2018_metadata_MM/JCMT_2017/JCMT_fitparams.txt",
+        "raw/EHT2018_metadata_MM/JCMT_2017/JCMT_memo/DPFU_fit_JCMT.png",
+        "raw/EHT2018_metadata_MM/JCMT_2017/JCMT_memo/JCMT_efficiency_memo.pdf",
+        "raw/EHT2018_metadata_MM/JCMT_2017/JCMT_memo/JCMT_memo.synctex.gz",
+        "raw/EHT2018_metadata_MM/JCMT_2017/rxa3_mars.dat",
+        "raw/EHT2018_metadata_MM/JCMT_2017/rxa3_uranus.dat",
+        "raw/EHT2018_metadata_MM/e18c21_Mm.flag",
+        "raw/EHT2018_metadata_MM/e18c21_Mm.tsys",
+        "raw/EHT2018_metadata_MM/e18c25_Mm.flag",
+        "raw/EHT2018_metadata_PV/Tsys_tables/e18c25_Pv.tsys",
+        "raw/EHT2018_metadata_PV/Tsys_tables/e18d28_Pv.tsys",
+        "raw/EHT2018_metadata_PV/Tsys_tables/e18g27_Pv.tsys",
+        "raw/EHT2018_metadata_SW/e18a24_SW.pheff",
+        "raw/EHT2018_metadata_SW/e18c21_SW.pheff",
+        "raw/EHT2018_metadata_SW/e18c21_SW.tsys",
+        "raw/EHT2018_metadata_SW/e18c25_SW.pheff",
+        "raw/EHT2018_metadata_SW/e18c25_SW.tsys",
+        "raw/EHT2018_metadata_SW/e18d28_SW.flag"]
+
+    assert detect_fmt(paths) == [
+        "raw/EHT2018_metadata_MM/JCMT_2017/JCMT_memo/{p0}_{p1}_{p2}.{p3}",
+        "raw/EHT2018_metadata_MM/JCMT_2017/{p0}_{p1}.{p2}",
+        "raw/EHT2018_metadata_PV/Tsys_tables/{experiment}_Pv.tsys",
+        "raw/EHT2018_metadata_{p0}/{experiment}_{p1}.{p2}"]

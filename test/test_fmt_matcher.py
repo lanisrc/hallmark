@@ -334,3 +334,65 @@ def test_match_file_delegates_to_full_matcher():
 
     assert (i, result) == (0, {"a": "0.75"}), \
         f"unexpected match: {(i, result)}, expected (0, {{'a': '0.75'}})"
+
+
+### matcher on real EHT file names ###
+
+def test_match_eht_resolves_a_repeated_pipeline_field():
+    """
+    A field named twice, like {pipeline} in the folder and the file name, is
+    resolved to the value both occurrences share. (EHTC_M87pol2017_Nov2023.)
+    """
+    path = ("casa_data/April05/SR2_M87_2017_095_hi_casa_EVPA_rotation+dcal+ampscale"
+            "+netcal+10s-avg+RLgain-amp.uvfits")
+    fmt_entries = [{"fmt": "{pipeline}_data/{observation_date}/SR2_M87_2017_{scan}"
+                           "_{band}_{pipeline}_{calibration}.uvfits"}]
+
+    assert match_file(path, fmt_entries) == (0, {
+        "observation_date": "April05", "scan": "095", "band": "hi",
+        "calibration": "EVPA_rotation+dcal+ampscale+netcal+10s-avg+RLgain-amp",
+        "pipeline": "casa"})
+
+
+def test_match_eht_resolves_a_repeated_format_field():
+    """
+    A {format} field used as both the folder and the extension resolves to one
+    value, and the matching fmt wins over a similar one without -LMTcal.
+    (EHTC_FirstSgrAResults_May2022.)
+    """
+    fmt_entries = [
+        {"fmt": "{format}/ER6_SGRA_2017_{scan}_{band}_{pipeline}"
+                "_netcal-LMTcal_StokesI.{format}"},
+        {"fmt": "{format}/ER6_SGRA_2017_{scan}_{band}_{pipeline}"
+                "_netcal_StokesI.{format}"},
+        {"fmt": "{format}_{method}/ER6_SGRA_2017_{scan}_{band}_{pipeline}"
+                "_netcal-LMTcal-{method}_StokesI.{format}"}]
+
+    assert match_file("csv/ER6_SGRA_2017_096_hi_casa_netcal-LMTcal_StokesI.csv",
+                      fmt_entries) == (0, {
+        "format": "csv", "scan": "096", "band": "hi", "pipeline": "casa"})
+
+
+def test_match_eht_drops_missing_fields_to_find_the_best_fmt():
+    """
+    A deliverables file missing some fields of its fmt still matches it, with
+    those fields dropped, ahead of the dataset's other fmts.
+    (EHTC_2017L1_May2022.)
+    """
+    fmt_entries = [
+        {"fmt": "{project_code}/group.uid{guid}.{author}.{kind}.{format}"},
+        {"fmt": "{eht_project_code}/group.uid{guid}.{author}.{scope}"
+                "-processing-logs.{format}"},
+        {"fmt": "{project_date}/{eht_project_code}/group.uid{guid}.{author}."
+                "{prefix}track{track}-{date}.app_deliverables.{format}"},
+        {"fmt": "{eht_project_code}/group.uid{guid}.{author}.{track}-{alma_band}-"
+                "{eht_band}-{source}-{scan_code}-{sequence}-{kind}.{format}"},
+        {"fmt": "{eht_project_code}/group.uid{guid}.{author}.metadata-"
+                "{eht_product_code}.{format}"},
+        {"fmt": "{eht_project_code}.{algorithm}sums"}]
+    path = ("2016.1.01114.V/group.uid___A001_X87c_X245.ec_jlgomez.track_a."
+            "app_deliverables.tgz")
+
+    assert match_file(path, fmt_entries) == (2, {
+        "project_date": "2016.1.01114.V", "guid": "___A001_X87c_X245",
+        "author": "ec_jlgomez", "prefix": "", "track": "_a", "format": "tgz"})

@@ -6,7 +6,7 @@ from click.testing import CliRunner
 from hallmark import Repo
 from hallmark.cli import hallmark
 from hallmark.error import CheckoutError, DestinationExistsError
-from hallmark.remote.add import is_remote_catalog
+from hallmark.remote.add import is_remote_catalog, split_remote_pattern
 from hallmark.transport import OperationContext
 from hallmark.transport.base import RemoteObjectMissing
 
@@ -363,3 +363,11 @@ def test_removed_cli_interfaces_fail_clearly(monkeypatch, tmp_path, arguments):
     assert result.exit_code != 0
     assert "No such" in result.output
     assert Repo(repo.worktree).state.data.empty
+
+
+@pytest.mark.parametrize("value, fmt, message", [
+    ("file:///data/", None, "requires an HTTP"),
+    ("https://example.test/data/{src}.fits", "{src}.fits", "not both")])
+def test_split_remote_pattern_rejects_bad_input(value, fmt, message):
+    with pytest.raises(ValueError, match=message):
+        split_remote_pattern(value, fmt)
