@@ -704,7 +704,7 @@ class Repo:
 
     def add(self, fmt: str, encoding: bool = False, *, filter=None,
             remote_fmt=None, auth=None, backend=None, backend_options=None,
-            progress=False) -> ParaFrame:
+            progress=False, resort=None) -> ParaFrame:
         '''
         Stage local file metadata or discover a remote catalog without downloading.
 
@@ -718,6 +718,10 @@ class Repo:
             backend (string, optional): Registered data backend name.
             backend_options (dict, optional): Backend configuration.
             progress (boolean): Show remote discovery progress.
+            resort (bool | callable, optional): When a remote add brings a new
+                fmt, True sorts the already sorted files again and False only
+                sorts unsorted ones; a callable gets the number of sorted files
+                and returns the choice.
         Returns:
             ParaFrame: Local parameters without checksums, or remote catalog rows.
         '''
@@ -726,7 +730,7 @@ class Repo:
                 raise ValueError("--regex is only supported for local data")
             return add_remote(self, fmt, fmt=remote_fmt, filter=filter, auth=auth,
                               backend=backend, backend_options=backend_options,
-                              progress=progress)
+                              progress=progress, resort=resort)
         if any(value is not None for value in
                (filter, remote_fmt, auth, backend, backend_options)):
             raise ValueError("Remote options require a remote URL")
@@ -746,7 +750,7 @@ class Repo:
 
         # Compute checksums for all files in the ParaFrame in parallel
         self._calculate_file_checksums(pf)
-        # Build the file table (manifest) from the ParaFrame using the resolved format
+        # Build the file table (manifest) from the ParaFrame using resolved format
         manifest = build_file_table(pf, fmt)
 
         # Update the repository configuration with the new format

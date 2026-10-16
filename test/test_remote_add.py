@@ -246,6 +246,64 @@ def test_remote_add_records_listed_checksum_on_file_entries(tmp_path, remote_lis
     assert {"file": "notes.txt", "md5": digest} in repo.state.config["data"]
 
 
+def test_new_fmt_renames_data_tsv_and_sorts_unsorted_files(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    repo.add("https://example.test/data/", remote_fmt=[{"fmt": "notes.{ext}"}],
+             resort=False)
+    assert repo.state.config["data"] == [
+        {"db": "{src}_{day:03d}.fits.tsv", "fmt": "{src}_{day:03d}.fits"},
+        {"db": "notes.{ext}.tsv", "fmt": "notes.{ext}"}]
+    assert repo.dothm.read_tsv("{src}_{day:03d}.fits.tsv")["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits"]
+    assert repo.dothm.read_tsv("notes.{ext}.tsv")["path"].tolist() == ["notes.txt"]
+    assert repo.state.data.empty
+    assert is_remote_catalog(repo.state)
+
+
+def test_new_fmt_resort_moves_sorted_files_to_a_better_match(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    asked = []
+    repo.add("https://example.test/data/", remote_fmt=[{"fmt": "M87_{day:03d}.fits"}],
+             resort=lambda count: asked.append(count) or True)
+    assert asked == [2]
+    assert repo.dothm.read_tsv("{src}_{day:03d}.fits.tsv").empty
+    assert repo.dothm.read_tsv("M87_{day:03d}.fits.tsv")["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits"]
+
+
+def test_new_fmt_unsorted_keeps_sorted_files_in_place(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    repo.add("https://example.test/data/", remote_fmt=[{"fmt": "M87_{day:03d}.fits"}],
+             resort=False)
+    assert repo.dothm.read_tsv("{src}_{day:03d}.fits.tsv")["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits"]
+    assert repo.dothm.read_tsv("M87_{day:03d}.fits.tsv").empty
+
+
+def test_new_fmt_without_resort_answer_asks_for_one(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    with pytest.raises(ValueError, match="resort=True"):
+        repo.add("https://example.test/data/", remote_fmt=[{"fmt": "notes.{ext}"}])
+
+
+def test_cli_asks_whether_to_resort_for_a_new_fmt(tmp_path, monkeypatch,
+                                                  remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, [
+        "add", "https://example.test/data/", "--fmt", "notes.{ext}"],
+        input="unsorted\n")
+    assert result.exit_code == 0, result.output
+    assert "2 files are already sorted" in result.output
+    repo = Repo(repo.worktree)
+    assert repo.dothm.read_tsv("notes.{ext}.tsv")["path"].tolist() == ["notes.txt"]
+
+
 @pytest.mark.parametrize("options", ["[]\n", "scalar\n", "options: [\n"])
 def test_add_cli_rejects_invalid_backend_options_before_access(
         monkeypatch, tmp_path, options):
@@ -284,6 +342,7 @@ def test_add_cli_forwards_backend_and_selection(monkeypatch, tmp_path):
         "--backend-options", str(options), "--filter", "**/*.fits",
         "--filter", "README*", "--fmt", "{name}.fits"])
     assert result.exit_code == 0, result.output
+    assert callable(captured.pop("resort"))
     assert captured == {
         "value": "ssh://lab-data/export/", "encoding": False,
         "auth": "lab", "backend": "ssh", "backend_options": {"collection": "latest"},

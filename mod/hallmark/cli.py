@@ -301,7 +301,13 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
         if len(inputs) == 1:
             remote = "://" in inputs[0]
             if remote or any(value is not None for value in remote_options.values()):
-                pf = repo.add(inputs[0], encoding, progress=True, **remote_options)
+                pf = repo.add(
+                    inputs[0], encoding, progress=True, **remote_options,
+                    # with a new fmt, ask whether already sorted files are sorted again
+                    resort=lambda count: click.prompt(
+                        f"{count} files are already sorted. Sort them again with the "
+                        "new fmt, or only sort the unsorted files?",
+                        type=click.Choice(["resort", "unsorted"])) == "resort")
             else:
                 pf = repo.add(inputs[0], encoding)
         # oterhwise, use the add_paths method for multiple inputs

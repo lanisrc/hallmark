@@ -83,7 +83,7 @@ def _validate_db_names(fmt_entries):
 
 
 def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
-               backend_options=None, progress=False):
+               backend_options=None, progress=False, resort=None):
     """
     Add a remote dataset to the repository.
     This function handles the addition of remote datasets to the repository by:
@@ -115,11 +115,19 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
     # Ensure that the format specifications are valid and properly structured.
     if specs is None or any(not isinstance(spec, dict) for spec in specs):
         raise ValueError("Catalog data must be a mapping or list of mappings")
-    # if no format entries were provided fall back to the configuration.
-    if not fmt_entries:
-        fmt_entries = fmt_entries_from_config(repo.state.config)
+    # the fmts already in config.yml, plus any new fmt given with --fmt or the URL
+    configured = fmt_entries_from_config(repo.state.config)
+    added = [entry for entry in fmt_entries
+             if entry["fmt"] not in {spec.get("fmt") for spec in configured}]
+    # a lone fmt kept in data.tsv gets a TSV named after itself once a second
+    # fmt is added, and its rows move there
+    renamed = (len(configured) == 1 and bool(added) and validate_tsv_filename(
+        configured[0].get("db") or "data.tsv") == "data.tsv")
+    if renamed:
+        configured = [{key: value for key, value in configured[0].items()
+                       if key != "db"}]
     # validate the database names in the format entries
-    fmt_entries = _validate_db_names(fmt_entries)
+    fmt_entries = _validate_db_names([*configured, *added])
     # normalize the remote configurations from the repository state
     remotes = normalize_remotes(repo.state.config.get("remote"))
     # if there is exactly one remote and it matches the URL, use its previous settings
@@ -145,6 +153,30 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
         # discover remote files based on the provided context, filter, and progress
         entries = discover_remote_files(context, filter=filter, progress=progress)
     columns = ["path", "checksum_algorithm", "checksum", "size_bytes", "mtime"]
+    # TSVs written by earlier adds hold the files that are already sorted
+    existing_tables = {}
+    if is_remote_catalog(repo.state):
+        existing_tables["data.tsv"] = repo.state.data
+        for spec in specs:
+            if spec.get("fmt") and spec.get("db"):
+                db = validate_tsv_filename(spec["db"])
+                if db != "data.tsv" and (repo.dothm.path / db).is_file():
+                    existing_tables[db] = repo.dothm.read_tsv(db)
+    # the renamed fmt's rows move from data.tsv to its own TSV
+    if renamed:
+        existing_tables[fmt_entries[0]["db"]] = existing_tables.pop(
+            "data.tsv", pd.DataFrame(columns=columns))
+    sorted_paths = {path for frame in existing_tables.values()
+                    if "path" in frame for path in frame["path"]}
+    # with a new fmt and files already sorted, ask whether to sort those again
+    if added and sorted_paths:
+        if callable(resort):
+            resort = resort(len(sorted_paths))
+        if resort is None:
+            raise ValueError(
+                f"{len(sorted_paths)} files are already sorted; pass resort=True to "
+                "sort them again with the new fmt, or resort=False to only sort "
+                "unsorted files")
     # tables are determined by the format entries, defaulting to data.tsv
     table_entries = fmt_entries or [{"db": "data.tsv"}]
     # make rows for each fmt entry to be filled with parsed data from matching files
@@ -153,6 +185,9 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
     unmatched_rows = []
     # iterate over each discovered remote file and match it against the format entries
     for entry in entries:
+        # unless they are sorted again, files already sorted keep their place
+        if added and not resort and entry.path in sorted_paths:
+            continue
         row = dict(zip(columns, (entry.path, entry.checksum_algorithm,
                                 entry.checksum, entry.size, entry.mtime)))
         i = 0
@@ -234,21 +269,18 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
     tables = {}
     for db, rows in rows_by_target_db.items():
         frame = pd.DataFrame(rows, columns=[*columns, *fields_by_target_db[db]])
-        # if the database is data.tsv, use the existing state data
-        if db == "data.tsv":
-            existing = state.data
-        # otherwise, read the TSV from the repository
-        elif (repo.dothm.path / db).is_file():
-            existing = repo.dothm.read_tsv(db)
-        else:
-            existing = pd.DataFrame()
+        # rows from earlier adds stay in their TSV, refreshed by this listing
+        existing = existing_tables.get(db, pd.DataFrame())
+        # a file sorted again leaves the TSV it was in before
+        if added and resort and not existing.empty:
+            existing = existing[~existing["path"].isin(listed)]
         if not existing.empty:
             frame = pd.concat([existing, frame], ignore_index=True, sort=False)
             frame = frame.drop_duplicates(subset=["path"], keep="last")
         tables[db] = frame.fillna("").sort_values("path").reset_index(drop=True)
     # data.tsv stays an empty catalog when every fmt uses its own TSV
-    state.data = tables.pop("data.tsv", state.data if is_remote_catalog(state)
-                            else pd.DataFrame(columns=columns))
+    state.data = tables.pop("data.tsv", existing_tables.get(
+        "data.tsv", pd.DataFrame(columns=columns)))
     remote = {"name": "origin", "url": source.url, "backend": source.backend}
     if source.auth:
         remote["auth"] = source.auth
