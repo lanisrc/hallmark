@@ -435,7 +435,22 @@ def test_detect_prints_fmts_of_a_named_remote(tmp_path, monkeypatch, metadata_se
 def test_detect_scans_only_a_subfolder(tmp_path, monkeypatch, metadata_server):
     _, result = _detect(tmp_path, monkeypatch, metadata_server[0], ROOT + "run2/")
     assert result.exit_code == 0, result.output
-    assert f'hm add {ROOT}run2/ --fmt "M87_{{scan}}.fits"' in result.output
+    assert "  M87_{scan}.fits" in result.output
+    assert (f'hm add {ROOT} --fmt "run2/M87_{{scan}}.fits" --filter "run2/**"'
+            in result.output)
+
+
+def test_detect_add_from_a_subfolder_keeps_the_remote(tmp_path, monkeypatch,
+                                                      metadata_server):
+    repo, result = _detect(tmp_path, monkeypatch, metadata_server[0],
+                           ROOT + "run2/", "--add")
+    assert result.exit_code == 0, result.output
+    repo = Repo(repo.worktree)
+    assert repo.state.config["remote"][0]["url"] == ROOT
+    assert repo.state.config["data"] == [
+        {"db": "data.tsv", "fmt": "run2/M87_{scan}.fits"}]
+    assert repo.state.data["path"].tolist() == [
+        "run2/M87_001.fits", "run2/M87_002.fits", "run2/M87_003.fits"]
 
 
 @pytest.mark.parametrize("remote, message", [

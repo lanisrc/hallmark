@@ -390,12 +390,21 @@ def detect(ctx, remote, filters, add_fmts):
     click.echo(f"Detected {len(fmts)} fmt(s) from {len(paths)} files:")
     for fmt in fmts:
         click.echo(f"  {fmt}")
+    # catalog from the remote's root, so a subfolder URL never changes the remote;
+    # the subfolder becomes part of each fmt and of the selection
+    remote_url = entry["url"]
+    prefix = url[len(remote_url):]
+    fmts = [prefix + fmt for fmt in fmts]
+    filters = tuple(prefix + pattern for pattern in filters) or (
+        (prefix + "**",) if prefix else ())
     # call the add command if the --add flag is set, otherwise show instructions
     if add_fmts:
-        ctx.invoke(add, inputs=(url,), filters=filters, remote_fmts=tuple(fmts))
+        ctx.invoke(add, inputs=(remote_url,), filters=filters, remote_fmts=tuple(fmts))
     else:
         click.echo("To catalog with them:")
-        click.echo(f"  hm add {url} " + " ".join(f'--fmt "{fmt}"' for fmt in fmts))
+        click.echo(f"  hm add {remote_url} "
+                   + " ".join(f'--fmt "{fmt}"' for fmt in fmts)
+                   + "".join(f' --filter "{pattern}"' for pattern in filters))
 
 
 @hallmark.command(short_help="Unstage paths without changing files.")
