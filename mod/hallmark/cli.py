@@ -23,8 +23,11 @@ from click import ClickException
 from git.exc import GitError
 
 from . import Repo
+from .fmt_detection import detect_fmt
 from .remote.download import DownloadError
-from .remote.discovery import path_matches
+from .remote.discovery import discover_remote_files, path_matches
+from .repo.config import normalize_remotes
+from .transport import OperationContext, RemoteSpec
 from .error import CheckoutError, CloneError
 
 
@@ -327,6 +330,72 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
         # print each unmatched path
         for path in unmatched:
             click.echo(f"  {path}")
+
+
+@hallmark.command(short_help="Detect filename formats in a remote folder.")
+@click.argument("remote")
+@click.option("--filter", "filters", multiple=True, help="Select remote paths by glob.")
+@click.option("--add", "add_fmts", is_flag=True,
+              help="Catalog the files with the detected fmts, as hm add does.")
+@click.pass_context
+def detect(ctx, remote, filters, add_fmts):
+    """Detect the filename formats of a remote's files.
+
+    Requires a configured remote or a URL inside one.
+    Optionally, the detected filename formats can be immediately added to the catalog
+    with the --add flag.
+    Filters are used to select specific remote paths by glob patterns.
+
+    Raises:
+        ClickException: If the remote is not configured or the URL is not inside a
+        configured remote.
+    """
+    # get the list of configured remotes from this repository's configuration
+    remotes = normalize_remotes(ctx.obj.state.config.get("remote"))
+    # determine if the remote argument is a name or a URL
+    if "://" not in remote:
+        # check that the remote name exists in the configured remotes
+        entry = next((entry for entry in remotes
+                      if entry.get("name") == remote), None)
+        # if the remote name does not exist in the configured remotes, raise an error
+        if entry is None:
+            raise ClickException(f"No remote named {remote!r} in config.yml")
+        # otherwise, use the URL from the configured remote entry
+        url = entry["url"]
+    # otherwise, treat the remote argument as a URL
+    else:
+        # a URL can point at a subfolder of a configured remote
+        url = remote
+        # find the configured remote entry that matches the URL, if any
+        entry = next((entry for entry in remotes
+                      if entry.get("url") and url.startswith(entry["url"])), None)
+        # if no matching configured remote was found for the URL, raise an error
+        if entry is None:
+            raise ClickException(f"{url} is not inside a configured remote")
+    # use translated CLI errors for better user feedback
+    with _translate_cli_errors(RuntimeError, ValueError, OSError):
+        source = RemoteSpec.from_url(url, entry.get("auth"),
+                                     backend=entry.get("backend"),
+                                     backend_options=entry.get("backend_options"))
+        # use the operation context to discover remote files
+        with OperationContext(source) as context:
+            # discover remote files based on the operation context and filters
+            paths = [file.path for file in discover_remote_files(
+                context, filter=filters or None, progress=True)]
+        # detect the filename formats of the discovered remote files
+        fmts = detect_fmt(paths, include_drives=True)
+    if not fmts:
+        raise ClickException(
+            "No fmts could be automatically detected from this dataset.")
+    click.echo(f"Detected {len(fmts)} fmt(s) from {len(paths)} files:")
+    for fmt in fmts:
+        click.echo(f"  {fmt}")
+    # call the add command if the --add flag is set, otherwise show instructions
+    if add_fmts:
+        ctx.invoke(add, inputs=(url,), filters=filters, remote_fmts=tuple(fmts))
+    else:
+        click.echo("To catalog with them:")
+        click.echo(f"  hm add {url} " + " ".join(f'--fmt "{fmt}"' for fmt in fmts))
 
 
 @hallmark.command(short_help="Unstage paths without changing files.")

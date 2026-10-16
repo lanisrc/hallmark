@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pytest
 import yaml
+from click.testing import CliRunner
 
 from hallmark import Repo
+from hallmark.cli import hallmark
 from hallmark.error import CloneError, DestinationExistsError
 from hallmark.transport import OperationContext
 from hallmark.transport.base import DownloadError, RemoteObjectMissing
@@ -404,3 +406,63 @@ def test_published_local_catalog_is_rejected(tmp_path, metadata_server, download
     with pytest.raises(CloneError, match="This repository tracks local files"):
         Repo.clone(root, target, download=download)
     assert not target.exists()
+
+
+ROOT = "https://example.test/data/"
+
+
+def _detect(tmp_path, monkeypatch, pages, *args):
+    pages[ROOT] = ('<h1>Index of data</h1><a href="run2/">run2/</a>'
+                   '<a href="notes.txt">notes.txt</a>')
+    pages[ROOT + "run2/"] = ('<h1>Index of run2</h1>'
+                             '<a href="M87_001.fits">M87_001.fits</a>'
+                             '<a href="M87_002.fits">M87_002.fits</a>'
+                             '<a href="M87_003.fits">M87_003.fits</a>')
+    repo = Repo.init(tmp_path / "data")
+    repo.set_config(remote_name="origin", remote_url=ROOT)
+    monkeypatch.chdir(repo.worktree)
+    return repo, CliRunner().invoke(hallmark, ["detect", *args])
+
+
+def test_detect_prints_fmts_of_a_named_remote(tmp_path, monkeypatch, metadata_server):
+    repo, result = _detect(tmp_path, monkeypatch, metadata_server[0], "origin")
+    assert result.exit_code == 0, result.output
+    assert "Detected 1 fmt(s) from 4 files:" in result.output
+    assert f'hm add {ROOT} --fmt "run2/M87_{{scan}}.fits"' in result.output
+    assert Repo(repo.worktree).state.data.empty
+
+
+def test_detect_scans_only_a_subfolder(tmp_path, monkeypatch, metadata_server):
+    _, result = _detect(tmp_path, monkeypatch, metadata_server[0], ROOT + "run2/")
+    assert result.exit_code == 0, result.output
+    assert f'hm add {ROOT}run2/ --fmt "M87_{{scan}}.fits"' in result.output
+
+
+@pytest.mark.parametrize("remote, message", [
+    ("elsewhere", "No remote named 'elsewhere' in config.yml"),
+    ("https://other.test/data/",
+     "https://other.test/data/ is not inside a configured remote")])
+def test_detect_requires_a_configured_remote(tmp_path, monkeypatch, metadata_server,
+                                             remote, message):
+    _, result = _detect(tmp_path, monkeypatch, metadata_server[0], remote)
+    assert result.exit_code != 0
+    assert message in result.output
+
+
+def test_detect_add_catalogs_with_the_detected_fmts(tmp_path, monkeypatch,
+                                                    metadata_server):
+    repo, result = _detect(tmp_path, monkeypatch, metadata_server[0], "origin", "--add")
+    assert result.exit_code == 0, result.output
+    repo = Repo(repo.worktree)
+    assert repo.state.config["data"] == [
+        {"file": "notes.txt"}, {"db": "data.tsv", "fmt": "run2/M87_{scan}.fits"}]
+    assert repo.state.data["path"].tolist() == [
+        "run2/M87_001.fits", "run2/M87_002.fits", "run2/M87_003.fits"]
+
+
+def test_detect_reports_when_nothing_is_detected(tmp_path, monkeypatch,
+                                                 metadata_server):
+    _, result = _detect(tmp_path, monkeypatch, metadata_server[0],
+                        "origin", "--filter", "notes.txt")
+    assert result.exit_code != 0
+    assert "No fmts could be automatically detected" in result.output
