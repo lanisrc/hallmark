@@ -64,8 +64,10 @@ Suppose the export contains ``runs/run_001.h5``, ``runs/run_002.h5`` and
        --fmt 'runs/run_{run:03d}.h5'
    hm commit -m "Record remote catalog"
 
-This creates ``./lab/.hm`` and catalogs only the matching run files. The URL
-is the exact discovery root. A filename format selects paths and extracts
+This creates ``./lab/.hm`` and catalogs the matching run files in ``data.tsv``.
+``README.md`` matches no format, so it is listed as a ``file:`` entry in
+``config.yml``, with its published checksum if there is one. The URL is the
+exact discovery root. A filename format selects paths and extracts
 parameters; it does not approve a download. A glob filter can select paths
 without defining parameters:
 
@@ -82,6 +84,33 @@ beneath the URL and catalogs all discovered files. A filter still traverses
 directories needed to find matching files. Discovery shows an indeterminate
 progress bar with counts of completed directories and discovered files.
 The percentage and completion time remain unknown until a total is available.
+
+Several filename formats can be cataloged at once by repeating ``--fmt``, each
+as ``FMT`` or ``FMT=DB``. Every format's files go to their own TSV, named by
+``DB`` or after the format itself:
+
+.. code-block:: bash
+
+   hm add 'ssh://lab-data/srv/exports/lab/' \
+       --fmt 'runs/run_{run:03d}.h5=runs' --fmt 'logs/run_{run:03d}.log=logs'
+
+A format added to an existing catalog is kept next to the earlier ones. When the
+catalog had a single format in ``data.tsv``, that TSV is renamed after its format.
+If files are already sorted into TSVs, ``hm add`` asks whether to sort them
+again with the new format (``resort``), moving each file to the format that fits
+it best, or to sort only files that no format matched yet (``unsorted``).
+Python callers pass ``resort=True`` or ``resort=False`` to ``Repo.add``.
+
+``hm detect REMOTE`` suggests formats for a configured remote, named like
+``origin`` or given as a URL inside it. A URL can point at a subfolder; only
+that folder is scanned and the remote itself is unchanged. The command prints
+the suggested formats and the ``hm add`` command that uses them; ``--add``
+catalogs with every detected format right away:
+
+.. code-block:: bash
+
+   hm detect origin
+   hm detect 'ssh://lab-data/srv/exports/lab/logs/' --add
 
 Both URL schemes use structured SFTP directory enumeration and file transfers.
 SFTP-only accounts work for discovery as well as downloading. No
@@ -470,9 +499,10 @@ for data directories. Percent-encode reserved characters in URL roots; catalog
 paths are literal relative names. Hallmark rejects traversal and observed
 destination symlinks; server permissions remain the access-control boundary.
 
-Discovered catalogs can use path rows and published catalogs can contain
-multiple TSVs. Existing local ``add``/``commit``/``checkout`` workflows still
-require a compatible one-format ``data.tsv`` repository; downloading does not
+Discovered catalogs can use path rows, one TSV per filename format and
+``file:`` entries for files no format matches; published catalogs can contain
+multiple TSVs. Local ``add``/``commit``/``checkout`` workflows still use a
+single format in ``data.tsv``; downloading does not
 populate the local object store. For local experiments, initialize a separate
 repository, copy in the downloaded files, configure their filename format,
 then add and commit them.

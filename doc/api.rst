@@ -102,6 +102,17 @@ Stage and commit a remote catalog without downloading dataset files::
    hm add 'ssh://lab-data/srv/data/run{run:d}.h5'
    hm commit -m 'Add remote data'
 
+Repeat ``--fmt`` to catalog several filename formats, each in its own TSV::
+
+   hm add 'ssh://lab-data/srv/data/' --fmt 'run{run:d}.h5=runs' \
+       --fmt 'logs/run{run:d}.log=logs'
+
+Let ``hm detect`` suggest formats for a configured remote, or a folder inside
+one, and catalog with them using ``--add``::
+
+   hm detect origin
+   hm detect 'ssh://lab-data/srv/data/logs/' --add
+
 Use ``hm clone SOURCE PATH`` for an existing Hallmark Git repository
 or published HTTP/SFTP snapshot. Git clones retain the full catalog and its
 history; snapshots start new local history. Use ``--source-type git`` or

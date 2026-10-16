@@ -95,6 +95,15 @@ contents or committing the catalog. CyVerse, ordinary browsable HTTPS
 directories, SSH and SFTP use the same workflow. Omit the filter to catalog
 all discoverable files beneath the supplied URL.
 
+Repeat ``--fmt`` to catalog several filename formats at once, each as ``FMT``
+or ``FMT=DB``. Each format's files go to their own TSV, and files that match no
+format are listed as ``file:`` entries in ``config.yml``. ``hm detect REMOTE``
+suggests formats for a configured remote, or a folder inside it, and ``--add``
+catalogs with them right away::
+
+    hm detect origin
+    hm add 'ssh://campus/srv/export/' --fmt 'run{run:d}.h5=runs' --fmt 'logs/{name}.log=logs'
+
 Every nonempty CLI transfer asks for confirmation. For separate Python
 downloads, callers can inspect
 ``repo.plan_download()`` and then execute ``repo.download(plan, approved=True)``.
@@ -123,9 +132,10 @@ Examples and configuration details are described in
 Current limits
 --------------
 
-Remote ``add`` supports one dataset root and one ``data.tsv`` table per
-repository. Keep remote catalogs separate from locally versioned files.
-Local ``add`` selects files by filename format; ``commit`` stores their
+Remote ``add`` supports one dataset root per repository; each filename format
+has its own TSV, and a single format uses ``data.tsv``. Keep remote catalogs
+separate from locally versioned files.
+Local ``add`` selects files by one filename format; ``commit`` stores their
 contents in ``.hm/objects``. Clone copies catalog history and downloads from
 its configured data remote; transfer of a local object store is not implemented.
 
