@@ -1,0 +1,25 @@
+# Codecov reports are informational; CI enforces the coverage floor in
+# .github/workflows/ci.yml from the combined report it uploads.
+codecov:
+  notify:
+    after_n_builds: 1
+coverage:
+  precision: 1
+  round: down
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+    patch:
+      default:
+        target: 80%
+        informational: true
+comment:
+  layout: "condensed_header, diff, flags, files"
+  after_n_builds: 1
+ignore:
+  - "test/**"
+  - "demo/**"
+  - "doc/**"
