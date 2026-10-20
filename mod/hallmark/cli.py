@@ -380,6 +380,14 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
         click.echo("Removed from the catalog (no longer on the server):")
         for path in removed:
             click.echo(f"  {path}")
+    changed = pf.attrs.get("changed", [])
+    if changed:
+        click.echo(f"Changed upstream ({len(changed)}); run hm download to "
+                   "replace the local copies:")
+        for path in changed[:10]:
+            click.echo(f"  {path}")
+        if len(changed) > 10:
+            click.echo(f"  ... and {len(changed) - 10} more")
 
     # display unmatched files that were skipped
     unmatched = pf.attrs.get("unmatched", [])

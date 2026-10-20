@@ -1,3 +1,4 @@
+import os
 from copy import deepcopy
 from urllib.parse import unquote, urlsplit, urlunsplit
 
@@ -14,7 +15,7 @@ from .sources import (
     rows_of,
     validate_source_name,
 )
-from ..utils import as_list_of_dicts
+from ..utils import as_list_of_dicts, resolve_path_in_root
 from ..repo.config import (
     LOCAL_RESERVED_FIELDS, check_pattern_fields, literal_fields, normalize_remotes,
     remote_name_of,
@@ -185,6 +186,12 @@ def _saved_catalogue(repo):
     return (repr(saved.config), repr(saved.meta), data_tsv_text(saved.data))
 
 
+def _same_file(before, record):
+    """Return whether the server reports a catalogued file unchanged."""
+    return all(cell_text(before.get(key)) == cell_text(record.get(key))
+               for key in _SAME_FILE)
+
+
 def _keep_sha1(frame, previous):
     """Carry each file's known sha1 forward when the server reports it unchanged."""
     if "sha1" not in previous.columns or previous.empty:
@@ -195,13 +202,41 @@ def _keep_sha1(frame, previous):
         sha1 = ""
         if record["path"] in old.index:
             before = old.loc[record["path"]]
-            if all(cell_text(before.get(key)) == cell_text(record.get(key))
-                   for key in _SAME_FILE):
+            if _same_file(before, record):
                 sha1 = before.get("sha1", "")
         kept.append(sha1)
     frame = frame.copy()
     frame["sha1"] = kept
     return frame
+
+
+def _changed_upstream(frame, previous, worktree):
+    """
+    Return downloaded paths whose file the server now reports as changed.
+
+    A path counts as downloaded when its row had a sha1 or a file exists at
+    it in the worktree.
+    """
+    if previous.empty or "path" not in previous.columns:
+        return []
+    old = previous.set_index("path")
+    changed = []
+    for record in frame.to_dict(orient="records"):
+        path = record["path"]
+        if path not in old.index or _same_file(old.loc[path], record):
+            continue
+        if cell_text(old.loc[path].get("sha1")) or _exists_in(worktree, path):
+            changed.append(path)
+    return sorted(changed)
+
+
+def _exists_in(worktree, path):
+    if worktree is None:
+        return False
+    try:
+        return os.path.lexists(resolve_path_in_root(worktree, path))
+    except (OSError, ValueError):
+        return False
 
 
 def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
@@ -234,7 +269,8 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
 
     Returns:
         pandas.DataFrame: Rows found by the scan. ``attrs["removed"]`` lists
-        catalogued paths that the server no longer has.
+        catalogued paths that the server no longer has, and
+        ``attrs["changed"]`` downloaded paths whose file it reports changed.
     """
     value, backend = _expand_webdav_scheme(value, backend)
     url, fmt = split_remote_pattern(value, fmt)
@@ -351,4 +387,6 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
     repo.state = state
     result = pd.DataFrame(rows)
     result.attrs["removed"] = sorted(set(previous.get("path", [])) - set(frame["path"]))
+    result.attrs["changed"] = _changed_upstream(
+        frame, previous.fillna(""), getattr(repo, "worktree", None))
     return result

@@ -514,6 +514,27 @@ def test_known_sha1_is_kept_only_for_unchanged_files(tmp_path, remote_listing):
         "a.fits": "4", "b.fits": "6"}
 
 
+def test_readding_a_source_lists_files_changed_on_the_server(tmp_path, remote_listing,
+                                                              monkeypatch):
+    pages, _ = remote_listing
+    names = ("a.fits", "b.fits", "c.fits", "d.fits")
+    pages[""] = _listing(*names, sizes=dict.fromkeys(names, 4))
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT)
+    repo.state.data["sha1"] = ["1" * 40, "", "", "4" * 40]
+    repo.dothm.save_state(repo.state)
+    (repo.worktree / "b.fits").write_bytes(b"bbbb")
+    # a.fits and b.fits were downloaded, c.fits never was, d.fits is unchanged.
+    pages[""] = _listing(*names, sizes={**dict.fromkeys(names, 5), "d.fits": 4})
+    assert repo.add(ROOT).attrs["changed"] == ["a.fits", "b.fits"]
+    pages[""] = _listing(*names, sizes=dict.fromkeys(names, 6))
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["add", ROOT])
+    assert result.exit_code == 0, result.output
+    assert ("Changed upstream (2); run hm download to replace the local copies:\n"
+            "  b.fits\n  d.fits\n") in result.output
+
+
 def test_remote_name_selects_or_creates_a_remote(tmp_path, remote_listing):
     repo = Repo.init(tmp_path / "data")
     repo.add(ROOT, filter="*.fits")

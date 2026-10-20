@@ -142,14 +142,16 @@ which places that source's files in a local folder. Use ``--remote NAME`` to
 name a new remote or pick an existing one, and ``--source NAME`` to name the
 source.
 
-Repeating an ``add`` with the same URL, pattern and filters updates its
-source: new files are added, files gone from the server are removed, and
-``add`` lists the removals. A bare URL updates the single source of that
+Repeating an ``add`` with the same URL, pattern and filters updates its source:
+new files are added, files gone from the server are removed, and ``add`` lists
+the removals. It also lists, as changed upstream, files you downloaded whose
+size, modification time or checksum the server now reports differently; the
+next ``download`` replaces them. A bare URL updates the single source of that
 folder. A different pattern in the same folder adds another source; to change
-an existing source's pattern instead, run ``add`` with ``--source NAME``.
-A new pattern must still match every catalogued file of that source, so a
-narrower selection belongs on a new branch. ``set-config --fmt`` does not
-apply to remote catalogs.
+an existing source's pattern instead, run ``add`` with ``--source NAME``. A new
+pattern must still match every catalogued file of that source, so a narrower
+selection belongs on a new branch. ``set-config --fmt`` does not apply to
+remote catalogs.
 
 ``download`` fetches each file from the remote of the source that cataloged
 it, opening one connection per remote; the plan lists every remote and its file
