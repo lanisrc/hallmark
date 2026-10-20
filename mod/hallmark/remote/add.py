@@ -357,6 +357,21 @@ def _exists_in(worktree, path):
         return False
 
 
+def _case_clashes(new_paths, other_paths):
+    """
+    Return groups of paths that differ only in letter case.
+
+    On macOS and Windows such paths name one file. Only groups including a
+    new path are returned, each sorted.
+    """
+    groups = {}
+    for path in {*new_paths, *other_paths}:
+        groups.setdefault(path.casefold(), []).append(path)
+    new = set(new_paths)
+    return sorted(sorted(group) for group in groups.values()
+                  if len(group) > 1 and new.intersection(group))
+
+
 def _scanned_rows(entries, selected, fmt):
     """Return catalogue rows for the files a scan found, as ``selected`` places them."""
     rows = []
@@ -457,7 +472,9 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
         pandas.DataFrame: Rows this source now catalogs. ``attrs["removed"]``
         lists catalogued paths that the server no longer has,
         ``attrs["changed"]`` downloaded paths whose file it reports changed,
-        and ``attrs["skipped"]`` the :class:`PathClash` of each path left out.
+        ``attrs["skipped"]`` the :class:`PathClash` of each path left out,
+        and ``attrs["case_clashes"]`` groups of catalogue paths that differ
+        only in letter case.
     """
     if not (on_duplicate in (None, "error", "skip") or callable(on_duplicate)):
         raise ValueError('on_duplicate must be "error", "skip" or a callable')
@@ -566,6 +583,8 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
     repo.state = state
     result = frame.copy()
     result.attrs["skipped"] = skipped
+    result.attrs["case_clashes"] = _case_clashes(
+        list(frame["path"]), list(others["path"]) if "path" in others.columns else [])
     result.attrs["removed"] = sorted(set(previous.get("path", [])) - set(frame["path"]))
     result.attrs["changed"] = _changed_upstream(
         frame, previous.fillna(""), getattr(repo, "worktree", None))

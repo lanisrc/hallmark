@@ -639,6 +639,21 @@ def test_cli_refuses_duplicate_paths_without_a_terminal(tmp_path, two_servers,
     assert _owners(Repo(repo.worktree))["f.fits"] == "two-test"
 
 
+def test_paths_differing_only_in_letter_case_are_reported(tmp_path, two_servers,
+                                                           monkeypatch):
+    pages, _ = two_servers
+    pages["one.test"][""] = _listing("M87.fits", "m87.fits", "SgrA.fits")
+    pages["two.test"][""] = _listing("sgra.fits", "other.fits")
+    repo = Repo.init(tmp_path / "data")
+    assert repo.add(ONE).attrs["case_clashes"] == [["M87.fits", "m87.fits"]]
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["add", TWO])
+    assert result.exit_code == 0, result.output
+    assert ("Warning: these paths differ only in letter case, so they would be one "
+            "file on macOS and Windows:\n  SgrA.fits, sgra.fits\n") in result.output
+    assert "M87.fits" not in result.output
+
+
 def test_nested_folder_reuses_its_remote_as_a_new_source(tmp_path, remote_listing):
     repo = Repo.init(tmp_path / "data")
     repo.add(ROOT, filter="*001.fits")

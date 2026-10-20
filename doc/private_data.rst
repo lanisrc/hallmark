@@ -146,8 +146,11 @@ both, with the new source's files under a folder you name; or to abort.
 Elsewhere it refuses, and ``--skip-duplicates`` or ``--prefix DIR`` adds the
 source anyway. The choice is not saved, so adding that source again meets the
 same paths. A path that would be a file in one source and a folder in another
-is always refused. Use ``--remote NAME`` to name a new remote or pick an
-existing one, and ``--source NAME`` to name the source.
+is always refused. ``add`` also warns about paths that differ only in letter
+case, such as ``M87.fits`` and ``m87.fits``: on macOS and Windows they are one
+file, so only one of them can be downloaded there. Use ``--remote NAME`` to
+name a new remote or pick an existing one, and ``--source NAME`` to name the
+source.
 
 Repeating an ``add`` with the same URL, pattern and filters updates its source:
 new files are added, files gone from the server are removed, and ``add`` lists

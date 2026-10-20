@@ -418,6 +418,12 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     else:
         click.echo("Changes to be committed")
         click.echo(pf.path.to_string(index=False, header=False))
+    case_clashes = pf.attrs.get("case_clashes", [])
+    if case_clashes:
+        click.echo("Warning: these paths differ only in letter case, so they "
+                   "would be one file on macOS and Windows:", err=True)
+        for group in case_clashes[:10]:
+            click.echo("  " + ", ".join(group), err=True)
     skipped = pf.attrs.get("skipped", [])
     if skipped:
         click.echo("Skipped paths another source already catalogs:")
