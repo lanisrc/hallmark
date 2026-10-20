@@ -248,14 +248,15 @@ def test_add_cli_forwards_backend_and_selection(monkeypatch, tmp_path):
         "add", "ssh://lab-data/export/", "--auth", "lab", "--backend", "ssh",
         "--backend-options", str(options), "--filter", "**/*.fits",
         "--filter", "README*", "--fmt", "{name}.fits", "--remote", "lab",
-        "--source", "fits", "--prefix", "lab/", "--server-checksum", "sha256"])
+        "--source", "fits", "--prefix", "lab/", "--server-checksum", "sha256",
+        "--skip-duplicates"])
     assert result.exit_code == 0, result.output
     assert captured == {
         "value": "ssh://lab-data/export/", "encoding": False,
         "auth": "lab", "backend": "ssh", "backend_options": {"collection": "latest"},
         "filter": ("**/*.fits", "README*"), "remote_fmt": "{name}.fits",
         "remote": "lab", "source": "fits", "prefix": "lab/",
-        "server_checksum": "sha256", "progress": True}
+        "server_checksum": "sha256", "on_duplicate": "skip", "progress": True}
 
 
 @pytest.mark.parametrize("arguments", [
@@ -443,20 +444,24 @@ def two_servers(monkeypatch):
             "SHA256SUMS": _sums("sha256", {"a.fits": b"same", "b.fits": b"one"}),
             "MD5SUMS": _sums("md5", {"d.fits": b"md5 only"})},
         "two.test": {
-            "": _listing(*names, "SHA256SUMS", "SHA1SUMS", sizes={"c.fits": 4}),
+            "": _listing(*names, "f.fits", "SHA256SUMS", "SHA1SUMS",
+                         sizes={"c.fits": 4}),
             "SHA256SUMS": _sums("sha256", {"a.fits": b"same", "b.fits": b"two",
                                            "d.fits": b"md5 only"}),
             "SHA1SUMS": _sums("sha1", {"e.fits": b"known"})},
     }
 
+    reads = []
+
     def read_text(context, path, **_):
+        reads.append((context.remote.host, path))
         page = pages[context.remote.host].get(path)
         if page is None:
             raise RemoteObjectMissing("No metadata")
         return page
 
     monkeypatch.setattr(OperationContext, "read_text", read_text)
-    return pages
+    return pages, reads
 
 
 def test_paths_another_source_catalogs_are_classified_by_content(tmp_path,
@@ -482,11 +487,156 @@ def test_paths_another_source_catalogs_are_classified_by_content(tmp_path,
                  "e.fits (same content; source 'origin')"):
         assert f"  {line}\n" in message
     assert message.endswith("Add this source with --prefix DIR, or narrow it with "
-                            "--filter; previous catalogue kept.")
+                            "--filter, or leave them out with --skip-duplicates; "
+                            "previous catalogue kept.")
     # Overlapping patterns in one folder name the same server file.
     with pytest.raises(ValueError, match=r"a\.fits \(same content; source 'origin'\)"):
         repo.add("https://one.test/data/", filter="a.*")
     assert (repo.dothm.path / "data.tsv").read_bytes() == before
+
+
+ONE, TWO = "https://one.test/data/", "https://two.test/data/"
+SHARED = ["a.fits", "b.fits", "c.fits", "d.fits", "e.fits"]
+
+
+def _owners(repo):
+    return repo.state.data.set_index("path")["source"].to_dict()
+
+
+def test_skipping_duplicates_keeps_the_catalogued_rows(tmp_path, two_servers):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ONE, filter="*.fits")
+    result = repo.add(TWO, filter="*.fits", on_duplicate="skip")
+    assert result.path.tolist() == ["f.fits"]
+    assert [clash.path for clash in result.attrs["skipped"]] == SHARED
+    assert _owners(repo) == {**dict.fromkeys(SHARED, "origin"), "f.fits": "two-test"}
+    # The choice is not saved: adding the source again meets the same paths.
+    again = repo.add(TWO, filter="*.fits", on_duplicate="skip")
+    assert again.attrs["removed"] == [] and again.path.tolist() == ["f.fits"]
+    with pytest.raises(ValueError, match="--skip-duplicates"):
+        repo.add(TWO, filter="*.fits")
+    assert _owners(repo)["f.fits"] == "two-test"
+
+
+def test_on_duplicate_can_place_the_new_source_under_a_prefix(tmp_path, two_servers):
+    _, reads = two_servers
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ONE, filter="*.fits")
+    offered = []
+
+    def under_mirror(duplicates):
+        offered.append(duplicates)
+        return "prefix", "mirror"
+
+    reads.clear()
+    result = repo.add(TWO, filter="*.fits", on_duplicate=under_mirror)
+    assert result.path.tolist() == [f"mirror/{name}" for name in SHARED + ["f.fits"]]
+    assert len(offered) == 1 and offered[0].can_prefix
+    assert offered[0].describe().startswith("5 path(s) already belong to another")
+    assert reads.count(("two.test", "")) == 1
+    assert repo.state.config["sources"][-1]["prefix"] == "mirror/"
+    # The same answer for a path that clashes under it too is refused.
+    with pytest.raises(ValueError, match="'mirror/' was already tried"):
+        repo.add(ONE, filter="a.*", on_duplicate=under_mirror)
+    # An existing source keeps its prefix.
+    other = Repo.init(tmp_path / "other")
+    other.add(ONE, filter="a.*", source="first")
+    other.add(TWO, filter="*.fits", on_duplicate="skip")
+    with pytest.raises(ValueError, match="keeps its prefix"):
+        other.add(ONE, filter="*.fits", source="first", on_duplicate=under_mirror)
+    assert offered[-1].can_prefix is False
+
+
+def test_on_duplicate_is_checked_before_scanning(tmp_path, two_servers):
+    _, reads = two_servers
+    repo = Repo.init(tmp_path / "data")
+    with pytest.raises(ValueError, match="on_duplicate"):
+        repo.add(ONE, on_duplicate="mirror")
+    with pytest.raises(ValueError, match="Remote options require a remote URL"):
+        repo.add("{name}.fits", on_duplicate="skip")
+    assert reads == []
+
+
+def test_file_and_folder_clashes_are_refused_even_when_skipping():
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from hallmark.remote.add import _settle_duplicates
+    from hallmark.remote.sources import SourceSpec
+
+    def entry(path):
+        return SimpleNamespace(path=path, checksum_algorithm=None, checksum=None,
+                               size=None, mtime=None, checksum_source=None)
+
+    def never(duplicates):
+        raise AssertionError("asked about a clash that cannot be skipped")
+
+    others = pd.DataFrame({"path": ["runs", "a.fits"], "source": ["origin"] * 2})
+    for decision in ("skip", never):
+        with pytest.raises(ValueError, match=r"runs/1\.fits \(a file where another"):
+            _settle_duplicates([entry("runs/1.fits"), entry("a.fits")], None,
+                               others, SourceSpec("new", "new"),
+                               [SourceSpec("origin", "origin")], decision,
+                               can_prefix=True)
+
+
+def test_a_selection_entirely_catalogued_elsewhere_adds_nothing(tmp_path,
+                                                                two_servers):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ONE, filter="*.fits")
+    before = (repo.dothm.path / "config.yml").read_bytes()
+    with pytest.raises(ValueError, match="Every selected file is already catalogued"):
+        repo.add(ONE, filter="a.*", on_duplicate="skip")
+    assert (repo.dothm.path / "config.yml").read_bytes() == before
+
+
+@pytest.mark.parametrize("answers, paths", [
+    ("s\n", ["f.fits"]),
+    ("p\n.hm\nmirror\n", [f"mirror/{name}" for name in SHARED + ["f.fits"]]),
+    ("a\n", None),
+    ("", None),
+])
+def test_cli_asks_about_paths_another_source_catalogs(tmp_path, two_servers,
+                                                      monkeypatch, answers, paths):
+    from hallmark import cli
+
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ONE, filter="*.fits")
+    before = (repo.dothm.path / "data.tsv").read_bytes()
+    monkeypatch.chdir(repo.worktree)
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    result = CliRunner().invoke(hallmark, ["add", TWO, "--filter", "*.fits"],
+                                input=answers)
+    assert "a.fits (same content; source 'origin')" in result.output
+    assert "[p] Keep both, with this source's files under a folder" in result.output
+    saved = Repo(repo.worktree)
+    if paths is None:
+        assert result.exit_code == 1 and "Aborted!" in result.output
+        assert (repo.dothm.path / "data.tsv").read_bytes() == before
+        return
+    assert result.exit_code == 0, result.output
+    assert sorted(path for path, owner in _owners(saved).items()
+                  if owner == "two-test") == paths
+    if answers.startswith("s"):
+        assert "Skipped paths another source already catalogs:" in result.output
+    else:
+        assert "Error:" in result.output  # .hm was refused and asked again
+
+
+def test_cli_refuses_duplicate_paths_without_a_terminal(tmp_path, two_servers,
+                                                        monkeypatch):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ONE, filter="*.fits")
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["add", TWO, "--filter", "*.fits"])
+    assert result.exit_code == 1
+    assert "or leave them out with --skip-duplicates" in result.output
+    result = CliRunner().invoke(
+        hallmark, ["add", TWO, "--filter", "*.fits", "--skip-duplicates"])
+    assert result.exit_code == 0, result.output
+    assert "  b.fits (different content; source 'origin')" in result.output
+    assert _owners(Repo(repo.worktree))["f.fits"] == "two-test"
 
 
 def test_nested_folder_reuses_its_remote_as_a_new_source(tmp_path, remote_listing):

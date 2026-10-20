@@ -14,6 +14,7 @@
 
 """Hallmark CLI entrypoint and command wiring."""
 
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from git.exc import GitError
 from . import Repo
 from .remote.download import DownloadError
 from .remote.discovery import path_matches
+from .remote.sources import SourceSpec
 from .error import CheckoutError, CloneError, HallmarkError
 from .utils import CHECKSUM_ALGORITHMS
 
@@ -48,6 +50,9 @@ def _translate_cli_errors(*error_types, prefix=None):
     try:
         # yield control to the code block that uses this context manager
         yield
+    # A declined prompt raises Abort, itself a RuntimeError; let Click report it.
+    except (click.exceptions.Abort, ClickException):
+        raise
     # handle any specified error types raised within the context manager
     except error_types as exc:
         # construct a user-friendly error message with an optional prefix
@@ -303,6 +308,35 @@ def status(repo):
             click.echo("nothing to commit, working tree clean")
 
 
+def _interactive() -> bool:
+    """Return whether someone at a terminal can answer prompts."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _ask_about_duplicates(duplicates):
+    """Ask what to do with paths another source already catalogs."""
+    click.echo(duplicates.describe())
+    choices = ["s", "p", "a"] if duplicates.can_prefix else ["s", "a"]
+    click.echo("  [s] Skip them, keeping the catalogued rows")
+    if duplicates.can_prefix:
+        click.echo("  [p] Keep both, with this source's files under a folder")
+    click.echo("  [a] Abort; nothing is saved")
+    choice = click.prompt("Choose", type=click.Choice(choices), default="a",
+                          show_choices=False)
+    if choice == "s":
+        return "skip"
+    if choice == "p":
+        def folder(value):
+            try:
+                return SourceSpec(duplicates.source, "remote", prefix=value).prefix
+            except ValueError as exc:
+                raise click.BadParameter(str(exc)) from exc
+
+        return "prefix", click.prompt("Folder for this source's files",
+                                      value_proc=folder)
+    raise click.Abort()
+
+
 @hallmark.command(short_help="Add files to hallmark index.")
 @click.option(
     "--regex",
@@ -326,10 +360,13 @@ def status(repo):
               type=click.Choice(CHECKSUM_ALGORITHMS),
               help="Have an SSH server hash files that have no published "
                    "checksum. Reads every such file on the server.")
+@click.option("--skip-duplicates", is_flag=True,
+              help="Leave out paths another source already catalogs, keeping "
+                   "its rows.")
 @click.argument("inputs", nargs=-1, required=True)
 @click.pass_obj
 def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmt,
-        remote_name, source, prefix, server_checksum):
+        remote_name, source, prefix, server_checksum, skip_duplicates):
     """Add files to the hallmark index.
 
     A remote URL or URL pattern stages a catalog without downloading files
@@ -341,7 +378,10 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     the server are removed. A different pattern adds another source; use
     --source NAME to change an existing source's pattern instead. Files from
     another server keep their paths beneath its URL; use --prefix DIR when
-    those paths are already catalogued.
+    those paths are already catalogued. When paths clash, add says whether
+    each has the same content in both places; at a terminal it asks whether
+    to skip them, keep both under a folder, or abort, and elsewhere
+    --skip-duplicates leaves them out.
 
     `hm add [--regex] FORMAT` uses the branch format string workflow.
     `hm add "."` rebuilds the manifest from current files that match
@@ -354,7 +394,8 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
                           backend_options=options,
                           filter=filters or None, remote_fmt=remote_fmt,
                           remote=remote_name, source=source, prefix=prefix,
-                          server_checksum=server_checksum)
+                          server_checksum=server_checksum,
+                          on_duplicate="skip" if skip_duplicates else None)
     if len(inputs) != 1 and any(value is not None for value in remote_options.values()):
         raise ClickException("Remote add accepts one URL at a time")
     # attempt to add the specified files to the hallmark index, handling any errors
@@ -363,6 +404,8 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
         if len(inputs) == 1:
             remote = "://" in inputs[0]
             if remote or any(value is not None for value in remote_options.values()):
+                if remote and not skip_duplicates and _interactive():
+                    remote_options["on_duplicate"] = _ask_about_duplicates
                 pf = repo.add(inputs[0], encoding, progress=True, **remote_options)
             else:
                 pf = repo.add(inputs[0], encoding)
@@ -375,6 +418,13 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     else:
         click.echo("Changes to be committed")
         click.echo(pf.path.to_string(index=False, header=False))
+    skipped = pf.attrs.get("skipped", [])
+    if skipped:
+        click.echo("Skipped paths another source already catalogs:")
+        for clash in skipped[:10]:
+            click.echo(f"  {clash.label()}")
+        if len(skipped) > 10:
+            click.echo(f"  ... and {len(skipped) - 10} more")
     removed = pf.attrs.get("removed", [])
     if removed:
         click.echo("Removed from the catalog (no longer on the server):")

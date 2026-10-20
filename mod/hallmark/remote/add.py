@@ -1,5 +1,6 @@
 import os
 from copy import deepcopy
+from dataclasses import replace
 from typing import NamedTuple
 from urllib.parse import unquote, urlsplit, urlunsplit
 
@@ -175,6 +176,26 @@ class PathClash(NamedTuple):
         return f"{self.path} ({content}; source {self.source!r})"
 
 
+class Duplicates(NamedTuple):
+    """
+    Paths a new selection shares with other sources, for ``on_duplicate``.
+
+    Attributes:
+        source (str): Name of the source being added or updated.
+        clashes (tuple[PathClash, ...]): The shared paths.
+        can_prefix (bool): Whether the source can still take a prefix; an
+            existing source keeps its own.
+    """
+
+    source: str
+    clashes: tuple
+    can_prefix: bool
+
+    def describe(self) -> str:
+        """List the shared paths and how their content compares."""
+        return _clash_listing(set(), list(self.clashes))
+
+
 def _digests(row):
     """Return the digests a catalogue row records, by algorithm."""
     found = {}
@@ -247,6 +268,13 @@ def _clash_message(structural, duplicates, selected, sources):
         hint = "Choose a different --prefix, or narrow it with --filter"
     else:
         hint = "Add this source with --prefix DIR, or narrow it with --filter"
+    if duplicates and not structural:
+        hint += ", or leave them out with --skip-duplicates"
+    return f"{_clash_listing(structural, duplicates)}\n{hint}; previous catalogue kept."
+
+
+def _clash_listing(structural, duplicates):
+    """Count and list clashing paths, at most ten of them."""
     counts = {}
     for clash in duplicates:
         counts[clash.content] = counts.get(clash.content, 0) + 1
@@ -261,10 +289,8 @@ def _clash_message(structural, duplicates, selected, sources):
     shown = "\n".join(f"  {line}" for line in lines[:10])
     if len(lines) > 10:
         shown += f"\n  ... and {len(lines) - 10} more"
-    total = len(lines)
-    return (f"{total} path(s) already belong to another source"
-            + (f" ({kinds})" if kinds else "") + f":\n{shown}\n{hint}; "
-            "previous catalogue kept.")
+    return (f"{len(lines)} path(s) already belong to another source"
+            + (f" ({kinds})" if kinds else "") + f":\n{shown}")
 
 
 def _parents(path):
@@ -331,9 +357,70 @@ def _exists_in(worktree, path):
         return False
 
 
+def _scanned_rows(entries, selected, fmt):
+    """Return catalogue rows for the files a scan found, as ``selected`` places them."""
+    rows = []
+    for item in entries:
+        row = {"path": selected.local_path(item.path),
+               "checksum_algorithm": item.checksum_algorithm,
+               "checksum": item.checksum, "size_bytes": item.size,
+               "mtime": item.mtime, "checksum_source": item.checksum_source,
+               "source": selected.name}
+        if fmt:
+            # Field values keep the text of the name, as for local files.
+            row.update(literal_fields(fmt, item.path) or {})
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _settle_duplicates(entries, fmt, others, selected, sources, on_duplicate, *,
+                       can_prefix):
+    """
+    Build the new rows, applying ``on_duplicate`` to paths other sources own.
+
+    Returns:
+        tuple: The rows, the source as finally placed, and skipped clashes.
+
+    Raises:
+        ValueError: If paths still clash, or nothing is left to add.
+    """
+    tried = {selected.prefix}
+    while True:
+        frame = _scanned_rows(entries, selected, fmt)
+        structural, duplicates = _find_clashes(frame, others, selected, sources)
+        if not (structural or duplicates):
+            return frame, selected, []
+        decision = on_duplicate
+        if callable(decision) and not structural:
+            decision = decision(Duplicates(selected.name, tuple(duplicates),
+                                           can_prefix))
+        if decision == "skip" and not structural:
+            shared = {clash.path for clash in duplicates}
+            frame = frame[~frame["path"].isin(shared)].reset_index(drop=True)
+            if frame.empty:
+                raise ValueError(
+                    "Every selected file is already catalogued by another "
+                    "source; previous catalogue kept")
+            return frame, selected, duplicates
+        if (isinstance(decision, tuple) and len(decision) == 2
+                and decision[0] == "prefix"):
+            if not can_prefix:
+                raise ValueError(
+                    f"Source {selected.name!r} keeps its prefix; "
+                    "previous catalogue kept")
+            selected = replace(selected, prefix=decision[1])
+            if selected.prefix in tried:
+                raise ValueError(
+                    f"Prefix {selected.prefix!r} was already tried; "
+                    "previous catalogue kept")
+            tried.add(selected.prefix)
+            continue
+        raise ValueError(_clash_message(structural, duplicates, selected, sources))
+
+
 def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
                backend_options=None, remote=None, source=None, prefix=None,
-               server_checksum=None, progress=False):
+               server_checksum=None, on_duplicate=None, progress=False):
     """
     Catalog files from a remote folder as one source of the catalogue.
 
@@ -357,13 +444,23 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
         server_checksum (str, optional): Have the server compute this
             algorithm for files without a published checksum; saved with the
             source and reused when it is added again.
+        on_duplicate (str | callable, optional): What to do with paths that
+            another source already catalogs as files. None or ``"error"``
+            refuses them; ``"skip"`` leaves them out of this source and keeps
+            the catalogued rows. A callable receives a :class:`Duplicates`
+            and returns ``"skip"``, ``"abort"``, or ``("prefix", DIR)`` to
+            place a new source's files under DIR instead. The choice is not
+            saved, so adding the source again meets the same paths.
         progress: Discovery progress callback or flag.
 
     Returns:
-        pandas.DataFrame: Rows found by the scan. ``attrs["removed"]`` lists
-        catalogued paths that the server no longer has, and
-        ``attrs["changed"]`` downloaded paths whose file it reports changed.
+        pandas.DataFrame: Rows this source now catalogs. ``attrs["removed"]``
+        lists catalogued paths that the server no longer has,
+        ``attrs["changed"]`` downloaded paths whose file it reports changed,
+        and ``attrs["skipped"]`` the :class:`PathClash` of each path left out.
     """
+    if not (on_duplicate in (None, "error", "skip") or callable(on_duplicate)):
+        raise ValueError('on_duplicate must be "error", "skip" or a callable')
     value, backend = _expand_webdav_scheme(value, backend)
     url, fmt = split_remote_pattern(value, fmt)
     path_matches("validation", filter=filter, fmt=fmt)
@@ -442,22 +539,10 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
             f"No remote files matched {_describe_selection(fmt, filter)} under "
             f"{url}; previous catalogue kept")
 
-    rows = []
-    for item in entries:
-        row = {"path": selected.local_path(item.path),
-               "checksum_algorithm": item.checksum_algorithm,
-               "checksum": item.checksum, "size_bytes": item.size,
-               "mtime": item.mtime, "checksum_source": item.checksum_source,
-               "source": selected.name}
-        if fmt:
-            # Field values keep the text of the name, as for local files.
-            row.update(literal_fields(fmt, item.path) or {})
-        rows.append(row)
-    frame = pd.DataFrame(rows)
     others = data[~mine]
-    structural, duplicates = _find_clashes(frame, others, selected, sources)
-    if structural or duplicates:
-        raise ValueError(_clash_message(structural, duplicates, selected, sources))
+    frame, selected, skipped = _settle_duplicates(
+        entries, fmt, others, selected, sources, on_duplicate,
+        can_prefix=current is None)
     stored = _keep_sha1(frame, previous.fillna(""))
     # An empty catalogue still has the local manifest's default columns.
     combined = (pd.concat([others, stored], ignore_index=True, sort=False)
@@ -479,7 +564,8 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
                 "(previous catalogue kept); run hm add again")
         repo.dothm.save_state(state)
     repo.state = state
-    result = pd.DataFrame(rows)
+    result = frame.copy()
+    result.attrs["skipped"] = skipped
     result.attrs["removed"] = sorted(set(previous.get("path", [])) - set(frame["path"]))
     result.attrs["changed"] = _changed_upstream(
         frame, previous.fillna(""), getattr(repo, "worktree", None))

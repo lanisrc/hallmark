@@ -137,10 +137,17 @@ A URL inside an existing remote's folder reuses that remote, and paths stay
 relative to its URL, so ``runs/run_001.h5`` above downloads to
 ``runs/run_001.h5``. A URL on another server adds a remote named after its
 host. Downloaded files mirror each server, so two sources cannot catalog the
-same path; ``add`` lists the clashing paths and asks for ``--prefix DIR``,
-which places that source's files in a local folder. Use ``--remote NAME`` to
-name a new remote or pick an existing one, and ``--source NAME`` to name the
-source.
+same path. When they would, ``add`` lists the clashing paths and says for each
+whether both sources have the same content (matching checksums, or the same
+file on the server), different content (a checksum or size differs), or nothing
+to compare. At a terminal it then asks whether to skip them, keeping the rows
+already catalogued, which suits copies of one file on two mirrors; to keep
+both, with the new source's files under a folder you name; or to abort.
+Elsewhere it refuses, and ``--skip-duplicates`` or ``--prefix DIR`` adds the
+source anyway. The choice is not saved, so adding that source again meets the
+same paths. A path that would be a file in one source and a folder in another
+is always refused. Use ``--remote NAME`` to name a new remote or pick an
+existing one, and ``--source NAME`` to name the source.
 
 Repeating an ``add`` with the same URL, pattern and filters updates its source:
 new files are added, files gone from the server are removed, and ``add`` lists

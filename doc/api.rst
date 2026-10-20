@@ -124,6 +124,12 @@ approval: an ``approve(plan)`` callback returning Boolean True, or
 cloned without data. Pass ``download=False`` for catalog-only or bare clones. A
 bare destination with downloads enabled fails before cloning.
 
+When a remote shares paths with a source already catalogued, ``Repo.add``
+refuses unless ``on_duplicate`` says otherwise: ``"skip"`` leaves those paths
+out, or a callable receives a ``hallmark.remote.add.Duplicates`` listing each
+path and whether its content matches, and returns ``"skip"``, ``"abort"`` or
+``("prefix", "DIR")``. Skipped paths are in the result's ``attrs["skipped"]``.
+
 For separate Python downloads, first inspect the selected files::
 
    from hallmark import Repo
