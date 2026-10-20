@@ -245,6 +245,62 @@ def test_an_interrupted_download_stages_what_finished(repo, server, monkeypatch)
     assert data["b.fits"] == ""
 
 
+def test_an_interrupt_stages_every_file_that_finished_with_it(repo, server,
+                                                              monkeypatch):
+    import concurrent.futures
+
+    from hallmark.remote import download as download_module
+
+    files, fetched = server
+
+    def fetch(self, relative_path, destination, *, chunk_size=8192):
+        if relative_path == "b.fits":
+            raise KeyboardInterrupt
+        Path(destination).write_bytes(files[relative_path])
+
+    def wait_for_both(futures, return_when):
+        # Both finish before the caller wakes, the interrupted one listed first.
+        done, _ = concurrent.futures.wait(futures)
+        return sorted(done, key=lambda future: future.exception() is None), set()
+
+    monkeypatch.setattr(HttpBackend, "fetch", fetch)
+    monkeypatch.setattr(download_module, "wait", wait_for_both)
+    plan = repo.plan_download(file_paths=["a.fits", "b.fits"])
+    with pytest.raises(KeyboardInterrupt):
+        repo.download(plan, approved=True, max_workers=2)
+    data = Repo(repo.worktree).state.data
+    assert dict(zip(data.path, data.sha1)) == {
+        "a.fits": sha1(b"alpha"), "b.fits": "", "c.fits": ""}
+
+
+def test_jobs_finishing_while_a_download_stops_are_recorded(tmp_path, monkeypatch):
+    from threading import Event
+
+    from hallmark.remote.download import _run_transfers
+    from hallmark.transport import RemoteSpec
+
+    released = Event()
+    original_cancel = OperationContext.cancel
+
+    def cancel(self):
+        released.set()
+        original_cancel(self)
+
+    def run_job(context, job):
+        if job == "interrupted":
+            raise KeyboardInterrupt
+        released.wait(timeout=10)
+        return job
+
+    recorded = []
+    monkeypatch.setattr(OperationContext, "cancel", cancel)
+    with pytest.raises(KeyboardInterrupt):
+        _run_transfers(RemoteSpec.from_url(ROOT), tmp_path, ["slow", "interrupted"],
+                       run_job, lambda *args: recorded.append(args),
+                       max_workers=2, show_progress=False)
+    assert recorded == [("slow", "slow", None)]
+
+
 def test_a_failed_save_is_recovered_by_the_next_run(repo, server, monkeypatch):
     from hallmark.repo.dothm import Dothm
 

@@ -1255,23 +1255,37 @@ def _run_transfers(remote_spec, output_root, jobs, run_job, record, *, max_worke
                 while pending:
                     completed, _ = wait(pending, return_when=FIRST_COMPLETED)
                     # Aggregate per-file failures and keep successful downloads.
+                    # An interrupt waits until the rest of its batch is recorded.
+                    stop = None
                     for future in completed:
                         job = pending.pop(future)
                         try:
-                            record(job, future.result(), None)
+                            outcome = future.result()
                         except DownloadError as exc:
                             failed += 1
                             record(job, None, str(exc))
-                        finally:
-                            finished += 1
-                            with progress_lock:
-                                progress.set_postfix(
-                                    files=f"{finished}/{len(jobs)}", failed=failed)
+                        except BaseException as exc:
+                            stop = stop or exc
+                        else:
+                            record(job, outcome, None)
+                        finished += 1
+                        with progress_lock:
+                            progress.set_postfix(
+                                files=f"{finished}/{len(jobs)}", failed=failed)
+                    if stop is not None:
+                        raise stop
+                    for _ in completed:
                         submit_next()
             except BaseException:
                 context.cancel()
                 for future in pending:
                     future.cancel()
+                executor.shutdown(wait=True, cancel_futures=True)
+                # Jobs that finished while stopping still reached the store.
+                for future, job in pending.items():
+                    if (future.done() and not future.cancelled()
+                            and future.exception() is None):
+                        record(job, future.result(), None)
                 raise
             finally:
                 executor.shutdown(wait=True, cancel_futures=True)
