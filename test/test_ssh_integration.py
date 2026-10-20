@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from urllib.parse import quote
 
@@ -60,6 +61,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin prohibit-password
 MaxSessions 4
+LogLevel VERBOSE
 Subsystem sftp internal-sftp
 """)
     mode = getattr(request, "param", None)
@@ -125,6 +127,10 @@ Host *
         daemon.terminate()
         daemon.wait(timeout=5)
         log.close()
+        # The client hides its errors, so a failed test shows the server's side.
+        report = getattr(request.node, "report_call", None)
+        if report is not None and report.failed:
+            sys.stderr.write((tmp_path / "sshd.log").read_text(errors="replace"))
 
 
 @pytest.mark.parametrize("scheme", ["ssh", "sftp"])
