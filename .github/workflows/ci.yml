@@ -197,7 +197,7 @@ jobs:
     steps:
     - name: Install OpenSSH, Git and Python 3.9
       run: |
-        dnf install -y git openssh-server openssh-clients shadow-utils ${{ matrix.packages }}
+        dnf install -y git findutils openssh-server openssh-clients shadow-utils ${{ matrix.packages }}
         # The image locks root, so sshd without PAM refuses even key logins.
         usermod -p '*' root
         ssh -V

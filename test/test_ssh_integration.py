@@ -399,6 +399,8 @@ def test_ssh_listing_omits_symlinks_and_rejects_controls(ssh_server, tmp_path):
             list(context.transport.iter_entries())
 
 
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="root reads files whatever their permissions")
 def test_permission_denied_preserves_existing_file(ssh_server, tmp_path):
     source = ssh_server["root"] / "private"
     source.write_bytes(b"unreadable")
