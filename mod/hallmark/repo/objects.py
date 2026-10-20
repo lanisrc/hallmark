@@ -21,6 +21,7 @@ only trusted while its object still matches that record.
 
 import hashlib
 import os
+import secrets
 import shutil
 import stat
 import tempfile
@@ -55,6 +56,22 @@ def _make_read_only(path: Path) -> None:
 def _make_writable(path: Path) -> None:
     mode = stat.S_IMODE(os.stat(path).st_mode)
     os.chmod(path, mode | stat.S_IWUSR)
+
+
+def _link_over(source: Path, destination: Path) -> None:
+    """Hard-link ``source`` to ``destination``, replacing it atomically."""
+    while True:
+        temp = destination.with_name(f".{destination.name}.{secrets.token_hex(4)}")
+        try:
+            os.link(source, temp)
+            break
+        except FileExistsError:
+            continue
+    try:
+        os.replace(temp, destination)
+    finally:
+        # rename() leaves both names when they already link the same file.
+        temp.unlink(missing_ok=True)
 
 
 class Objects:
@@ -470,30 +487,35 @@ class Objects:
         return (stat.S_ISREG(found.st_mode)
                 and (found.st_dev, found.st_ino) == (target.st_dev, target.st_ino))
 
-    def materialize(self, sha1: str, destination: Path) -> str:
+    def materialize(self, sha1: str, destination: Path, *,
+                    replace: bool = False) -> str:
         """
-        Place the object for ``sha1`` at a new destination as a download.
+        Place the object for ``sha1`` at a destination as a download.
 
         The object is hard-linked, read-only, where possible. Where the
         destination is on another filesystem, or links are unavailable, a
         verified writable copy is made instead. An existing destination is
-        never replaced.
+        only replaced when asked, and then atomically, so it is never missing.
 
         Args:
             sha1 (str): Object to place.
-            destination (Path): New file path; its folder must exist.
+            destination (Path): File path; its folder must exist.
+            replace (bool): Replace an existing destination.
 
         Returns:
             str: ``"linked"`` or ``"copied"``.
 
         Raises:
-            FileExistsError: If ``destination`` already exists.
+            FileExistsError: If ``destination`` exists and ``replace`` is False.
             FileNotFoundError: If the object is not stored.
         """
         source = self.object_path(sha1)
         if LINK_INTO_WORKTREE:
             try:
-                os.link(source, destination)
+                if replace:
+                    _link_over(source, Path(destination))
+                else:
+                    os.link(source, destination)
                 return "linked"
             except FileExistsError:
                 raise
@@ -503,7 +525,7 @@ class Objects:
         if not source.is_file():
             raise FileNotFoundError(f"object {sha1} not found in the object store")
         self._copy_and_verify_file(source, destination, expected_sha1=sha1,
-                                   overwrite=False)
+                                   overwrite=replace)
         _make_writable(destination)
         return "copied"
 

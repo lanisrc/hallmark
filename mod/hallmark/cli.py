@@ -82,6 +82,14 @@ def _report_download_results(results: dict) -> None:
     from_store = results.get("from_store", [])
     if from_store:
         click.echo(f"Placed {len(from_store)} file(s) from .hm/objects")
+    replaced = results.get("replaced", [])
+    if replaced:
+        click.echo(f"Replaced {len(replaced)} outdated file(s); "
+                   "old versions stay in .hm/objects")
+    unchanged = results.get("unchanged", [])
+    if unchanged:
+        click.echo(f"Fetched {len(unchanged)} file(s) to compare; "
+                   "they were already up to date")
     copied = results.get("copied", [])
     if copied:
         click.echo("Copied instead of linked (links unavailable):")
@@ -96,7 +104,7 @@ def _report_download_results(results: dict) -> None:
         click.echo(results["staging_note"])
     if results.get("staging_error"):
         click.echo(results["staging_error"], err=True)
-        click.echo("Run hm download again; no transfer is needed.", err=True)
+        click.echo("Run hm download again to record them.", err=True)
     succeeded = results["succeeded"]
     failed = results["failed"]
     total_mb = results["total_bytes"] / (1024 * 1024)
@@ -625,9 +633,12 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
             sources=sources or None)
         if dry_run:
             click.echo(plan.summary())
-            listed = [(item, "") for item in plan.items] + [
-                (item, " (from .hm/objects)") for item in plan.stored_items]
-            for item, note in listed[:20]:
+            listed = [(item, []) for item in plan.items] + [
+                (item, ["from .hm/objects"]) for item in plan.stored_items]
+            for item, notes in listed[:20]:
+                if item.replaces:
+                    notes = notes + ["replaces an outdated file"]
+                note = f" ({', '.join(notes)})" if notes else ""
                 click.echo(f"  {item.relative_path.as_posix()}{note}")
             if plan.file_count > 20:
                 click.echo(f"  ... {plan.file_count - 20} more file(s)")

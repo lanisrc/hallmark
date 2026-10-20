@@ -319,9 +319,14 @@ def test_a_failed_save_is_recovered_by_the_next_run(repo, server, monkeypatch):
     fetched.clear()
     reopened = Repo(repo.worktree)
     assert "sha1" not in reopened.state.data.columns
+    # Without a checksum nothing proves the links current; they are compared.
     plan, result = download(reopened)
-    assert fetched == [] and not plan.has_changes
+    assert len(plan.outdated_items) == 3
+    assert sorted(fetched) == sorted(FILES)
+    assert sorted(result["unchanged"]) == sorted(FILES) and "replaced" not in result
     assert result["staged"] == 3
+    for name, data in FILES.items():
+        assert repo.objects.is_linked(sha1(data), repo.worktree / name)
     assert Repo(repo.worktree).status()["staged"]["modified"] == sorted(FILES)
 
 
@@ -373,13 +378,16 @@ def test_cli_reports_staging_and_recovers_on_a_quiet_rerun(repo, server,
     result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
     assert result.exit_code == 1
     assert "could not be recorded: disk full" in result.output
-    assert "Run hm download again; no transfer is needed." in result.output
+    assert "Run hm download again to record them." in result.output
     monkeypatch.setattr(Dothm, "save_state", original)
-    result = CliRunner().invoke(hallmark, ["download", "--all"])
+    result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
     assert result.exit_code == 0, result.output
-    assert "No files selected for download." in result.output
+    assert "Outdated: 3 file(s) will be replaced" in result.output
+    assert "3 without a catalogued checksum are fetched to compare" in result.output
+    assert ("Fetched 3 file(s) to compare; they were already up to date"
+            in result.output)
     assert "Staged SHA-1 for 3 file(s); run hm commit to record them" in result.output
-    assert "Successfully downloaded" not in result.output
+    assert "Replaced" not in result.output
 
 
 def test_dry_run_lists_files_coming_from_the_cache(repo, server, monkeypatch):
@@ -466,3 +474,262 @@ def test_a_change_saved_during_a_download_is_kept(repo, server, monkeypatch):
     saved = Repo(repo.worktree).state.data.set_index("path")
     assert "extra/b.fits" in saved.index
     assert saved.loc["a.fits", "sha1"] == sha1(b"alpha")
+
+
+def serve_index(monkeypatch, files, *, mtimes=None, sums=False):
+    """Serve the index with modification times, and a SHA256SUMS file if asked."""
+    mtimes = mtimes or {}
+
+    def read_text(context, path, **_):
+        if path == "SHA256SUMS" and sums:
+            return "".join(f"{hashlib.sha256(data).hexdigest()}  {name}\n"
+                           for name, data in files.items())
+        if path:
+            raise RemoteObjectMissing("No metadata")
+        links = "".join(
+            f'<a href="{name}" data-size="{len(data)}"'
+            + (f' data-mtime="{mtimes[name]}"' if name in mtimes else "")
+            + f">{name}</a>" for name, data in files.items())
+        if sums:
+            links += '<a href="SHA256SUMS">SHA256SUMS</a>'
+        return "<h1>Index of data</h1>" + links
+
+    monkeypatch.setattr(OperationContext, "read_text", read_text)
+
+
+def links_fail(monkeypatch):
+    """Refuse hard links into the worktree, as another filesystem would."""
+    real_link = os.link
+
+    def link(source, destination):
+        if ".hm" not in str(destination):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_link(source, destination)
+
+    monkeypatch.setattr(objects_module.os, "link", link)
+
+
+def staged_sha1(repo):
+    data = Repo(repo.worktree).state.data
+    return dict(zip(data.path, data.sha1))
+
+
+def test_a_file_changed_upstream_is_replaced_and_the_old_version_kept(repo, server):
+    files, fetched = server
+    download(repo)
+    repo.commit("Record downloaded content")
+    files["b.fits"] = b"bravo, revised"
+    repo.add(ROOT)
+    fetched.clear()
+    plan = repo.plan_download(all_files=True)
+    assert [(item.relative_path.name, item.replaces)
+            for item in plan.outdated_items] == [("b.fits", sha1(b"bravo"))]
+    assert "Outdated: 1 file(s) will be replaced" in plan.summary()
+    result = repo.download(plan, approved=True)
+    assert fetched == ["b.fits"] and result["replaced"] == ["b.fits"]
+    path = repo.worktree / "b.fits"
+    assert path.read_bytes() == b"bravo, revised"
+    assert repo.objects.is_linked(sha1(b"bravo, revised"), path)
+    assert not os.stat(path).st_mode & stat.S_IWUSR
+    # The old version stays, so the previous commit can still be placed.
+    assert repo.objects.contains(sha1(b"bravo"))
+    assert staged_sha1(repo)["b.fits"] == sha1(b"bravo, revised")
+    assert list(repo.worktree.glob(".b.fits.*")) == []
+
+
+@pytest.mark.parametrize("content, outcome", [(b"bravo", "unchanged"),
+                                              (b"BRAVO", "replaced")])
+def test_a_file_touched_upstream_is_compared_by_its_content(repo, server,
+                                                            monkeypatch, content,
+                                                            outcome):
+    files, fetched = server
+    serve_index(monkeypatch, files, mtimes=dict.fromkeys(files, 1750000000))
+    repo.add(ROOT)
+    download(repo)
+    repo.commit("Record downloaded content")
+    path = repo.worktree / "b.fits"
+    inode = os.stat(path).st_ino
+    files["b.fits"] = content
+    serve_index(monkeypatch, files,
+                mtimes={**dict.fromkeys(files, 1750000000), "b.fits": 1760000000})
+    repo.add(ROOT)
+    fetched.clear()
+    plan, result = download(repo)
+    assert [item.relative_path.name for item in plan.outdated_items] == ["b.fits"]
+    assert "1 without a catalogued checksum are fetched to compare" in plan.summary()
+    assert fetched == ["b.fits"] and result[outcome] == ["b.fits"]
+    assert path.read_bytes() == content
+    assert (os.stat(path).st_ino == inode) == (outcome == "unchanged")
+    assert staged_sha1(repo)["b.fits"] == sha1(content)
+
+
+def test_switching_branches_replaces_downloads_from_the_store(repo, server):
+    files, fetched = server
+    download(repo)
+    repo.commit("Version 1")
+    repo.create_branch("v2")
+    repo.checkout("v2")
+    files["b.fits"] = b"bravo, revised"
+    repo.add(ROOT)
+    download(repo)
+    repo.commit("Version 2")
+    repo.checkout("main")
+    fetched.clear()
+    plan, result = download(repo)
+    assert [(item.relative_path.name, item.replaces) for item in plan.stored_items] \
+        == [("b.fits", sha1(b"bravo, revised"))]
+    assert fetched == []
+    assert result["from_store"] == ["b.fits"] and result["replaced"] == ["b.fits"]
+    assert repo.objects.is_linked(sha1(b"bravo"), repo.worktree / "b.fits")
+
+
+def published_sums_repo(tmp_path, monkeypatch, files):
+    """Catalogue the files with checksums from a published SHA256SUMS."""
+    serve_index(monkeypatch, files, sums=True)
+    repo = Repo.init(tmp_path / "sums")
+    repo.add(ROOT, filter="*.fits")
+    return repo
+
+
+def test_an_outdated_copy_is_replaced_where_links_are_unavailable(tmp_path, server,
+                                                                  monkeypatch):
+    files, fetched = server
+    repo = published_sums_repo(tmp_path, monkeypatch, files)
+    links_fail(monkeypatch)
+    download(repo)
+    repo.commit("Record downloaded content")
+    files["b.fits"] = b"bravo, revised"
+    repo.add(ROOT, filter="*.fits")
+    plan = repo.plan_download(all_files=True)
+    assert "without a catalogued checksum" not in plan.summary()
+    result = repo.download(plan, approved=True)
+    assert result["replaced"] == ["b.fits"] and result["copied"] == ["b.fits"]
+    path = repo.worktree / "b.fits"
+    assert path.read_bytes() == b"bravo, revised"
+    assert os.stat(path).st_mode & stat.S_IWUSR
+
+
+@pytest.mark.parametrize("linked", [True, False])
+def test_an_edited_outdated_file_is_a_conflict(tmp_path, server, monkeypatch,
+                                               linked):
+    files, fetched = server
+    repo = published_sums_repo(tmp_path, monkeypatch, files)
+    if not linked:
+        links_fail(monkeypatch)
+    download(repo)
+    repo.commit("Record downloaded content")
+    files["b.fits"] = b"bravo, revised"
+    repo.add(ROOT, filter="*.fits")
+    path = repo.worktree / "b.fits"
+    os.chmod(path, 0o644)
+    path.write_bytes(b"my notes")
+    later(path)
+    fetched.clear()
+    with pytest.raises(Exception, match="conflict"):
+        repo.plan_download(all_files=True)
+    assert path.read_bytes() == b"my notes" and fetched == []
+
+
+def test_an_outdated_file_changed_during_the_download_is_kept(repo, server,
+                                                              monkeypatch):
+    files, fetched = server
+    download(repo)
+    repo.commit("Record downloaded content")
+    files["b.fits"] = b"bravo, revised"
+    repo.add(ROOT)
+    path = repo.worktree / "b.fits"
+    real_fetch = HttpBackend.fetch
+
+    def fetch(self, relative_path, destination, *, chunk_size=8192):
+        os.chmod(path, 0o644)
+        path.write_bytes(b"my notes")
+        later(path)
+        return real_fetch(self, relative_path, destination, chunk_size=chunk_size)
+
+    monkeypatch.setattr(HttpBackend, "fetch", fetch)
+    _, result = download(repo)
+    assert result["failed"] == 1
+    assert "b.fits changed during the download; it was kept" in result["errors"][0]
+    assert path.read_bytes() == b"my notes"
+    assert repo.objects.contains(sha1(b"bravo, revised"))
+    assert staged_sha1(repo)["b.fits"] == ""
+
+
+def test_a_replacement_needs_the_plan_that_listed_it(repo, server):
+    files, fetched = server
+    download(repo)
+    repo.commit("Record downloaded content")
+    files["b.fits"] = b"bravo, revised"
+    repo.add(ROOT)
+    path = repo.worktree / "b.fits"
+    path.unlink()
+    plan = repo.plan_download(all_files=True)
+    assert plan.outdated_items == ()
+    repo.objects.materialize(sha1(b"bravo"), path)
+    fetched.clear()
+    result = repo.download(plan, approved=True)
+    assert result["failed"] == 1 and fetched == []
+    assert "changed since the plan was approved; it was kept" in result["errors"][0]
+    assert path.read_bytes() == b"bravo"
+
+
+def test_an_outdated_file_under_another_letter_case_is_a_conflict(repo, server,
+                                                                  monkeypatch):
+    from hallmark.remote import download as download_module
+
+    files, fetched = server
+    download(repo)
+    repo.commit("Record downloaded content")
+    files["b.fits"] = b"bravo, revised"
+    repo.add(ROOT)
+    real_listdir = os.listdir
+
+    def listdir(path="."):
+        # As if the folder held B.fits, which b.fits names where case is ignored.
+        names = real_listdir(path)
+        if Path(path) == repo.worktree:
+            return ["B.fits" if name == "b.fits" else name for name in names]
+        return names
+
+    monkeypatch.setattr(download_module.os, "listdir", listdir)
+    with pytest.raises(Exception, match=r"b\.fits \(another path differing only"):
+        repo.plan_download(all_files=True)
+
+
+def test_paths_differing_in_case_never_replace_each_other(tmp_path, monkeypatch):
+    probe = tmp_path / "Probe"
+    probe.touch()
+    if not (tmp_path / "probe").exists():
+        pytest.skip("This filesystem tells letter cases apart")
+    files = {"B.fits": b"upper", "b.fits": b"lower"}
+    serve_index(monkeypatch, files)
+    monkeypatch.setattr(
+        HttpBackend, "fetch",
+        lambda self, path, destination, **_: Path(destination).write_bytes(files[path]))
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT)
+    _, result = download(repo)
+    assert result["succeeded"] == 1 and result["failed"] == 1
+    with pytest.raises(Exception, match="differing only in letter case"):
+        repo.plan_download(all_files=True)
+
+
+def test_cli_lists_and_reports_replaced_files(repo, server, monkeypatch):
+    from click.testing import CliRunner
+
+    from hallmark.cli import hallmark
+
+    files, fetched = server
+    download(repo)
+    repo.commit("Record downloaded content")
+    files["b.fits"] = b"bravo, revised"
+    repo.add(ROOT)
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["download", "--all", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "  b.fits (replaces an outdated file)" in result.output
+    result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "Outdated: 1 file(s) will be replaced" in result.output
+    assert ("Replaced 1 outdated file(s); old versions stay in .hm/objects"
+            in result.output)

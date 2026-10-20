@@ -267,11 +267,18 @@ are deduplicated. ``--all`` cannot be combined with either selection mode.
 Relative output paths are relative to the current directory. Without
 ``--output``, downloads go to the repository worktree; bare ``.hm`` repositories
 require an explicit output directory. Existing files with matching checksums
-are listed as already downloaded and skipped. Different contents, directories
-blocking file paths, and existing files without a usable catalog checksum stop
-the whole selection before transfer. Delete conflicting paths yourself before
-retrying. There is no overwrite option. ``--dry-run`` performs the same local
-checks without downloading or creating files.
+are listed as already downloaded and skipped. An earlier download that no
+longer matches its catalog row, because the file changed on the server and the
+source was added again or because another branch is checked out, is listed as
+outdated: approving the download replaces it, and the old version stays in
+``.hm/objects``, so checking out the earlier commit restores it without a
+transfer. A downloaded file whose row has no catalog checksum cannot prove it is
+current; it is fetched again to compare and kept if unchanged. Files you
+created or edited, directories blocking file paths, and existing files without a
+usable catalog checksum stop the whole selection before transfer, as does a
+file that two catalog paths differing only in letter case would share. Delete
+conflicting paths yourself before retrying. ``--dry-run`` performs the same
+local checks without downloading or creating files.
 
 Downloads pass through the object store in ``.hm/objects``, where
 ``hm commit`` also keeps your local files:
@@ -281,7 +288,8 @@ Downloads pass through the object store in ``.hm/objects``, where
    interrupted download never leaves a partial file in the data folder, and its
    temporary file is removed a day later.
 2. The stored file is hard-linked into the data folder (or copied where links
-   are unavailable, for example on another filesystem). Files with identical
+   are unavailable, for example on another filesystem). An outdated file is
+   replaced in one step, so the path is never missing. Files with identical
    contents are stored once.
 3. The SHA-1 of every file now in place is recorded in the catalog and staged.
    ``download`` prints ``Staged SHA-1 for N file(s); run hm commit to record
@@ -298,8 +306,9 @@ refuses to touch it and drops the changed object, and deleting the file lets a
 fresh copy be downloaded. To change a downloaded file, copy it to a new name.
 Never delete ``.hm/objects`` by hand: it also holds committed local files that
 may exist nowhere else. Linked worktrees share it. After an interruption, run
-the same download again: files already linked into the store are recognised as
-complete, even without a catalog checksum, and only the rest are transferred.
+the same download again: files whose SHA-1 was recorded, or whose catalog
+checksum matches, are recognised as complete and only the rest are transferred.
+Files with neither are fetched again to compare.
 
 After committing the catalog, use ``download`` to review and approve a transfer.
 Declining keeps the catalog available; an empty selection needs no approval:

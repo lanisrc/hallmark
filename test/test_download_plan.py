@@ -107,6 +107,24 @@ def test_plan_is_immutable_and_copies_input_sequences(tmp_path):
         plan.items[0].size_bytes = 4
 
 
+def test_plan_summary_counts_outdated_files(tmp_path):
+    old = "A" * 40
+    plan = DownloadPlan(
+        (DownloadItem(Path("a.bin"), replaces=old),
+         DownloadItem(Path("b.bin"), ("sha256", "b" * 64), replaces="c" * 40),
+         DownloadItem(Path("c.bin"))),
+        "https://source.test/", tmp_path,
+        stored_items=(DownloadItem(Path("d.bin"), sha1="d" * 40, replaces="e" * 40),))
+    assert [item.relative_path.name for item in plan.outdated_items] == [
+        "a.bin", "b.bin", "d.bin"]
+    assert plan.items[0].replaces == "a" * 40
+    assert ("Outdated: 3 file(s) will be replaced (old versions stay in "
+            ".hm/objects); 1 without a catalogued checksum are fetched to "
+            "compare and kept if unchanged") in plan.summary()
+    with pytest.raises(ValueError, match="replaces"):
+        DownloadItem(Path("a.bin"), replaces="x")
+
+
 def test_plan_display_redacts_url_credentials_without_changing_source(tmp_path):
     url = "https://user:secret@example.test:8443/data/?token=secret#secret"
     plan = DownloadPlan((DownloadItem(Path("a.bin")),), url, tmp_path)

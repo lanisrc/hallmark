@@ -744,38 +744,70 @@ def _row_metadata(row) -> tuple:
 
 def _existing_file_status(item, destination, store):
     """
-    Classify an existing destination as ours (skip) or a conflict.
+    Classify an existing destination.
 
     Returns:
-        DownloadItem | None: The item to skip, carrying the file's SHA-1 when
-        it was computed, or None for a conflict.
+        tuple[str, object]: ``("skip", item)`` when the file holds the row's
+        content, with the item carrying the file's SHA-1 when it was
+        computed; ``("outdated", sha1)`` when it holds other content that
+        is an unchanged stored object, so replacing it loses nothing; or
+        ``("conflict", None)``.
     """
     if not destination.is_file() or destination.is_symlink():
-        return None
+        return "conflict", None
     if store is not None and item.sha1 is not None:
         # A link is the object itself, trusted while the object is unchanged.
         if store.is_linked(item.sha1, destination) and store.verify(item.sha1):
             if (item.size_bytes is not None
                     and destination.stat().st_size != item.size_bytes):
-                return None
-            return item
+                return "conflict", None
+            return "skip", item
     checksum = _validate_expected_checksum(item.checksum)
     if (checksum is None and item.sha1 is None
             and (store is None or destination.stat().st_nlink < 2)):
-        # Without a digest only a link into the object store identifies the file.
-        return None
+        # Without a digest only a link into the object store can be ours.
+        return "conflict", None
     algorithms = {"sha1"} | ({checksum[0]} if checksum else set())
     digests = calculate_file_checksums(destination, algorithms)
+    current = digests["sha1"]
     if checksum is not None:
-        verified = digests[checksum[0]] == checksum[1]
-    elif item.sha1 is not None:
-        verified = digests["sha1"] == item.sha1
+        matches = (digests[checksum[0]] == checksum[1]
+                   and item.sha1 in (None, current))
     else:
-        # Downloaded earlier, but its SHA-1 was not staged before it stopped.
-        verified = store.is_linked(digests["sha1"], destination)
-    if not verified or (item.sha1 is not None and digests["sha1"] != item.sha1):
-        return None
-    return replace(item, sha1=digests["sha1"])
+        # A row without any digest, such as one changed upstream, cannot
+        # vouch for an earlier download; it is fetched again to compare.
+        matches = item.sha1 == current
+    if matches:
+        return "skip", replace(item, sha1=current)
+    if store is not None and _kept_in_store(store, current, destination):
+        return "outdated", current
+    return "conflict", None
+
+
+def _kept_in_store(store, sha1, destination) -> bool:
+    """Return whether a file whose bytes hash to ``sha1`` is an unchanged object."""
+    if store.is_linked(sha1, destination):
+        # The bytes were just hashed, so this only renews a touched record.
+        return store.verify(sha1)
+    return store.contains(sha1) and not store.changed(sha1)
+
+
+def _in_store(store, item) -> bool:
+    """Return whether the item's content can be placed from the store."""
+    return store is not None and item.sha1 is not None and store.verify(item.sha1)
+
+
+def _listed_under_own_name(destination, listings) -> bool:
+    """
+    Return whether the destination's folder lists it under exactly its name.
+
+    Where letter case is ignored, ``M87.fits`` and ``m87.fits`` are one file,
+    and replacing it for one row would take it from the other.
+    """
+    folder = destination.parent
+    if folder not in listings:
+        listings[folder] = set(os.listdir(folder))
+    return destination.name in listings[folder]
 
 
 def _check_existing_files(items, output_root, store=None):
@@ -790,7 +822,8 @@ def _check_existing_files(items, output_root, store=None):
 
     Returns:
         tuple[list, list, list]: Items to transfer, items whose content is
-        already stored, and items already at their destination.
+        already stored, and items already at their destination. Items that
+        replace an outdated file carry its SHA-1 in ``replaces``.
 
     Raises:
         DownloadError: If any destination holds something else, so that
@@ -800,7 +833,9 @@ def _check_existing_files(items, output_root, store=None):
     stored = []
     skipped = []
     conflicts = []
+    listings = {}
     for item in items:
+        item = replace(item, replaces=None)
         try:
             destination = resolve_path_in_root(
                 output_root, item.relative_path, label="download destination")
@@ -814,22 +849,27 @@ def _check_existing_files(items, output_root, store=None):
             if blocked_parent:
                 conflicts.append(item.relative_path.as_posix())
             elif not os.path.lexists(destination):
-                if (store is not None and item.sha1 is not None
-                        and store.verify(item.sha1)):
-                    stored.append(item)
-                else:
-                    pending.append(item)
+                (stored if _in_store(store, item) else pending).append(item)
             else:
                 edited = (store is not None and item.sha1 is not None
                           and store.is_linked(item.sha1, destination)
                           and store.changed(item.sha1))
-                status = _existing_file_status(item, destination, store)
-                if status is None:
+                status, value = _existing_file_status(item, destination, store)
+                if status == "skip":
+                    skipped.append(value)
+                elif (status == "outdated"
+                      and _listed_under_own_name(destination, listings)):
+                    outdated = replace(item, replaces=value)
+                    (stored if _in_store(store, item) else pending).append(outdated)
+                elif status == "outdated":
+                    conflicts.append(
+                        item.relative_path.as_posix()
+                        + " (another path differing only in letter case is "
+                        "this file here)")
+                else:
                     conflicts.append(item.relative_path.as_posix() + (
                         " (edited in place; delete it to download a fresh copy)"
                         if edited else ""))
-                else:
-                    skipped.append(status)
         except (OSError, ValueError) as exc:
             raise DownloadError(str(exc)) from exc
     if conflicts:
@@ -1055,7 +1095,7 @@ def execute_download_plan(
     if skipped:
         results["skipped"] = [item.relative_path.as_posix() for item in skipped]
 
-    results.update(sha1={}, copied=[])
+    results.update(sha1={}, copied=[], replaced=[], unchanged=[])
     try:
         # A file planned from the store is never transferred without approval.
         planned_from_store = {item.relative_path for item in plan.stored_items}
@@ -1067,6 +1107,19 @@ def execute_download_plan(
                     "missing; run hm download again")
         items = [item for item in items
                  if item.relative_path not in planned_from_store]
+        # Nor is a file replaced unless the approved plan said so.
+        approved_replacements = {(item.relative_path, item.replaces)
+                                 for item in plan.outdated_items}
+        unapproved = [item for item in items + stored if item.replaces
+                      and (item.relative_path, item.replaces)
+                      not in approved_replacements]
+        for item in unapproved:
+            results["failed"] += 1
+            results["errors"].append(
+                f"{item.relative_path.as_posix()} changed since the plan was "
+                "approved; it was kept. Run hm download again")
+        items = [item for item in items if item not in unapproved]
+        stored = [item for item in stored if item not in unapproved]
         for item in stored:
             _record_placed(results, _place_from_store(
                 plan.output_path, store, [item], item.sha1))
@@ -1080,8 +1133,9 @@ def execute_download_plan(
         # Steps 3 and 4: record what is now in place, even after an interrupt.
         found = {**_recovered_sha1(plan.skipped_items + tuple(skipped)),
                  **results.pop("sha1")}
-        if not results["copied"]:
-            results.pop("copied")
+        for key in ("copied", "replaced", "unchanged"):
+            if not results[key]:
+                results.pop(key)
         _stage_download_sha1(repo, plan, found, results)
     return results
 
@@ -1346,7 +1400,12 @@ def _download_into_store(context, store, item, chunk_size):
 
 
 def _place_from_store(output_root, store, items, sha1):
-    """Link or copy a stored object to each item's destination."""
+    """
+    Link or copy a stored object to each item's destination.
+
+    An outdated destination is replaced only while it still holds the bytes
+    the plan found there; the same bytes are left in place and only staged.
+    """
     placed = []
     for item in items:
         name = item.relative_path.as_posix()
@@ -1354,6 +1413,17 @@ def _place_from_store(output_root, store, items, sha1):
             destination = resolve_path_in_root(
                 output_root, item.relative_path, label="download destination")
             destination.parent.mkdir(parents=True, exist_ok=True)
+            if item.replaces is not None and os.path.lexists(destination):
+                if not _still_outdated(store, item.replaces, destination):
+                    placed.append((item, sha1, None,
+                                   f"{name} changed during the download; "
+                                   "it was kept"))
+                elif sha1 == item.replaces:
+                    placed.append((item, sha1, "unchanged", None))
+                else:
+                    placed.append((item, sha1, store.materialize(
+                        sha1, destination, replace=True), None))
+                continue
             placed.append((item, sha1, store.materialize(sha1, destination), None))
         except FileExistsError:
             placed.append((item, sha1, None,
@@ -1395,13 +1465,28 @@ def _download_selected_into_store(remote_spec, worktree_path, items, store, resu
                    total_bytes=total_bytes)
 
 
+def _still_outdated(store, sha1, destination) -> bool:
+    """Return whether a destination still holds the outdated object ``sha1``."""
+    if store.is_linked(sha1, destination):
+        return not store.changed(sha1)
+    if destination.is_symlink() or not destination.is_file():
+        return False
+    return (calculate_file_checksums(destination, {"sha1"})["sha1"] == sha1
+            and store.verify(sha1))
+
+
 def _record_placed(results, placed):
     for item, sha1, how, error in placed:
         if error is not None:
             results["failed"] += 1
             results["errors"].append(error)
             continue
+        path = item.relative_path.as_posix()
         results["succeeded"] += 1
-        results["sha1"][item.relative_path.as_posix()] = sha1
+        results["sha1"][path] = sha1
         if how == "copied":
-            results["copied"].append(item.relative_path.as_posix())
+            results["copied"].append(path)
+        if how == "unchanged":
+            results["unchanged"].append(path)
+        elif item.replaces is not None:
+            results["replaced"].append(path)

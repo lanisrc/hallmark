@@ -80,13 +80,15 @@ this order:
 
 1.  download into ``Objects``, into a temporary file that gets its final
     name only once complete and verified;
-2.  hard-link the stored object into the ``Worktree``;
+2.  hard-link the stored object into the ``Worktree``, atomically replacing
+    an outdated earlier download whose bytes stay in ``Objects``;
 3.  record its SHA-1 in the ``State``, read again under a lock; and
 4.  save the ``State`` to ``Dothm``, staged for the user to commit.
 
 A crash between any two steps leaves the repository consistent: at worst a
 temporary file, a stored object not yet linked, or a linked file whose SHA-1
-the next download records without transferring it again.
+is not recorded. The next download records it, without a transfer when the
+catalogue has a checksum for the file and after fetching it to compare when not.
 
 The catalogue itself is ``config.yml``, ``meta.yml`` and ``data.tsv``, with
 one line per file. See ``doc/data_backend.md`` for every command's effect on

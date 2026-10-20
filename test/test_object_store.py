@@ -107,6 +107,51 @@ def test_materialize_copies_where_links_are_unavailable(tmp_path, monkeypatch,
     assert sorted(path.name for path in destination.parent.iterdir()) == ["a.fits"]
 
 
+def test_materialize_replaces_a_destination_atomically_when_asked(tmp_path):
+    store = Objects(tmp_path)
+    old = published(store, b"old")
+    new = published(store, b"new")
+    destination = tmp_path / "work" / "a.fits"
+    destination.parent.mkdir()
+    store.materialize(sha1_of(b"old"), destination)
+    assert store.materialize(sha1_of(b"new"), destination, replace=True) == "linked"
+    assert destination.stat().st_ino == new.stat().st_ino
+    assert old.read_bytes() == b"old" and old.stat().st_nlink == 1
+    # Linking the same object again leaves no second name behind.
+    store.materialize(sha1_of(b"new"), destination, replace=True)
+    assert sorted(path.name for path in destination.parent.iterdir()) == ["a.fits"]
+
+
+def test_a_failed_replacement_keeps_the_destination(tmp_path, monkeypatch):
+    store = Objects(tmp_path)
+    published(store, b"old")
+    published(store, b"new")
+    destination = tmp_path / "work" / "a.fits"
+    destination.parent.mkdir()
+    store.materialize(sha1_of(b"old"), destination)
+
+    def fail(source, target):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(objects_module.os, "replace", fail)
+    with pytest.raises(OSError):
+        store.materialize(sha1_of(b"new"), destination, replace=True)
+    assert destination.read_bytes() == b"old"
+    assert sorted(path.name for path in destination.parent.iterdir()) == ["a.fits"]
+
+
+def test_replacing_copies_where_links_are_unavailable(tmp_path, monkeypatch):
+    store = Objects(tmp_path)
+    published(store, b"old")
+    published(store, b"new")
+    destination = tmp_path / "work" / "a.fits"
+    destination.parent.mkdir()
+    store.materialize(sha1_of(b"old"), destination)
+    monkeypatch.setattr(objects_module, "LINK_INTO_WORKTREE", False)
+    assert store.materialize(sha1_of(b"new"), destination, replace=True) == "copied"
+    assert destination.read_bytes() == b"new" and writable(destination)
+
+
 def test_windows_copies_instead_of_linking(tmp_path, monkeypatch):
     monkeypatch.setattr(objects_module, "LINK_INTO_WORKTREE", False)
     store = Objects(tmp_path)

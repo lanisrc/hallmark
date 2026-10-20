@@ -29,6 +29,9 @@ class DownloadItem:
             differs from ``relative_path``, as for a source with a prefix.
         sha1 (str, optional): SHA-1 of the file's content when the catalogue
             already knows it, for example from an earlier download.
+        replaces (str, optional): SHA-1 of an outdated file at the
+            destination that this item replaces. Its bytes stay in the
+            object store.
     """
 
     relative_path: Path
@@ -38,6 +41,7 @@ class DownloadItem:
     remote: Optional[str] = None
     remote_path: Optional[Path] = None
     sha1: Optional[str] = None
+    replaces: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Normalize the path and validate optional file metadata."""
@@ -46,10 +50,13 @@ class DownloadItem:
             object.__setattr__(self, "remote_path", Path(self.remote_path))
         if self.remote is not None and not isinstance(self.remote, str):
             raise ValueError("remote must be a remote name or None")
-        if self.sha1 is not None:
-            if not is_valid_checksum("sha1", self.sha1):
-                raise ValueError("sha1 must be 40 hexadecimal characters or None")
-            object.__setattr__(self, "sha1", self.sha1.lower())
+        for name in ("sha1", "replaces"):
+            value = getattr(self, name)
+            if value is not None:
+                if not is_valid_checksum("sha1", value):
+                    raise ValueError(
+                        f"{name} must be 40 hexadecimal characters or None")
+                object.__setattr__(self, name, value.lower())
         if isinstance(self.checksum, list):
             object.__setattr__(self, "checksum", tuple(self.checksum))
         if self.checksum is not None and not (
@@ -97,6 +104,9 @@ class DownloadPlan:
             ``remote_*`` fields describe the remote when there is only one.
         stored_items (tuple[DownloadItem]): Files whose content is already in
             the object store; they are placed without a transfer.
+
+    Items whose ``replaces`` is set, listed by ``outdated_items``, replace an
+    earlier download that no longer matches its catalogue row.
     """
 
     items: tuple[DownloadItem, ...]
@@ -162,6 +172,12 @@ class DownloadPlan:
         return bool(self.file_count)
 
     @property
+    def outdated_items(self) -> tuple[DownloadItem, ...]:
+        """Items that replace an outdated file at their destination."""
+        return tuple(item for item in self.items + self.stored_items
+                     if item.replaces is not None)
+
+    @property
     def known_bytes(self) -> int:
         """Bytes to transfer, excluding files whose sizes are unknown."""
         return sum(item.size_bytes or 0 for item in self.items)
@@ -213,6 +229,15 @@ class DownloadPlan:
         if self.stored_items:
             skipped += (f"\nAlready in .hm/objects: {len(self.stored_items)} file(s) "
                         "(no transfer)")
+        outdated = self.outdated_items
+        if outdated:
+            skipped += (f"\nOutdated: {len(outdated)} file(s) will be replaced "
+                        "(old versions stay in .hm/objects)")
+            unverified = sum(item.checksum is None and item.sha1 is None
+                             for item in outdated)
+            if unverified:
+                skipped += (f"; {unverified} without a catalogued checksum are "
+                            "fetched to compare and kept if unchanged")
         for item in self.skipped_items:
             skipped += f"\nAlready downloaded: {item.relative_path.as_posix()}"
         return (f"{self.file_count} file(s); {size}; estimated duration: {duration}"

@@ -177,8 +177,13 @@ reference unchanged.
 ``Repo.download`` returns a dictionary containing ``succeeded``,
 ``failed``, ``total_bytes``, and ``errors``. Check ``failed`` and ``errors``
 for individual transfer failures. ``plan.skipped_items`` lists existing files
-whose checksums match. Execution checks destinations again before connecting.
-Its result also includes ``skipped`` paths when more files match at execution.
+whose checksums match. ``plan.outdated_items`` lists earlier downloads that no
+longer match their catalog row; each item's ``replaces`` is the SHA-1 of the
+file it replaces, whose bytes stay in ``.hm/objects``. Execution checks
+destinations again before connecting and replaces only files the approved plan
+listed. Its result also includes ``skipped`` paths when more files match at
+execution, ``replaced`` paths, and ``unchanged`` paths that were fetched to
+compare and already held the same content.
 Unknown catalog paths and existing-file conflicts raise ``DownloadError``
 before transfer. Configuration errors and failed SSH
 connection checks raise ``DownloadError`` before downloads begin.
