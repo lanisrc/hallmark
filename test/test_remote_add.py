@@ -503,6 +503,28 @@ def _owners(repo):
     return repo.state.data.set_index("path")["source"].to_dict()
 
 
+def test_content_comparison_uses_what_both_rows_record(tmp_path):
+    from hallmark.remote.add import (
+        PathClash, _clash_listing, _compare_content, _exists_in)
+
+    sha256 = {"checksum_algorithm": "sha256", "checksum": "a" * 64}
+    # A digest saved without its algorithm is named by its length.
+    assert _compare_content({"checksum": "a" * 64}, sha256, False) == "same"
+    assert _compare_content({"checksum": "b" * 64}, sha256, False) == "different"
+    four = {"size_bytes": "4"}
+    assert _compare_content({"size_bytes": 4}, four, False) == "unknown"
+    assert _compare_content({"size_bytes": 5}, four, False) == "different"
+    clashes = [PathClash(f"{index:02d}.fits", "origin", "unknown")
+               for index in range(12)]
+    listing = _clash_listing(set(), clashes)
+    assert listing.startswith("12 path(s) already belong to another source "
+                              "(12 that cannot be compared):")
+    assert listing.endswith("  09.fits (cannot compare; source 'origin')\n"
+                            "  ... and 2 more")
+    assert not _exists_in(None, "a.fits")
+    assert not _exists_in(tmp_path, "../outside.fits")
+
+
 def test_skipping_duplicates_keeps_the_catalogued_rows(tmp_path, two_servers):
     repo = Repo.init(tmp_path / "data")
     repo.add(ONE, filter="*.fits")

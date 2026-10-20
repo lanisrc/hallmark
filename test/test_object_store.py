@@ -122,6 +122,22 @@ def test_materialize_replaces_a_destination_atomically_when_asked(tmp_path):
     assert sorted(path.name for path in destination.parent.iterdir()) == ["a.fits"]
 
 
+def test_replacing_picks_an_unused_temporary_name(tmp_path, monkeypatch):
+    store = Objects(tmp_path)
+    published(store, b"old")
+    published(store, b"new")
+    destination = tmp_path / "work" / "a.fits"
+    destination.parent.mkdir()
+    store.materialize(sha1_of(b"old"), destination)
+    (destination.parent / ".a.fits.taken").write_bytes(b"someone else's")
+    names = iter(["taken", "free"])
+    monkeypatch.setattr(objects_module.secrets, "token_hex", lambda size: next(names))
+    store.materialize(sha1_of(b"new"), destination, replace=True)
+    assert destination.read_bytes() == b"new"
+    assert sorted(path.name for path in destination.parent.iterdir()) == [
+        ".a.fits.taken", "a.fits"]
+
+
 def test_a_failed_replacement_keeps_the_destination(tmp_path, monkeypatch):
     store = Objects(tmp_path)
     published(store, b"old")
