@@ -394,7 +394,8 @@ def test_add_has_no_force_or_all_option(local_repo, option):
 
     output = _invoke("add", option, "notes.txt", exit_code=2)
 
-    assert f"No such option: {option}" in output
+    # Click 8.2+ quotes the name: "No such option '--force'."
+    assert "No such option" in output and option in output
     _assert_catalog(repo, ["a0_i0.h5", "a0_i30.h5", "a0_i60.h5"])
     _assert_status(repo, untracked=["notes.txt"])
 
