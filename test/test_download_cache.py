@@ -335,6 +335,27 @@ def test_a_catalogue_changed_after_planning_is_not_staged(repo, server):
     assert "sha1" not in Repo(repo.worktree).state.data.columns
 
 
+def test_a_row_changed_during_a_download_is_not_staged(repo, server, monkeypatch):
+    files, fetched = server
+
+    def fetch(self, relative_path, destination, *, chunk_size=8192):
+        if relative_path == "c.fits":
+            # The server changes a.fits, already fetched, and it is added again.
+            files["a.fits"] = b"alpha, revised"
+            Repo(repo.worktree).add(ROOT)
+        Path(destination).write_bytes(files[relative_path])
+
+    monkeypatch.setattr(HttpBackend, "fetch", fetch)
+    # One worker fetches in order, so a.fits is complete before it changes.
+    plan = repo.plan_download(all_files=True)
+    result = repo.download(plan, approved=True, max_workers=1)
+    assert result["succeeded"] == 3 and result["staged"] == 2
+    data = Repo(repo.worktree).state.data
+    assert dict(zip(data.path, data.sha1)) == {
+        "a.fits": "", "b.fits": sha1(b"bravo"), "c.fits": sha1(b"alpha")}
+    assert data.set_index("path").at["a.fits", "size_bytes"] == "14"
+
+
 def test_cli_reports_staging_and_recovers_on_a_quiet_rerun(repo, server,
                                                            monkeypatch):
     from click.testing import CliRunner

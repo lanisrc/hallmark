@@ -583,10 +583,7 @@ def _select_download_items(
         # conflicting checksums exist.
         _merge_selected_file(selected, relative_path, expected_checksum)
         if row is not None:
-            size = _parse_file_size(row.get("size_bytes"))
-            modified = row.get("mtime")
-            modified = (None if modified is None or pd.isna(modified)
-                        or str(modified).strip() == "" else str(modified))
+            size, modified = _row_metadata(row)
             previous_size, previous_modified = metadata.get(
                 relative_path.as_posix(), (None, None))
             if size is not None and previous_size not in (None, size):
@@ -735,6 +732,14 @@ def _parse_file_size(value) -> Optional[int]:
     if not size.is_finite() or size < 0 or size != size.to_integral_value():
         return None
     return int(size)
+
+
+def _row_metadata(row) -> tuple:
+    """Return a catalogue row's size and modification time, None where unknown."""
+    modified = row.get("mtime")
+    modified = (None if modified is None or pd.isna(modified)
+                or str(modified).strip() == "" else str(modified))
+    return _parse_file_size(row.get("size_bytes")), modified
 
 
 def _existing_file_status(item, destination, store):
@@ -1159,8 +1164,12 @@ def _stage_into_current_state(repo, plan, sha1_by_path, results) -> None:
             continue
         row = data.loc[index].to_dict()
         catalogued = _parse_checksum(row.get("checksum"), row.get("checksum_algorithm"))
+        item = planned[path]
+        size, modified = _row_metadata(row)
         # The catalogue changed since planning; this SHA-1 may describe old bytes.
-        if _checksum_pair(catalogued) != _checksum_pair(planned[path].checksum):
+        if (_checksum_pair(catalogued) != _checksum_pair(item.checksum)
+                or (item.size_bytes is not None and size != item.size_bytes)
+                or (item.mtime is not None and modified != item.mtime)):
             continue
         data.at[index, "sha1"] = sha1
         updates += 1
