@@ -426,6 +426,69 @@ def _listing(*names, sizes=None):
     return "<h1>Index of data</h1>" + links
 
 
+def _sums(algorithm, files):
+    import hashlib
+
+    return "".join(f"{hashlib.new(algorithm, data).hexdigest()}  {name}\n"
+                   for name, data in files.items())
+
+
+@pytest.fixture
+def two_servers(monkeypatch):
+    """Serve one.test and two.test, which publish different checksums."""
+    names = ("a.fits", "b.fits", "c.fits", "d.fits", "e.fits")
+    pages = {
+        "one.test": {
+            "": _listing(*names, "SHA256SUMS", "MD5SUMS", sizes={"c.fits": 3}),
+            "SHA256SUMS": _sums("sha256", {"a.fits": b"same", "b.fits": b"one"}),
+            "MD5SUMS": _sums("md5", {"d.fits": b"md5 only"})},
+        "two.test": {
+            "": _listing(*names, "SHA256SUMS", "SHA1SUMS", sizes={"c.fits": 4}),
+            "SHA256SUMS": _sums("sha256", {"a.fits": b"same", "b.fits": b"two",
+                                           "d.fits": b"md5 only"}),
+            "SHA1SUMS": _sums("sha1", {"e.fits": b"known"})},
+    }
+
+    def read_text(context, path, **_):
+        page = pages[context.remote.host].get(path)
+        if page is None:
+            raise RemoteObjectMissing("No metadata")
+        return page
+
+    monkeypatch.setattr(OperationContext, "read_text", read_text)
+    return pages
+
+
+def test_paths_another_source_catalogs_are_classified_by_content(tmp_path,
+                                                                 two_servers):
+    import hashlib
+
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://one.test/data/", filter="*.fits")
+    # A download recorded the SHA-1 of e.fits.
+    data = repo.state.data
+    data.loc[data.path == "e.fits", "sha1"] = hashlib.sha1(b"known").hexdigest()
+    repo.dothm.save_state(repo.state)
+    before = (repo.dothm.path / "data.tsv").read_bytes()
+    with pytest.raises(ValueError) as error:
+        repo.add("https://two.test/data/", filter="*.fits")
+    message = str(error.value)
+    assert ("5 path(s) already belong to another source (2 with the same content, "
+            "2 with different content, 1 that cannot be compared):") in message
+    for line in ("a.fits (same content; source 'origin')",
+                 "b.fits (different content; source 'origin')",
+                 "c.fits (different content; source 'origin')",
+                 "d.fits (cannot compare; source 'origin')",
+                 "e.fits (same content; source 'origin')"):
+        assert f"  {line}\n" in message
+    assert message.endswith("Add this source with --prefix DIR, or narrow it with "
+                            "--filter; previous catalogue kept.")
+    # Overlapping patterns in one folder name the same server file.
+    with pytest.raises(ValueError, match=r"a\.fits \(same content; source 'origin'\)"):
+        repo.add("https://one.test/data/", filter="a.*")
+    assert (repo.dothm.path / "data.tsv").read_bytes() == before
+
+
 def test_nested_folder_reuses_its_remote_as_a_new_source(tmp_path, remote_listing):
     repo = Repo.init(tmp_path / "data")
     repo.add(ROOT, filter="*001.fits")

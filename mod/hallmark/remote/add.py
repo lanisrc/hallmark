@@ -1,5 +1,6 @@
 import os
 from copy import deepcopy
+from typing import NamedTuple
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import pandas as pd
@@ -15,7 +16,9 @@ from .sources import (
     rows_of,
     validate_source_name,
 )
-from ..utils import as_list_of_dicts, resolve_path_in_root
+from ..utils import (
+    as_list_of_dicts, infer_checksum_algorithm, is_valid_checksum,
+    resolve_path_in_root)
 from ..repo.config import (
     LOCAL_RESERVED_FIELDS, check_pattern_fields, literal_fields, normalize_remotes,
     remote_name_of,
@@ -149,17 +152,91 @@ def _check_selection_keeps_rows(source, rows, fmt, filter):
             "Use a pattern that still matches them, or a new branch.")
 
 
-def _check_collisions(paths, others, selected, sources):
-    """Refuse paths that already belong to another source, as files or folders."""
-    other_paths = set(others["path"]) if "path" in others.columns else set()
-    folders = {parent for path in other_paths for parent in _parents(path)}
-    clashes = {path for path in paths
-               if path in other_paths or path in folders
-               or any(parent in other_paths for parent in _parents(path))}
-    if not clashes:
-        return
-    owners = (set(others.loc[others["path"].isin(clashes), "source"])
-              if "source" in others.columns else set())
+class PathClash(NamedTuple):
+    """
+    A path a new selection shares with a file another source catalogs.
+
+    Attributes:
+        path (str): Catalogue path.
+        source (str): Source that catalogs it.
+        content (str): ``"same"`` when checksums, or the server path, show
+            the same file; ``"different"`` when a checksum or the size
+            differs; ``"unknown"`` when nothing comparable is recorded.
+    """
+
+    path: str
+    source: str
+    content: str
+
+    def label(self) -> str:
+        """Describe the clash in one line."""
+        content = {"same": "same content", "different": "different content",
+                   "unknown": "cannot compare"}[self.content]
+        return f"{self.path} ({content}; source {self.source!r})"
+
+
+def _digests(row):
+    """Return the digests a catalogue row records, by algorithm."""
+    found = {}
+    checksum = cell_text(row.get("checksum")).lower()
+    algorithm = cell_text(row.get("checksum_algorithm")).lower()
+    if checksum and algorithm in ("", "unknown"):
+        algorithm = infer_checksum_algorithm(checksum) or ""
+    if checksum and algorithm and is_valid_checksum(algorithm, checksum):
+        found[algorithm] = checksum
+    sha1 = cell_text(row.get("sha1")).lower()
+    if sha1 and is_valid_checksum("sha1", sha1):
+        found.setdefault("sha1", sha1)
+    return found
+
+
+def _compare_content(new, old, same_file):
+    """Return ``"same"``, ``"different"`` or ``"unknown"`` for two rows."""
+    if same_file:
+        return "same"
+    new_digests, old_digests = _digests(new), _digests(old)
+    shared = set(new_digests) & set(old_digests)
+    if any(new_digests[name] != old_digests[name] for name in shared):
+        return "different"
+    sizes = cell_text(new.get("size_bytes")), cell_text(old.get("size_bytes"))
+    if all(sizes) and sizes[0] != sizes[1]:
+        return "different"
+    return "same" if shared else "unknown"
+
+
+def _find_clashes(frame, others, selected, sources):
+    """
+    Return the new rows' paths that another source already catalogs.
+
+    Returns:
+        tuple[set, list[PathClash]]: Paths that would be a file where another
+        source has a folder, or the reverse, and paths both catalog as files.
+    """
+    if others.empty or "path" not in others.columns:
+        return set(), []
+    owned = others.drop_duplicates("path").set_index("path")
+    folders = {parent for path in owned.index for parent in _parents(path)}
+    by_name = {source.name: source for source in sources}
+    structural, duplicates = set(), []
+    for record in frame.to_dict(orient="records"):
+        path = record["path"]
+        if path in owned.index:
+            old = owned.loc[path]
+            owner = by_name.get(cell_text(old.get("source")))
+            # Overlapping patterns in one folder name the very same server file.
+            same_file = (owner is not None and owner.remote == selected.remote
+                         and owner.remote_path(path) == selected.remote_path(path))
+            duplicates.append(PathClash(path, cell_text(old.get("source")),
+                                        _compare_content(record, old, same_file)))
+        elif path in folders or any(parent in owned.index
+                                    for parent in _parents(path)):
+            structural.add(path)
+    return structural, sorted(duplicates)
+
+
+def _clash_message(structural, duplicates, selected, sources):
+    """Explain which paths clash and how to add the source anyway."""
+    owners = {clash.source for clash in duplicates}
     place = (selected.remote, selected.root, selected.prefix)
     same = [source.name for source in sources if source.name in owners
             and (source.remote, source.root, source.prefix) == place]
@@ -170,9 +247,24 @@ def _check_collisions(paths, others, selected, sources):
         hint = "Choose a different --prefix, or narrow it with --filter"
     else:
         hint = "Add this source with --prefix DIR, or narrow it with --filter"
-    raise ValueError(
-        f"{len(clashes)} path(s) already belong to another source:\n"
-        f"{_listed(clashes)}\n{hint}.")
+    counts = {}
+    for clash in duplicates:
+        counts[clash.content] = counts.get(clash.content, 0) + 1
+    kinds = ", ".join(
+        f"{counts[content]} {label}" for content, label in (
+            ("same", "with the same content"),
+            ("different", "with different content"),
+            ("unknown", "that cannot be compared")) if content in counts)
+    lines = [clash.label() for clash in duplicates] + [
+        f"{path} (a file where another source has a folder, or the reverse)"
+        for path in sorted(structural)]
+    shown = "\n".join(f"  {line}" for line in lines[:10])
+    if len(lines) > 10:
+        shown += f"\n  ... and {len(lines) - 10} more"
+    total = len(lines)
+    return (f"{total} path(s) already belong to another source"
+            + (f" ({kinds})" if kinds else "") + f":\n{shown}\n{hint}; "
+            "previous catalogue kept.")
 
 
 def _parents(path):
@@ -363,7 +455,9 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
         rows.append(row)
     frame = pd.DataFrame(rows)
     others = data[~mine]
-    _check_collisions(set(frame["path"]), others, selected, sources)
+    structural, duplicates = _find_clashes(frame, others, selected, sources)
+    if structural or duplicates:
+        raise ValueError(_clash_message(structural, duplicates, selected, sources))
     stored = _keep_sha1(frame, previous.fillna(""))
     # An empty catalogue still has the local manifest's default columns.
     combined = (pd.concat([others, stored], ignore_index=True, sort=False)
