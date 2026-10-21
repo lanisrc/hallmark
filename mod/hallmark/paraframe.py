@@ -23,7 +23,7 @@ conventions.
 
 import re
 import parse
-from glob import glob
+from glob import escape as glob_escape, glob
 from pathlib import Path
 
 import pandas as pd
@@ -273,8 +273,9 @@ class ParaFrame(pd.DataFrame):
         yaml_encodings, fmt_enc = cls._find_encoding_settings(
             fmt, encodings, encoding=encoding)
 
-        # pattern = base + fmt
-        pattern = str(base_path / fmt.lstrip("/"))
+        # Only the format is filled in; the base path is literal, even when
+        # its folder names contain braces or glob characters.
+        pattern = fmt.lstrip("/")
         fmt_g = fmt_enc.lstrip("/")
 
         # plus one to ensure at least one iteration of the loop
@@ -299,6 +300,7 @@ class ParaFrame(pd.DataFrame):
                 # set the missing keyword argument to a wildcard for globbing
                 kwargs[key] = "*"
 
+        pattern = str(Path(glob_escape(str(base_path))) / pattern)
         # glob the files using the constructed pattern and filter out directories
         globbed_files = sorted(match for match in glob(pattern)
                                if Path(match).is_file())
