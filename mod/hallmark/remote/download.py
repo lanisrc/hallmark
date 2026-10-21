@@ -1390,14 +1390,6 @@ def _output_root(worktree_path) -> Path:
     return output_root
 
 
-def _destination(output_root, relative_path) -> Path:
-    try:
-        return resolve_path_in_root(output_root, relative_path,
-                                    label="download destination")
-    except ValueError as exc:
-        raise DownloadError(str(exc)) from exc
-
-
 def _download_into_store(context, store, item, chunk_size):
     """
     Fetch one file into the object store and place it at its destination.
