@@ -80,7 +80,7 @@ jobs:
         retention-days: 7
 
   coverage:
-    needs: test
+    needs: [test, s3-backend]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:
@@ -179,9 +179,23 @@ jobs:
       with:
         python-version: "3.12"
     - name: Install Hallmark with S3 support and moto
-      run: python -m pip install -e ".[s3]" pytest "moto[s3]>=5"
+      run: python -m pip install -e ".[s3]" pytest pytest-cov "moto[s3]>=5"
     - name: Test the S3 backend against moto
-      run: python -m pytest -q test/test_s3.py "test/test_demo_notebooks.py::test_demo_notebook_workflow[demo_private_data.ipynb]"
+      env:
+        COVERAGE_FILE: .coverage.s3
+      run: >-
+        python -m pytest -q --cov --cov-report= test/test_s3.py
+        test/test_s3_edge_cases.py
+        "test/test_demo_notebooks.py::test_demo_notebook_workflow[demo_private_data.ipynb]"
+    - name: Upload coverage data
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: coverage-s3
+        path: .coverage.s3
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 7
 
   ssh-oldest-openssh:
     runs-on: ubuntu-latest
