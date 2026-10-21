@@ -21,7 +21,7 @@ does not require Hallmark, Git, Python or a login shell.
 ---------------------------------
 
 Install the checkout with ``python -m pip install -e .``. The client requires
-system OpenSSH ``ssh`` and ``sftp`` version 9.6 or newer, with connection
+system OpenSSH ``ssh`` and ``sftp`` version 8.0 or newer, with connection
 multiplexing available. Linux and macOS have integration-test jobs; Windows
 SSH transport is unsupported.
 
@@ -64,12 +64,14 @@ Suppose the export contains ``runs/run_001.h5``, ``runs/run_002.h5`` and
        --fmt 'runs/run_{run:03d}.h5'
    hm commit -m "Record remote catalog"
 
-This creates ``./lab/.hm`` and catalogs the matching run files in ``data.tsv``.
-``README.md`` matches no format, so it is listed as a ``file:`` entry in
-``config.yml``, with its published checksum if there is one. The URL is the
-exact discovery root. A filename format selects paths and extracts
-parameters; it does not approve a download. A glob filter can select paths
-without defining parameters:
+This creates ``./lab/.hm`` and catalogs the run files in ``data.tsv``, with
+their sizes, modification times and any checksums. The ``checksum_source`` column
+says where each checksum came from: ``published`` for a checksum file such as
+``SHA256SUMS`` beside the data. ``README.md`` matches no format, so it is listed
+as a ``file:`` entry in ``config.yml``, with its published checksum if there is
+one. The URL is the exact discovery root. A filename format extracts parameters
+and sorts the files; it does not approve a download. A glob filter selects which
+paths to catalog:
 
 .. code-block:: bash
 
@@ -79,11 +81,16 @@ without defining parameters:
        --filter '**/*.h5'
    hm commit -m "Record remote catalog"
 
-Without ``--filter`` or ``--fmt``, discovery recursively covers every directory
-beneath the URL and catalogs all discovered files. A filter still traverses
+Without ``--filter``, discovery recursively covers every directory beneath the
+URL and catalogs every file it finds. A filter still traverses
 directories needed to find matching files. Discovery shows an indeterminate
 progress bar with counts of completed directories and discovered files.
 The percentage and completion time remain unknown until a total is available.
+
+A scan stages its catalog only after it completes. If the connection or access
+fails, or no file matches the URL and filter, ``add`` explains
+the problem, exits with an error and keeps the previously staged catalog
+unchanged; it never stages a partial result.
 
 Several filename formats can be cataloged at once by repeating ``--fmt``, each
 as ``FMT`` or ``FMT=DB``. Every format's files go to their own TSV, named by
@@ -98,8 +105,11 @@ A format added to an existing catalog is kept next to the earlier ones. When the
 catalog had a single format in ``data.tsv``, that TSV is renamed after its format.
 If files are already sorted into TSVs, ``hm add`` asks whether to sort them
 again with the new format (``resort``), moving each file to the format that fits
-it best, or to sort only files that no format matched yet (``unsorted``).
-Python callers pass ``resort=True`` or ``resort=False`` to ``Repo.add``.
+it best, or to sort only files that no format matched yet (``unsorted``). When
+other sources have sorted files too, it also offers ``all``, which sorts every
+source's files again by their recorded paths, without listing their servers.
+Python callers pass ``resort=True``, ``resort="all"`` or ``resort=False`` to
+``Repo.add``.
 
 ``hm detect REMOTE`` suggests formats for a configured remote, named like
 ``origin`` or given as a URL inside it. A URL can point at a subfolder; only
@@ -113,25 +123,153 @@ catalogs with every detected format right away:
    hm detect 'ssh://lab-data/srv/exports/lab/logs/' --add
 
 Both URL schemes use structured SFTP directory enumeration and file transfers.
-SFTP-only accounts work for discovery as well as downloading. No
-``--allow-remote-commands`` or ``--remote-hash`` option is needed. Discovery
+SFTP-only accounts work for discovery as well as downloading. Discovery
 reads listings and published checksum manifests without reading dataset files
-to compute checksums. Missing checksums remain unknown. For reproducible
-catalogs, publish an immutable export with a SHA-256 manifest, for example
-``<digest>  runs/run_001.h5`` records in ``SHA256SUMS``.
+to compute checksums. Missing checksums remain unknown until a download records
+the file's SHA-1. For reproducible catalogs, publish an immutable export with a
+SHA-256 manifest, for example ``<digest>  runs/run_001.h5`` records in
+``SHA256SUMS``.
+
+Where no manifest exists and the account has a login shell, the server can
+compute checksums instead:
+
+.. code-block:: bash
+
+   hm add 'ssh://lab-data/srv/exports/lab/' --server-checksum sha256
+
+The server runs ``xargs -0 sha256sum`` (or ``md5sum``, ``sha1sum``,
+``sha512sum``) on every file without an equal or stronger published checksum;
+file names reach it only as input, never as part of a command. Hashing reads
+each such file on the server, so prefer a data-transfer node to a shared login
+node for large exports. The choice is saved with the source and repeated by
+later ``add`` runs. SFTP-only accounts report that they cannot hash, and names
+containing a backslash or newline cannot be hashed this way.
 
 The generated data remote is named ``origin`` and points to the source URL.
+Each ``add`` records a *source*: the remote, the folder beneath it, and the
+filters that selected its files. Its rows carry the source name in the
+``catalog_source`` column, leaving ``source`` free for a format field such as
+an observed object. Filename formats belong to the whole catalog: they sort the
+files of every source.
 The destination may already contain files, provided it has no ``.hm``;
 initialization preserves those files. An existing ``.hm`` is rejected before
 network access. ``hm init PATH`` always creates an empty local repository.
 Use ``add URL`` inside it to discover remote data.
 
-Select a built-in backend with ``--backend http``, ``ssh``, or ``cyverse``, or
-name an installed plugin. Without an explicit choice, Hallmark selects a
+Several sources in one catalog
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A catalog can combine selections from several folders and servers:
+
+.. code-block:: bash
+
+   hm add 'ssh://lab-data/srv/exports/lab/runs/run_{run:03d}.h5'
+   hm add 'ssh://lab-data/srv/exports/lab/' --filter 'notes/*.txt'
+   hm add 'https://archive.example.org/eht/m87/' --prefix archive
+   hm commit -m "Record three sources"
+
+A URL inside an existing remote's folder reuses that remote, and paths stay
+relative to its URL, so ``runs/run_001.h5`` above downloads to
+``runs/run_001.h5``. A URL on another server adds a remote named after its
+host. Downloaded files mirror each server, so two sources cannot catalog the
+same path. When they would, ``add`` lists the clashing paths and says for each
+whether both sources have the same content (matching checksums, or the same
+file on the server), different content (a checksum or size differs), or nothing
+to compare. At a terminal it then asks whether to skip them, keeping the rows
+already catalogued, which suits copies of one file on two mirrors; to keep
+both, with the new source's files under a folder you name; or to abort.
+Elsewhere it refuses, and ``--skip-duplicates`` or ``--prefix DIR`` adds the
+source anyway. The choice is not saved, so adding that source again meets the
+same paths. A path that would be a file in one source and a folder in another
+is always refused. ``add`` also warns about paths that differ only in letter
+case, such as ``M87.fits`` and ``m87.fits``: on macOS and Windows they are one
+file, so only one of them can be downloaded there. Use ``--remote NAME`` to
+name a new remote or pick an existing one, and ``--source NAME`` to name the
+source.
+
+Repeating an ``add`` with the same URL and filters updates its source: new
+files are added. Files gone from the server leave the catalog only when you say
+so: ``add`` lists them and asks whether to remove them or keep their rows, and
+``--prune`` or ``--keep-missing`` answers in advance (``prune=True`` or
+``prune=False`` in Python). It also lists, as changed upstream, files you
+downloaded whose size, modification time or checksum the server now reports
+differently; the next ``download`` replaces them. A bare URL updates the single
+source of that folder. Different filters in the same folder add another source;
+to change an existing source's filters instead, run ``add`` with ``--source
+NAME``. New filters must still match every catalogued file of that source, so a
+narrower selection belongs on a new branch. ``set-config --fmt`` does not apply
+to remote catalogs; add a format with ``hm add URL --fmt``.
+
+``download`` fetches each file from the remote of the source that cataloged
+it, opening one connection per remote; the plan lists every remote and its file
+count. ``download --source NAME`` selects one source's files, and
+``download --remote NAME`` fetches every selected file from that remote
+instead, at the same path beneath its URL, which suits a mirror.
+
+Catalogs created before sources existed keep working and record their single
+source on the next ``add``.
+
+S3-compatible storage
+~~~~~~~~~~~~~~~~~~~~~
+
+Objects in AWS S3 and compatible stores (Open Storage Network, MinIO, Wasabi,
+Ceph) are catalogued from ``s3://BUCKET/PREFIX/`` URLs after
+``pip install hallmark[s3]``. Stores other than AWS need their endpoint in a
+backend options file:
+
+.. code-block:: bash
+
+   printf 'endpoint_url: https://sdsc.osn.xsede.org\n' > osn.yml
+   hm add 's3://ehtc-sims/m87/' --backend-options osn.yml --auth osn
+
+The options are ``endpoint_url``, ``region``, ``addressing_style`` (``auto``,
+``virtual`` or ``path``), ``anonymous`` (``true`` for public buckets),
+``page_size`` (objects per listing request, at most 1000) and ``etag_md5``.
+Objects uploaded with a SHA-256 or SHA-1 checksum are catalogued with it as a
+``server`` checksum. Set ``etag_md5: auto`` to also treat single-part ETags as
+MD5 checksums; leave it unset for buckets that encrypt objects with KMS or
+customer keys, whose ETags are not checksums.
+
+Credentials come from an ``s3`` auth profile, otherwise from the usual AWS
+sources (environment, ``~/.aws`` configuration, instance roles). Without any,
+requests are unsigned, as public buckets expect. A profile is bound to its
+buckets and endpoints, so a shared catalog cannot send your keys to another
+server:
+
+.. code-block:: yaml
+
+   version: 2
+   profiles:
+     osn:
+       type: s3
+       buckets: [ehtc-sims]
+       endpoints: [https://sdsc.osn.xsede.org]
+       access_key_id: {env: OSN_ACCESS_KEY_ID}
+       secret_access_key: {command: [pass, show, osn/secret]}
+     aws:
+       type: s3
+       buckets: [my-lab-bucket]
+       aws_profile: research    # a profile in ~/.aws/config
+
+Select a built-in backend with ``--backend http``, ``ssh``, ``cyverse`` or
+``webdav``, or name an installed plugin. A ``webdavs://HOST/PATH/`` URL is a
+shorthand for ``https://HOST/PATH/`` with ``--backend webdav``, for servers
+that answer WebDAV requests but show no browsable index. Without an explicit choice, Hallmark selects a
 backend from the URL. ``--backend-options FILE`` reads a YAML mapping of
 nonsecret backend settings. These settings are saved with the data remote;
 credentials belong in local authentication configuration. See :doc:`backends`
 for the plugin interface.
+
+Keep passwords and keys outside ``.hm``. ``add URL`` and
+``set-config --remote-url`` reject URLs containing a password, an HTTP(S)
+username or token, a query string or a fragment, before contacting the server
+and without repeating the URL. Store SSH users and keys in ``~/.ssh/config`` or
+a local profile in ``~/.config/hallmark/auth.yml`` (see section 4), and
+HTTP(S) logins in ``~/.netrc``. An SSH username such as
+``ssh://researcher@lab-data/srv/exports/lab/`` is not a secret and is allowed.
+``clone`` likewise refuses a source URL with a password or an HTTP(S) username
+or token, before creating anything, because Git would save it in
+``.hm/.git/config``; use a Git credential helper or ``~/.netrc`` instead.
 
 3. Preview, approve and download
 --------------------------------
@@ -169,19 +307,57 @@ Explicit paths must be catalogued files or folders containing catalogued files.
 A folder selects all catalogued files below it, including subfolders. Unknown
 paths and folders without catalogued files are reported before any server request.
 Explicit selections retain their recorded checksums, just like ``--tsv`` and
-``--all``. Files without a usable publisher checksum can be downloaded to new
-paths, but their contents cannot be checked against the catalog.
+``--all``. Every download is checked against its recorded size. Files without a
+usable publisher checksum can be downloaded to new paths, but their contents
+can only be checked against the catalog once a SHA-1 is recorded (see below).
 
 ``--tsv`` can be repeated and combined with explicit paths; overlapping entries
 are deduplicated. ``--all`` cannot be combined with either selection mode.
 Relative output paths are relative to the current directory. Without
 ``--output``, downloads go to the repository worktree; bare ``.hm`` repositories
 require an explicit output directory. Existing files with matching checksums
-are listed as already downloaded and skipped. Different contents, directories
-blocking file paths, and existing files without a usable catalog checksum stop
-the whole selection before transfer. Delete conflicting paths yourself before
-retrying. There is no overwrite option. ``--dry-run`` performs the same local
-checks without downloading or creating files.
+are listed as already downloaded and skipped. An earlier download that no
+longer matches its catalog row, because the file changed on the server and the
+source was added again or because another branch is checked out, is listed as
+outdated: approving the download replaces it, and the old version stays in
+``.hm/objects``, so checking out the earlier commit restores it without a
+transfer. A downloaded file whose row has no catalog checksum cannot prove it is
+current; it is fetched again to compare and kept if unchanged. Files you
+created or edited, directories blocking file paths, and existing files without a
+usable catalog checksum stop the whole selection before transfer, as does a
+file that two catalog paths differing only in letter case would share. Delete
+conflicting paths yourself before retrying. ``--dry-run`` performs the same
+local checks without downloading or creating files.
+
+Downloads pass through the object store in ``.hm/objects``, where
+``hm commit`` also keeps your local files:
+
+1. Each file is transferred to a temporary file in ``.hm/objects/tmp`` and is
+   stored under its SHA-1 only once its size and checksums are verified. An
+   interrupted download never leaves a partial file in the data folder, and its
+   temporary file is removed a day later.
+2. The stored file is hard-linked into the data folder (or copied where links
+   are unavailable, for example on another filesystem). An outdated file is
+   replaced in one step, so the path is never missing. Files with identical
+   contents are stored once.
+3. The SHA-1 of every file now in place is recorded in the catalog and staged.
+   ``download`` prints ``Staged SHA-1 for N file(s); run hm commit to record
+   them``. Commit them to share the hashes: later downloads, including your
+   collaborators', are then verified against them, and a deleted file is
+   restored from ``.hm/objects`` without a transfer. Until you commit or run
+   ``hm restore --staged``, ``checkout`` refuses to switch branches.
+
+Downloaded files are read-only links into ``.hm/objects``. A link and its
+object are the same data on disk, so making a file writable and editing it in
+place changes the stored copy too. Hallmark records each object's size and
+modification time and notices: ``hm status`` lists the file, the next download
+refuses to touch it and drops the changed object, and deleting the file lets a
+fresh copy be downloaded. To change a downloaded file, copy it to a new name.
+Never delete ``.hm/objects`` by hand: it also holds committed local files that
+may exist nowhere else. Linked worktrees share it. After an interruption, run
+the same download again: files whose SHA-1 was recorded, or whose catalog
+checksum matches, are recognised as complete and only the rest are transferred.
+Files with neither are fetched again to compare.
 
 After committing the catalog, use ``download`` to review and approve a transfer.
 Declining keeps the catalog available; an empty selection needs no approval:
@@ -251,6 +427,9 @@ with any existing profiles:
        transfer_timeout: 3600
        shutdown_timeout: 2
        max_sessions: 4
+       server_alive_interval: 15
+       server_alive_count_max: 2
+       compression: false
 
 Keep this file outside the repository and restrict it to your account, for
 example with ``chmod 600 ~/.config/hallmark/auth.yml``. Hallmark reads
@@ -284,7 +463,63 @@ unset values use SSH configuration. Passwords, tokens and arbitrary
 SSH options are not valid profile fields. ``transfer_timeout`` is the total
 per-file time budget in seconds, not an idle timeout. Effective SSH download
 concurrency is the smaller of ``--max-workers`` and local ``max_sessions``
-(both default to 4).
+(both default to 4). ``max_sessions`` is at most 10, the default session limit
+of an OpenSSH server. The connection is closed after about
+``server_alive_interval`` times ``server_alive_count_max`` seconds without a
+reply from the server; raise them if transfers over a congested link are
+dropped. Set ``compression: true`` for text-like data over slow links. Unset
+``compression`` follows SSH configuration. These tuning fields may also appear
+under ``defaults`` to apply to every host.
+
+HTTP(S) profiles and secrets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A ``version: 2`` file adds a ``type`` to each profile: ``ssh`` (the fields
+above), ``http`` or ``s3``. Secrets are never written in the file. Each secret
+field names where its value comes from instead: an environment variable
+(``env``), the operating system keyring (``keyring``, after
+``pip install hallmark[keyring]``), or a command such as a password manager
+that prints it (``command``):
+
+.. code-block:: yaml
+
+   version: 2
+   profiles:
+     lab:
+       type: ssh
+       hosts: [lab-data]
+       user: researcher
+     cyverse:
+       type: http
+       hosts: [data.cyverse.org]
+       scheme: basic
+       username: alice
+       password: {env: CYVERSE_PASSWORD}
+     archive:
+       type: http
+       hosts: [archive.example.org]
+       scheme: bearer
+       token: {command: [pass, show, archive/token]}
+     zenodo:
+       type: http
+       hosts: [zenodo.org]
+       scheme: bearer
+       token: {keyring: {service: hallmark, username: zenodo}}
+
+Then name the profile when adding the remote, as for SSH:
+
+.. code-block:: bash
+
+   export CYVERSE_PASSWORD=...
+   hm add 'https://data.cyverse.org/dav/iplant/home/alice/eht/' --auth cyverse
+
+Secrets are read when a transfer starts, never during ``--dry-run``, and are
+never shown in messages; a helper command's error output is discarded. An HTTP
+profile sends its credentials only to its ``hosts``, and only over HTTPS (or to
+this computer). A redirect to another server, such as a signed download link,
+does not carry them. Without a profile, HTTP downloads use ``~/.netrc`` as
+before. Because a version 2 file can run commands, Hallmark refuses one that
+another account owns or can write to; ``chmod 600`` keeps it private.
 
 5. Use the Python API
 ---------------------

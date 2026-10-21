@@ -7,7 +7,7 @@ from threading import Event, Lock, local
 
 import requests
 
-from .auth import resolve_ssh_settings
+from .auth import resolve_settings, resolve_ssh_settings
 from .base import DataBackend, RemoteEntry, RemoteSpec, TransferCancelled
 
 
@@ -21,6 +21,12 @@ class OperationContext:
     Args:
         remote (RemoteSpec): Data source and optional local profile name.
         output_root (Path | str, optional): Root used to validate download paths.
+
+    Attributes:
+        settings (SSHSettings): SSH settings; defaults for other schemes.
+        auth (HttpSettings | S3Settings | None): Credentials from the remote's
+            profile, for backends declaring that ``auth_type``. Secrets are
+            read only when a request needs them.
     """
 
     def __init__(
@@ -33,15 +39,21 @@ class OperationContext:
         self.output_root = Path(output_root) if output_root is not None else None
         self.cancelled = Event()
         self.on_bytes = None
+        # Small single documents, such as a published config.yml.
         self.text_limit = 16 * 1024 * 1024
+        # Listings, checksum manifests and catalogue tables grow with the
+        # number of files: about 25 MB for 100,000 catalogue rows.
+        self.large_text_limit = 1024 * 1024 * 1024
         self.listing_timeout = 60
         self._local = local()
         self._lock = Lock()
         self._sessions = []
         from ..remote.backends import get_backend
 
+        backend = get_backend(remote.backend)
+        self.auth = resolve_settings(remote, getattr(backend, "auth_type", None))
         try:
-            self.transport = get_backend(remote.backend)(self)
+            self.transport = backend(self)
         except BaseException:
             self.cancelled.set()
             for session in self._sessions:
@@ -57,9 +69,17 @@ class OperationContext:
             self._local.session = session
         return self._local.session
 
-    def read_text(self, path):
-        """Read remote metadata within the configured size limit."""
-        return self.transport.read_text(path, self.text_limit)
+    def read_text(self, path, *, large=False):
+        """
+        Read remote metadata within its size limit.
+
+        Args:
+            path (str): Path beneath the remote URL.
+            large (bool): The document lists files, as a listing, checksum
+                manifest or catalogue table does, and gets the larger limit.
+        """
+        limit = self.large_text_limit if large else self.text_limit
+        return self.transport.read_text(path, limit)
 
     def check_cancelled(self):
         """Raise TransferCancelled if this operation was cancelled."""

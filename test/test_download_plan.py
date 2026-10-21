@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from hallmark.remote.plan import DownloadItem, DownloadPlan
+from hallmark.repo.objects import Objects
 from hallmark.remote.download import (
     DownloadError,
     execute_download_plan,
@@ -30,6 +31,7 @@ def catalog(tmp_path):
     frame.to_csv(metadata / "data.tsv", sep="\t", index=False)
     return SimpleNamespace(
         dothm=SimpleNamespace(path=metadata), worktree=tmp_path,
+        objects=Objects(metadata),
         state=SimpleNamespace(data=frame, config={
             "data": [{"db": "data.tsv"}],
             "remote": {"name": "origin", "url": "https://source.test/data/"},
@@ -103,6 +105,24 @@ def test_plan_is_immutable_and_copies_input_sequences(tmp_path):
         plan.remote_url = "https://different.test/"
     with pytest.raises(FrozenInstanceError):
         plan.items[0].size_bytes = 4
+
+
+def test_plan_summary_counts_outdated_files(tmp_path):
+    old = "A" * 40
+    plan = DownloadPlan(
+        (DownloadItem(Path("a.bin"), replaces=old),
+         DownloadItem(Path("b.bin"), ("sha256", "b" * 64), replaces="c" * 40),
+         DownloadItem(Path("c.bin"))),
+        "https://source.test/", tmp_path,
+        stored_items=(DownloadItem(Path("d.bin"), sha1="d" * 40, replaces="e" * 40),))
+    assert [item.relative_path.name for item in plan.outdated_items] == [
+        "a.bin", "b.bin", "d.bin"]
+    assert plan.items[0].replaces == "a" * 40
+    assert ("Outdated: 3 file(s) will be replaced (old versions stay in "
+            ".hm/objects); 1 without a catalogued checksum are fetched to "
+            "compare and kept if unchanged") in plan.summary()
+    with pytest.raises(ValueError, match="replaces"):
+        DownloadItem(Path("a.bin"), replaces="x")
 
 
 def test_plan_display_redacts_url_credentials_without_changing_source(tmp_path):
@@ -254,9 +274,9 @@ def test_plan_pins_backend_and_nested_options_without_loading_plugin(
 
     def download(source, *args, **kwargs):
         captured.append(source)
-        return {"succeeded": 1, "failed": 0, "total_bytes": 6, "errors": []}
 
-    monkeypatch.setattr("hallmark.remote.download._download_selected", download)
+    monkeypatch.setattr("hallmark.remote.download._download_selected_into_store",
+                        download)
     execute_download_plan(catalog, plan, approved=True)
     assert captured[0].backend == "external-survey"
     assert captured[0].backend_options["servers"][0]["url"] == \

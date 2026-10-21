@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 from urllib.parse import quote
 
 import pytest
@@ -18,6 +19,7 @@ import yaml
 from hallmark import Repo
 from hallmark.remote.plan import DownloadItem, DownloadPlan
 from hallmark.remote.download import execute_download_plan
+from hallmark.repo.objects import Objects
 from conftest import download_selection
 from hallmark.remote.discovery import discover_remote_files
 from hallmark.repo.config import normalize_remotes
@@ -170,6 +172,41 @@ def test_invalid_profiles_fail_preflight(monkeypatch, tmp_path, profile):
         OperationContext(RemoteSpec.from_url("ssh://campus/data", "campus"))
 
 
+def test_profile_tunes_keepalives_compression_and_sessions(monkeypatch, tmp_path):
+    write_auth(
+        monkeypatch,
+        tmp_path,
+        {"hpc": {"hosts": ["campus"], "server_alive_interval": 60,
+                 "server_alive_count_max": 5, "compression": True,
+                 "max_sessions": 10}},
+        {"server_alive_interval": 30},
+    )
+    with OperationContext(RemoteSpec.from_url("ssh://campus/data", "hpc")) as context:
+        options = context.transport._ssh_options()
+        assert context.settings.max_sessions == 10
+    assert "ServerAliveInterval=60" in options
+    assert "ServerAliveCountMax=5" in options
+    assert "Compression=yes" in options
+    with OperationContext(RemoteSpec.from_url("ssh://other/data")) as context:
+        options = context.transport._ssh_options()
+    # Global defaults apply without a profile; unset compression defers to SSH config.
+    assert "ServerAliveInterval=30" in options
+    assert "ServerAliveCountMax=2" in options
+    assert not any(option.startswith("Compression=") for option in options)
+
+
+@pytest.mark.parametrize("profile", [
+    {"hosts": ["campus"], "max_sessions": 11},
+    {"hosts": ["campus"], "server_alive_interval": 0},
+    {"hosts": ["campus"], "server_alive_count_max": "2"},
+    {"hosts": ["campus"], "compression": "yes"},
+])
+def test_invalid_ssh_tuning_fails_preflight(monkeypatch, tmp_path, profile):
+    write_auth(monkeypatch, tmp_path, {"campus": profile})
+    with pytest.raises(RemoteConfigurationError):
+        OperationContext(RemoteSpec.from_url("ssh://campus/data", "campus"))
+
+
 def test_profile_xdg_and_removal(monkeypatch, tmp_path):
     folder = tmp_path / "config" / "hallmark"
     folder.mkdir(parents=True)
@@ -220,9 +257,16 @@ def test_http_error_redacts_exception_and_cause(monkeypatch, tmp_path):
         raise requests.ConnectionError("https://user:secret@example.test/?token=secret")
 
     monkeypatch.setattr(requests.Session, "get", fail)
+    repo = SimpleNamespace(objects=Objects(tmp_path / ".hm"))
+    # A URL carrying credentials is refused before any request, without echoing it.
     plan = DownloadPlan([DownloadItem("file")], "https://user:secret@example.test/data/",
                         tmp_path)
-    result = execute_download_plan(None, plan, approved=True)
+    with pytest.raises(RemoteConfigurationError, match="credentials") as error:
+        execute_download_plan(repo, plan, approved=True)
+    assert "secret" not in str(error.value)
+    # A request that fails reports neither the URL nor the exception's text.
+    plan = DownloadPlan([DownloadItem("file")], "https://example.test/data/", tmp_path)
+    result = execute_download_plan(repo, plan, approved=True)
     assert result["failed"] == 1
     assert "secret" not in "".join(result["errors"])
 
@@ -622,16 +666,45 @@ def test_reject_scoped_ipv6_and_invalid_unicode(url):
         RemoteSpec.from_url(url)
 
 
-def test_minimum_openssh_is_checked_before_connection(monkeypatch):
+@pytest.mark.parametrize("banner", [b"OpenSSH_7.9p1", b"Dropbear 2022.83"])
+def test_minimum_openssh_is_checked_before_connection(monkeypatch, banner):
     with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
         monkeypatch.setattr("hallmark.transport.ssh.shutil.which", lambda name: name)
         monkeypatch.setattr(
-            context.transport, "_run_ssh_command", lambda *a, **kw: b"OpenSSH_9.5p1"
+            context.transport, "_run_ssh_command", lambda *a, **kw: banner
         )
-        with pytest.raises(CapabilityError, match="9.6"):
+        with pytest.raises(CapabilityError, match="8.0"):
             context.transport.prepare()
         assert context.transport._master is None
         assert context.transport._socket_dir is None
+
+
+@pytest.mark.parametrize("banner, version, forks", [
+    (b"OpenSSH_8.0p1, OpenSSL 1.1.1k  FIPS 25 Mar 2021", (8, 0), False),
+    (b"OpenSSH_8.7p1, OpenSSL 3.0.7 1 Nov 2022", (8, 7), True),
+    (b"OpenSSH_9.6p1 Ubuntu-3ubuntu13.19, OpenSSL 3.0.13", (9, 6), True),
+])
+def test_ssh_options_follow_the_client_version(monkeypatch, banner, version, forks):
+    from hallmark.transport.ssh import parse_openssh_version
+
+    assert parse_openssh_version(banner) == version
+    with OperationContext(RemoteSpec.from_url("ssh://unused/data")) as context:
+        monkeypatch.setattr("hallmark.transport.ssh.shutil.which", lambda name: name)
+        monkeypatch.setattr(
+            context.transport, "_run_ssh_command", lambda *a, **kw: banner)
+
+        def stop(*args, **kwargs):
+            raise DownloadError("stop before connecting")
+
+        monkeypatch.setattr(context.transport, "_start_process", stop)
+        with pytest.raises(DownloadError, match="stop before connecting"):
+            context.transport.prepare()
+        assert context.transport._version == version
+        options = context.transport._ssh_options()
+        # Clients before 8.7 exit on this unknown option.
+        assert ("ForkAfterAuthentication=no" in options) is forks
+        assert "BatchMode=yes" in options
+        assert "RemoteCommand=none" in options
 
 
 def test_short_socket_ignores_long_tempdir(monkeypatch, tmp_path):
@@ -662,7 +735,7 @@ def test_discovered_manifest_preserves_names_and_rejects_escaped_names():
     name = " leading%20 name  "
     text = "a" * 64 + "  " + name + "\n"
 
-    def read_text(path):
+    def read_text(path, **_):
         return text
 
     entries = {name: RemoteEntry(name), "sha256sums": RemoteEntry("sha256sums")}
@@ -681,7 +754,7 @@ def test_discovered_manifest_prefers_strong_checksum_and_rejects_conflict():
 
     texts = {"sha256sums": "a" * 64 + "  file\n", "md5sums": "b" * 32 + "  file\n"}
 
-    def read_text(path):
+    def read_text(path, **_):
         return texts[path]
 
     entries = {name: RemoteEntry(name) for name in ["file", *texts]}

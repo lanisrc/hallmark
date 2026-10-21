@@ -1,4 +1,4 @@
-from hashlib import sha256
+from hashlib import sha1, sha256
 from pathlib import Path
 
 import pandas as pd
@@ -151,6 +151,7 @@ def test_file_created_during_transfer_is_not_overwritten(download_repo):
     original = server.get
 
     def get(url, **kwargs):
+        target.parent.mkdir(exist_ok=True)
         target.write_bytes(b'created during transfer')
         return original(url, **kwargs)
 
@@ -158,8 +159,11 @@ def test_file_created_during_transfer_is_not_overwritten(download_repo):
     plan = repo.plan_download(file_paths=['M87/a.txt'])
     result = repo.download(plan, approved=True)
     assert result['failed'] == 1
+    assert 'appeared at its destination' in result['errors'][0]
     assert target.read_bytes() == b'created during transfer'
     assert sorted(path.name for path in target.parent.iterdir()) == ['a.txt']
+    # The verified download stays in the object store for a later run.
+    assert repo.objects.contains(sha1(b'first').hexdigest())
 
 
 @pytest.mark.parametrize('kind', ['directory', 'parent_file', 'unknown_checksum'])

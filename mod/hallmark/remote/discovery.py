@@ -11,7 +11,8 @@ from pathlib import PurePosixPath
 import parse
 from tqdm import tqdm
 
-from ..utils import CHECKSUM_ALGORITHMS_BY_STRENGTH, is_valid_checksum
+from ..utils import (
+    CHECKSUM_ALGORITHMS_BY_STRENGTH, infer_checksum_algorithm, is_valid_checksum)
 from ..transport.base import (
     DownloadError, RemoteEntry, RemoteObjectMissing, validate_remote_path,
 )
@@ -69,7 +70,12 @@ def path_matches(path: str, filter=None, fmt: str | None = None) -> bool:
 
 
 def _checksum_file_algorithm(path):
-    """Identify checksum manifests by their conventional filenames."""
+    """
+    Identify checksum manifests by their conventional filenames.
+
+    A plain ``checksums.txt`` does not say its algorithm; each digest's
+    length tells it instead (``"unknown"`` here).
+    """
     name = PurePosixPath(path).name.lower()
     if re.fullmatch(r"checksums?(?:\.txt)?", name):
         return "unknown"
@@ -85,11 +91,11 @@ def _attach_published_checksums(context, entries):
     strength = {name: index for index, name in
                 enumerate(CHECKSUM_ALGORITHMS_BY_STRENGTH)}
     for path in sorted(entries):
-        algorithm = _checksum_file_algorithm(path)
-        if algorithm is None:
+        manifest_algorithm = _checksum_file_algorithm(path)
+        if manifest_algorithm is None:
             continue
         try:
-            text = context.read_text(path)
+            text = context.read_text(path, large=True)
         except RemoteObjectMissing:
             continue
         parent = PurePosixPath(path).parent
@@ -100,7 +106,9 @@ def _attach_published_checksums(context, entries):
             if not match:
                 continue
             digest, filename = match.groups()
-            if not is_valid_checksum(algorithm, digest, allow_unknown_algorithm=True):
+            algorithm = (infer_checksum_algorithm(digest)
+                         if manifest_algorithm == "unknown" else manifest_algorithm)
+            if algorithm is None or not is_valid_checksum(algorithm, digest):
                 continue
             while filename.startswith("./"):
                 filename = filename[2:]
@@ -120,11 +128,30 @@ def _attach_published_checksums(context, entries):
                     or strength.get(algorithm, 99)
                     < strength.get(previous.checksum_algorithm, 100)):
                 entries[target] = replace(
-                    previous, checksum_algorithm=algorithm, checksum=digest.lower())
+                    previous, checksum_algorithm=algorithm, checksum=digest.lower(),
+                    checksum_source="published")
+
+
+def _attach_server_checksums(context, entries, algorithm):
+    """Ask the server for digests of files without one at least as strong."""
+    strength = {name: index for index, name in
+                enumerate(CHECKSUM_ALGORITHMS_BY_STRENGTH)}
+    needed = [entry for entry in entries
+              if entry.checksum is None or strength.get(entry.checksum_algorithm, 100)
+              > strength[algorithm]]
+    if not needed:
+        return entries
+    digests = context.transport.server_checksums(
+        [entry.path for entry in needed], algorithm)
+    hashed = {entry.path: replace(entry, checksum_algorithm=algorithm,
+                                  checksum=digests[entry.path],
+                                  checksum_source="server")
+              for entry in needed}
+    return [hashed.get(entry.path, entry) for entry in entries]
 
 
 def discover_remote_files(
-    context, *, filter=None, fmt=None, progress=False
+    context, *, filter=None, fmt=None, progress=False, server_checksum=None
 ) -> list[RemoteEntry]:
     """
     Discover remote files and their published metadata recursively.
@@ -140,6 +167,9 @@ def discover_remote_files(
             unknown total. A callback receives dictionaries containing
             ``directories``, ``files``, ``matched``, and ``current``.
             Defaults to False.
+        server_checksum (str, optional): Have the server compute this
+            algorithm for matching files without an equal or stronger
+            published checksum. Only some backends can.
 
     Returns:
         list[RemoteEntry]: Matching files sorted by relative path.
@@ -152,6 +182,9 @@ def discover_remote_files(
     """
     # Validate selectors before contacting the source, even for an empty index.
     path_matches("", filter=filter, fmt=fmt)
+    if server_checksum is not None and \
+            server_checksum not in CHECKSUM_ALGORITHMS_BY_STRENGTH:
+        raise ValueError(f"Unsupported server checksum {server_checksum!r}")
     entries = {}
     counts = {"directories": 0, "files": 0, "matched": 0, "current": ""}
     bar = tqdm(total=None, unit="dir", desc="Discovering", disable=not bool(progress)) \
@@ -182,8 +215,12 @@ def discover_remote_files(
             context.check_cancelled()
             add_file_entry(entry)
         _attach_published_checksums(context, entries)
-        return [entries[path] for path in sorted(entries)
-                if path_matches(path, filter=filter, fmt=fmt)]
+        selected = [entries[path] for path in sorted(entries)
+                    if path_matches(path, filter=filter, fmt=fmt)]
+        selected = context.transport.complete_entries(selected)
+        if server_checksum is not None:
+            selected = _attach_server_checksums(context, selected, server_checksum)
+        return selected
     finally:
         if bar is not None:
             bar.close()

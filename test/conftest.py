@@ -8,6 +8,14 @@ from hallmark.remote.download import _select_remote_config, execute_download_pla
 from hallmark.remote.plan import DownloadItem, DownloadPlan
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Keep each phase's report on the test so fixtures can see whether it failed."""
+    outcome = yield
+    report = outcome.get_result()
+    setattr(item, f"report_{report.when}", report)
+
+
 @pytest.fixture
 def without_configured_identity(tmp_path, monkeypatch):
     """

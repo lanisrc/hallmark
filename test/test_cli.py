@@ -885,7 +885,8 @@ def test_clone_rejects_nonpositive_max_workers(max_workers):
 @pytest.mark.parametrize(
     "arguments, message",
     [
-        (["download"], "Provide file paths, --tsv, --all, --filter, or --fmt"),
+        (["download"],
+         "Provide file paths, --tsv, --all, --source, --filter, or --fmt"),
         (["download", "file.dat", "--all"], "--all cannot be combined"),
         (["download", "--tsv", "data", "--all"], "--all cannot be combined")])
 def test_download_cli_rejects_invalid_selection_combinations(
@@ -1000,7 +1001,8 @@ def test_download_cli_passes_selection_and_options_to_downloader(monkeypatch):
     assert "Successfully downloaded 1 files (1.0 MB)" in result.output
     assert captured["plan"] == (None, {
         "file_paths": ("nested/file.dat",), "tsv_names": (), "all_files": False,
-        "filter": ("**/*.dat",), "fmt": "nested/{name}.dat", "remote_name": "mirror"})
+        "filter": ("**/*.dat",), "fmt": "nested/{name}.dat", "remote_name": "mirror",
+        "sources": None})
     assert captured["download"][0] is plan
     assert captured["download"][1] == {
         "max_workers": 2, "progress": True, "approved": True}
@@ -1164,7 +1166,7 @@ def test_add_then_download_requires_confirmation(monkeypatch, tmp_path, answer):
     from hallmark.transport.base import RemoteObjectMissing
     from mock_server import MockServer
 
-    def metadata(context, path):
+    def metadata(context, path, **_):
         if path == "":
             return '<h1>Index of data</h1><a href="a.fits">a.fits</a>'
         raise RemoteObjectMissing("Missing metadata")
@@ -1271,3 +1273,24 @@ def test_cli_set_config_and_add_dot():
                 "Expected remote URL in config"
             assert r"aspin: m([0-9]+(\.[0-9]+)?|\.[0-9]+)" in config, \
                 "Expected encoding regex in config"
+
+
+def test_user_errors_are_reported_without_a_traceback(tmp_path, monkeypatch):
+    repo = Repo.init(tmp_path / "repo")
+    monkeypatch.chdir(repo.worktree)
+    (repo.dothm.path / "config.yml").write_text("data: [unclosed\n")
+    result = CliRunner().invoke(hallmark, ["status"])
+    assert result.exit_code == 1
+    assert result.output.startswith("Error: Failed to open hallmark repository:")
+    assert isinstance(result.exception, SystemExit)
+
+    (repo.dothm.path / "config.yml").write_text("data: []\n")
+
+    def full_disk(self, message, allow_empty=False):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Repo, "commit", full_disk)
+    result = CliRunner().invoke(hallmark, ["commit", "-m", "Full"])
+    assert result.exit_code == 1
+    assert "No space left on device" in result.output
+    assert isinstance(result.exception, SystemExit)

@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 import os
-import parse
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -24,9 +23,10 @@ from git.exc import GitCommandError
 
 from .branches import (
     checkout, create_branch, current_branch, current_commit, add_worktree)
-from ..remote.add import add_remote, is_remote_catalog
+from ..remote.add import add_remote
 from .dothm import Dothm
-from .state import State
+from .catalog import catalog_rows
+from .state import State, is_remote_catalog
 from .worktree import Worktree
 from .objects import Objects
 from ..paraframe import ParaFrame
@@ -48,7 +48,9 @@ from .config import (
     branch_filename_format,
     set_config,
     single_data_format,
-    filename_fields)
+    filename_fields,
+    literal_fields,
+    check_pattern_fields)
 
 @dataclass(init=False)
 class Repo:
@@ -98,6 +100,7 @@ class Repo:
         self.state = self.dothm.load_state()
         self.download_result = None
 
+        # Linked worktrees share the main repository's object store.
         common = Path(self.dothm.common_dir).resolve().parent
         self.objects = Objects(common)
         dothm_objects = Path(dothm_path) / "objects"
@@ -233,13 +236,15 @@ class Repo:
             Worktree.init(worktree_path)
         return cls(path)
 
-    def _download_cloned_files(self, *, approve, max_workers, progress,
+    def _download_cloned_files(self, *, approve, approved, max_workers, progress,
                                  filter=None, fmt=None):
         """Run an approved transfer after catalog creation has completed."""
         from ..remote.download import DownloadError
 
         plan = self.plan_download(filter=filter, fmt=fmt)
-        if plan.file_count and approve is not None and not approve(plan):
+        # As for Repo.download, files are only transferred with approval.
+        if plan.file_count and not (
+                approved is True or (approve is not None and approve(plan))):
             return
         self.download_result = self.download(
             plan, approved=True, max_workers=max_workers, progress=progress)
@@ -264,15 +269,17 @@ class Repo:
         progress: bool = False,
         download: bool = True,
         approve=None,
+        approved: bool = False,
         max_workers: int = 4,
     ) -> "Repo":
         """
         Clone an existing Hallmark Git catalog or published snapshot.
 
         Git sources retain their history. Published catalog snapshots
-        start new local history. Dataset files download by default after
-        catalog creation, without prompting unless an approval callback is supplied.
-        Declining approval leaves the catalog available without dataset files.
+        start new local history. After the catalog is created, dataset files
+        are downloaded only with approval, as ``Repo.download`` requires:
+        ``approve(plan)`` returning True, or ``approved=True``. Without
+        approval, or when it is declined, the catalog is kept without files.
         Nonempty catalogs without a data server are rejected before creating
         the destination. Empty repositories can be cloned.
 
@@ -292,8 +299,9 @@ class Repo:
             download (bool): Request downloads after preparing the catalog.
                 Defaults to True. Bare destinations require ``download=False``.
             approve (callable, optional): Called with a nonempty download plan.
-                Return True to permit the transfer. Without a callback,
-                downloads proceed without prompting. Declining keeps the catalog.
+                Return True to permit the transfer. Declining keeps the catalog.
+            approved (bool): Permit the transfer without a callback, as
+                ``Repo.download(plan, approved=True)`` does. Defaults to False.
             max_workers (int): Maximum download workers. Defaults to 4.
 
         Returns:
@@ -322,13 +330,13 @@ class Repo:
         repo = clone_catalog(cls, url, path, auth=auth, source_type=source_type)
         if download:
             repo._download_cloned_files(
-                approve=approve, max_workers=max_workers, progress=progress,
-                filter=filter, fmt=fmt)
+                approve=approve, approved=approved, max_workers=max_workers,
+                progress=progress, filter=filter, fmt=fmt)
         return repo
 
     def plan_download(self, output_path=None, *, file_paths=None, tsv_names=None,
                       all_files=False, filter=None, fmt=None, remote_name=None,
-                      estimated_bytes_per_second=None):
+                      estimated_bytes_per_second=None, sources=None):
         """
         Plan a download using the local catalog without contacting a server.
 
@@ -348,6 +356,8 @@ class Repo:
             remote_name (str, optional): Configured data remote to use.
             estimated_bytes_per_second (float, optional): Positive transfer
                 rate for duration estimates. No rate is measured while planning.
+            sources (sequence[str], optional): Keep only files of these
+                catalogue sources.
 
         Returns:
             DownloadPlan: Immutable selection with its source, destination,
@@ -363,7 +373,7 @@ class Repo:
         return plan_download(
             self, output_path, file_paths=file_paths, tsv_names=tsv_names,
             all_files=all_files, filter=filter, fmt=fmt, remote_name=remote_name,
-            estimated_bytes_per_second=estimated_bytes_per_second)
+            estimated_bytes_per_second=estimated_bytes_per_second, sources=sources)
 
     def download(self, plan, *, approved=False, max_workers=4, progress=False):
         """
@@ -468,8 +478,7 @@ class Repo:
         # find the encoding settings and parse format for the branch
         yaml_encodings, parse_fmt = ParaFrame._find_encoding_settings(
             fmt, encodings, encoding=encoding)
-        # compile the parse format into a parser object
-        parser = parse.compile(parse_fmt.lstrip("/"), case_sensitive=True)
+        parse_fmt = parse_fmt.lstrip("/")
         matched = {}
         unmatched = set()
         add_all = False
@@ -525,10 +534,10 @@ class Repo:
                 if encoding:
                     target = apply_regex_replacement(target, yaml_encodings)
 
-                # parse the target using the branch format parser
-                match = parser.parse(target)
+                # read the field text the same way hm add PATTERN does
+                named = literal_fields(parse_fmt, target)
                 # if the target does not match the branch format, handle it accordingly
-                if match is None:
+                if named is None:
                     # if the file was explicitly named and doesn't match, raise an error
                     if named_file:
                         raise ValueError(
@@ -539,7 +548,7 @@ class Repo:
                 # if the target matches the format, add it to the matched dictionary
                 else:
                     matched[relative] = {
-                        **match.named,
+                        **named,
                         "path": relative,
                         "sha1": self.checksum(path)}
 
@@ -664,6 +673,8 @@ class Repo:
                 worktree_modified, worktree_deleted = find_changed_and_missing_files(
                     self, staged_map
                 )
+            else:
+                worktree_modified = self._downloads_changed_in_place(staged_state)
             worktree_root = Path(self.worktree)
             # generator that yields relative paths of all files in the worktree
             worktree_files = (full_path.relative_to(worktree_root).as_posix()
@@ -702,11 +713,38 @@ class Repo:
             "remote_catalog": remote_catalog,
         }
 
+    def _downloads_changed_in_place(self, state) -> list[str]:
+        """
+        Used by status.
+        List downloaded files whose object changed since it was stored.
+
+        A download is a hard link to its object, so an in-place edit changes
+        both. Only recorded stats are compared; nothing is hashed.
+        """
+        changed = []
+        for row in catalog_rows(state):
+            path, sha1 = row["path"], row.get("sha1", "")
+            if not sha1:
+                continue
+            try:
+                destination = resolve_path_in_root(
+                    self.worktree, path, label="downloaded path")
+            except ValueError:
+                continue
+            if self.objects.is_linked(sha1, destination) and self.objects.changed(sha1):
+                changed.append(path)
+        return changed
+
     def add(self, fmt: str, encoding: bool = False, *, filter=None,
             remote_fmt=None, auth=None, backend=None, backend_options=None,
-            progress=False, resort=None) -> ParaFrame:
+            remote=None, source=None, prefix=None, server_checksum=None,
+            on_duplicate=None, resort=None, prune=None,
+            progress=False) -> ParaFrame:
         '''
         Stage local file metadata or discover a remote catalog without downloading.
+
+        A remote URL adds or updates one source of the catalogue; see
+        ``hallmark.remote.add.add_remote``.
 
         Args:
             fmt (string): Local filename format, "." to rescan, or remote URL.
@@ -717,11 +755,21 @@ class Repo:
             auth (string, optional): Local profile for remote authentication.
             backend (string, optional): Registered data backend name.
             backend_options (dict, optional): Backend configuration.
+            remote (string, optional): Data remote to use or create.
+            source (string, optional): Catalogue source to update or create.
+            prefix (string, optional): Local folder for the source's files.
+            server_checksum (string, optional): Algorithm the server computes
+                for files without a published checksum (SSH only).
+            on_duplicate (string | callable, optional): What to do with paths
+                another source already catalogs; see ``add_remote``.
             progress (boolean): Show remote discovery progress.
-            resort (bool | callable, optional): When a remote add brings a new
-                fmt, True sorts the already sorted files again and False only
-                sorts unsorted ones; a callable gets the number of sorted files
-                and returns the choice.
+            resort (bool | str | callable, optional): When a remote add brings
+                a new fmt, True sorts this source's sorted files again, "all"
+                every source's, and False only sorts unsorted ones; see
+                ``add_remote``.
+            prune (bool | callable, optional): When files of the source are
+                gone from the server, True removes them from the catalogue and
+                False keeps them; see ``add_remote``.
         Returns:
             ParaFrame: Local parameters without checksums, or remote catalog rows.
         '''
@@ -730,9 +778,13 @@ class Repo:
                 raise ValueError("--regex is only supported for local data")
             return add_remote(self, fmt, fmt=remote_fmt, filter=filter, auth=auth,
                               backend=backend, backend_options=backend_options,
-                              progress=progress, resort=resort)
+                              remote=remote, source=source, prefix=prefix,
+                              server_checksum=server_checksum,
+                              on_duplicate=on_duplicate, resort=resort,
+                              prune=prune, progress=progress)
         if any(value is not None for value in
-               (filter, remote_fmt, auth, backend, backend_options)):
+               (filter, remote_fmt, auth, backend, backend_options, remote,
+                source, prefix, server_checksum, on_duplicate, resort, prune)):
             raise ValueError("Remote options require a remote URL")
         if is_remote_catalog(self.state):
             raise ValueError("Use a remote URL to update this catalog")
@@ -742,6 +794,7 @@ class Repo:
 
         # Normalize the format string to ensure it is a non-empty string
         fmt = require_nonempty_string(fmt, label="format")
+        check_pattern_fields(fmt)
         # if the format string has no filename fields, treat it as a literal path
         if not filename_fields(fmt):
             # return early since there are no filename fields to parse
@@ -855,7 +908,7 @@ class Repo:
         if not base.is_relative_to(root):
             base = root
 
-        targets = []
+        files, rows = [], []
         for value in paths:
             raw = require_nonempty_string(str(value), label="restore path")
             candidate = root if Path(raw) == Path(".") else Path(
@@ -867,7 +920,7 @@ class Repo:
                 )
 
             if candidate in (root, self.dothm.path):
-                targets.append(".")
+                files.append(".")
             elif candidate.is_relative_to(self.dothm.path):
                 relative = candidate.relative_to(self.dothm.path)
                 relative = validate_relative_path(
@@ -879,14 +932,13 @@ class Repo:
                     raise ValueError(
                         "Use dataset paths to restore file versions"
                     )
-                targets.append(relative.as_posix())
+                files.append(relative.as_posix())
             else:
-                relative = validate_relative_path(
+                rows.append(validate_relative_path(
                     candidate.relative_to(root), label="restore path"
-                )
-                targets.append(f"versions/{relative.as_posix()}")
+                ).as_posix())
 
-        self.dothm.restore_index(targets)
+        self.dothm.restore_index(files, rows)
         self.state = self.dothm.load_state()
 
     def log(self) -> str:

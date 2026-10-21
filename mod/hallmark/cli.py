@@ -14,6 +14,7 @@
 
 """Hallmark CLI entrypoint and command wiring."""
 
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -26,9 +27,11 @@ from . import Repo
 from .fmt_detection import detect_fmt
 from .remote.download import DownloadError
 from .remote.discovery import discover_remote_files, path_matches
+from .remote.sources import SourceSpec
 from .repo.config import normalize_remotes
 from .transport import OperationContext, RemoteSpec
-from .error import CheckoutError, CloneError
+from .error import CheckoutError, CloneError, HallmarkError
+from .utils import CHECKSUM_ALGORITHMS
 
 
 # use a context manager to translate application errors into clean Click errors
@@ -36,7 +39,7 @@ from .error import CheckoutError, CloneError
 def _translate_cli_errors(*error_types, prefix=None):
     """
     Used by hallmark, init, info, status, add, set_config, commit, log, branch,
-    checkout, download, clone, and build.
+    checkout, download, and clone.
     Context manager to translate application errors into clean Click errors.
 
     Args:
@@ -50,6 +53,9 @@ def _translate_cli_errors(*error_types, prefix=None):
     try:
         # yield control to the code block that uses this context manager
         yield
+    # A declined prompt raises Abort, itself a RuntimeError; let Click report it.
+    except (click.exceptions.Abort, ClickException):
+        raise
     # handle any specified error types raised within the context manager
     except error_types as exc:
         # construct a user-friendly error message with an optional prefix
@@ -81,13 +87,44 @@ def _report_download_results(results: dict) -> None:
     # Report the results of the download operation to the user.
     for path in results.get("skipped", []):
         click.echo(f"Already downloaded: {path}")
+    from_store = results.get("from_store", [])
+    if from_store:
+        click.echo(f"Placed {len(from_store)} file(s) from .hm/objects")
+    replaced = results.get("replaced", [])
+    if replaced:
+        click.echo(f"Replaced {len(replaced)} outdated file(s); "
+                   "old versions stay in .hm/objects")
+    unchanged = results.get("unchanged", [])
+    if unchanged:
+        click.echo(f"Fetched {len(unchanged)} file(s) to compare; "
+                   "they were already up to date")
+    copied = results.get("copied", [])
+    if copied:
+        click.echo("Copied instead of linked (links unavailable):")
+        for path in copied[:10]:
+            click.echo(f"  {path}")
+    if results.get("catalog_upgraded"):
+        click.echo("Recorded this older catalog's source, as hm add URL does")
+    if results.get("staged"):
+        click.echo(f"Staged SHA-1 for {results['staged']} file(s); "
+                   "run hm commit to record them")
+    if results.get("staging_note"):
+        click.echo(results["staging_note"])
+    if results.get("staging_error"):
+        click.echo(results["staging_error"], err=True)
+        click.echo("Run hm download again to record them.", err=True)
     succeeded = results["succeeded"]
     failed = results["failed"]
     total_mb = results["total_bytes"] / (1024 * 1024)
     # If there were no failed downloads, report success and exit.
+    # Files placed from the store were not downloaded again.
+    transferred = succeeded - len(from_store)
     if failed == 0:
-        click.echo(
-            f"Successfully downloaded {succeeded} files "f"({total_mb:.1f} MB)")
+        if transferred or not (from_store or results.get("staged")):
+            click.echo(
+                f"Successfully downloaded {transferred} files "f"({total_mb:.1f} MB)")
+        if results.get("staging_error"):
+            raise ClickException("Downloaded files were not recorded")
         # bail out of the function early since there are no errors to report
         return
     # If there were failed downloads, report the number of successes and failures
@@ -121,8 +158,13 @@ def _run_download(repo, plan, *, max_workers):
         DownloadError: If the download cannot be started.
     """
     click.echo(plan.summary())
-    if not plan.file_count:
+    if not plan.has_changes:
         click.echo("No files selected for download.")
+        if any(item.sha1 for item in plan.skipped_items):
+            # Files found complete may still need their SHA-1 recorded.
+            results = repo.download(plan)
+            if results.get("staged") or results.get("staging_error"):
+                _report_download_results(results)
         return
     click.confirm("Download these files?", default=False, abort=True)
     results = repo.download(plan, approved=True, max_workers=max_workers,
@@ -130,7 +172,25 @@ def _run_download(repo, plan, *, max_workers):
     _report_download_results(results)
 
 
-@click.group(name="hm")
+# Errors a user causes or can fix, such as a typo in config.yml, a missing
+# file, a full disk or a git failure. Every command reports them in one line;
+# anything else is a bug and keeps its traceback.
+_USER_ERRORS = (HallmarkError, GitError, OSError, yaml.YAMLError, ValueError)
+
+
+class _HallmarkGroup(click.Group):
+    """Report user-fixable errors from any command without a traceback."""
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except (click.exceptions.Exit, click.exceptions.Abort, ClickException):
+            raise
+        except _USER_ERRORS as exc:
+            raise ClickException(str(exc) or type(exc).__name__) from exc
+
+
+@click.group(name="hm", cls=_HallmarkGroup)
 @click.version_option()
 @click.pass_context
 def hallmark(ctx):
@@ -144,7 +204,8 @@ def hallmark(ctx):
         # return early without attempting to open a repository
         return
     # attempt to open the hallmark repository in the current directory
-    with _translate_cli_errors(GitError, prefix="Failed to open hallmark repository"):
+    with _translate_cli_errors(*_USER_ERRORS,
+                               prefix="Failed to open hallmark repository"):
         # cwd is the current working directory
         cwd = Path.cwd()
         # start with the current working directory as the default repository path
@@ -250,6 +311,63 @@ def status(repo):
             click.echo("nothing to commit, working tree clean")
 
 
+def _ask_about_resort(count, others=0):
+    """Ask whether files already sorted are sorted again with a new fmt."""
+    if not others:
+        choice = click.prompt(
+            f"{count} files are already sorted. Sort them again with the new fmt, "
+            "or only sort the unsorted files?",
+            type=click.Choice(["resort", "unsorted"]))
+    else:
+        choice = click.prompt(
+            f"{count} files of this source and {others} of other sources are "
+            "already sorted. Sort this source's files again (resort), every "
+            "source's files (all), or only the unsorted files (unsorted)?",
+            type=click.Choice(["resort", "all", "unsorted"]))
+    return {"resort": True, "all": "all", "unsorted": False}[choice]
+
+
+def _ask_about_missing(paths):
+    """Ask whether catalogued files gone from the server leave the catalog."""
+    click.echo(f"{len(paths)} catalogued file(s) are no longer on the server:")
+    for path in paths[:10]:
+        click.echo(f"  {path}")
+    if len(paths) > 10:
+        click.echo(f"  ... and {len(paths) - 10} more")
+    return click.prompt(
+        "Remove them from the catalog, or keep them?",
+        type=click.Choice(["remove", "keep"])) == "remove"
+
+
+def _interactive() -> bool:
+    """Return whether someone at a terminal can answer prompts."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _ask_about_duplicates(duplicates):
+    """Ask what to do with paths another source already catalogs."""
+    click.echo(duplicates.describe())
+    choices = ["s", "p", "a"] if duplicates.can_prefix else ["s", "a"]
+    click.echo("  [s] Skip them, keeping the catalogued rows")
+    if duplicates.can_prefix:
+        click.echo("  [p] Keep both, with this source's files under a folder")
+    click.echo("  [a] Abort; nothing is saved")
+    choice = click.prompt("Choose", type=click.Choice(choices), default="a",
+                          show_choices=False)
+    if choice == "s":
+        return "skip"
+    if choice == "p":
+        def folder(value):
+            try:
+                return SourceSpec(duplicates.source, "remote", prefix=value).prefix
+            except ValueError as exc:
+                raise click.BadParameter(str(exc)) from exc
+
+        return "prefix", click.prompt("Folder for this source's files",
+                                      value_proc=folder)
+    raise click.Abort()
+
+
 @hallmark.command(short_help="Add files to hallmark index.")
 @click.option(
     "--regex",
@@ -266,13 +384,45 @@ def status(repo):
 @click.option("--fmt", "remote_fmts", multiple=True,
               help="Remote filename format, as FMT or FMT=DB. May be repeated "
                    "for multiple fmts; otherwise use a URL pattern.")
+@click.option("--remote", "remote_name",
+              help="Data remote to catalog under; matched by URL by default.")
+@click.option("--source", help="Catalog source to update or create.")
+@click.option("--prefix", help="Local folder for this source's files.")
+@click.option("--server-checksum",
+              type=click.Choice(CHECKSUM_ALGORITHMS),
+              help="Have an SSH server hash files that have no published "
+                   "checksum. Reads every such file on the server.")
+@click.option("--skip-duplicates", is_flag=True,
+              help="Leave out paths another source already catalogs, keeping "
+                   "its rows.")
+@click.option("--prune/--keep-missing", default=None,
+              help="Remove catalogued files gone from the server, or keep "
+                   "them. Without either, add asks.")
 @click.argument("inputs", nargs=-1, required=True)
 @click.pass_obj
-def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmts):
+def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmts,
+        remote_name, source, prefix, server_checksum, skip_duplicates, prune):
     """Add files to the hallmark index.
 
     A remote URL or URL pattern stages a catalog without downloading files
-    or committing. Use --fmt and --filter to select remote paths.
+    or committing. Use --filter to select remote paths. Filename formats,
+    from the URL pattern or --fmt FMT[=DB] (repeatable), sort the files: each
+    format's files are rows of its own TSV, and files no format matches are
+    listed as file entries in config.yml. A new format applies to the whole
+    catalog; when files are already sorted, add asks whether to sort them
+    again. A scan that fails or matches no files keeps the previously staged
+    catalog.
+
+    Each remote selection is a source of the catalog. Adding the same URL and
+    filters again updates its source: new files are added, and add asks
+    whether files gone from the server leave the catalog (--prune) or stay
+    (--keep-missing). Different filters add another source; use
+    --source NAME to change an existing source's filters instead. Files from
+    another server keep their paths beneath its URL; use --prefix DIR when
+    those paths are already catalogued. When paths clash, add says whether
+    each has the same content in both places; at a terminal it asks whether
+    to skip them, keep both under a folder, or abort, and elsewhere
+    --skip-duplicates leaves them out.
 
     `hm add [--regex] FORMAT` uses the branch format string workflow.
     `hm add "."` rebuilds the manifest from current files that match
@@ -295,7 +445,11 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
         fmt_entries.append({"fmt": fmt, "db": db} if db else {"fmt": fmt})
     remote_options = dict(auth=auth, backend=backend,
                           backend_options=options,
-                          filter=filters or None, remote_fmt=fmt_entries or None)
+                          filter=filters or None, remote_fmt=fmt_entries or None,
+                          remote=remote_name, source=source, prefix=prefix,
+                          server_checksum=server_checksum,
+                          on_duplicate="skip" if skip_duplicates else None,
+                          prune=prune)
     if len(inputs) != 1 and any(value is not None for value in remote_options.values()):
         raise ClickException("Remote add accepts one URL at a time")
     # attempt to add the specified files to the hallmark index, handling any errors
@@ -304,13 +458,12 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
         if len(inputs) == 1:
             remote = "://" in inputs[0]
             if remote or any(value is not None for value in remote_options.values()):
-                pf = repo.add(
-                    inputs[0], encoding, progress=True, **remote_options,
-                    # with a new fmt, ask whether already sorted files are sorted again
-                    resort=lambda count: click.prompt(
-                        f"{count} files are already sorted. Sort them again with the "
-                        "new fmt, or only sort the unsorted files?",
-                        type=click.Choice(["resort", "unsorted"])) == "resort")
+                if remote and not skip_duplicates and _interactive():
+                    remote_options["on_duplicate"] = _ask_about_duplicates
+                if remote and prune is None:
+                    remote_options["prune"] = _ask_about_missing
+                pf = repo.add(inputs[0], encoding, progress=True, **remote_options,
+                              resort=_ask_about_resort)
             else:
                 pf = repo.add(inputs[0], encoding)
         # oterhwise, use the add_paths method for multiple inputs
@@ -321,7 +474,38 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
         click.echo("No files matched the format string.")
     else:
         click.echo("Changes to be committed")
-        click.echo(pf.path.to_string(index=False, header=False))
+        for path in pf.path:
+            click.echo(path)
+    case_clashes = pf.attrs.get("case_clashes", [])
+    if case_clashes:
+        click.echo("Warning: these paths differ only in letter case, so they "
+                   "would be one file on macOS and Windows:", err=True)
+        for group in case_clashes[:10]:
+            click.echo("  " + ", ".join(group), err=True)
+    skipped = pf.attrs.get("skipped", [])
+    if skipped:
+        click.echo("Skipped paths another source already catalogs:")
+        for clash in skipped[:10]:
+            click.echo(f"  {clash.label()}")
+        if len(skipped) > 10:
+            click.echo(f"  ... and {len(skipped) - 10} more")
+    removed = pf.attrs.get("removed", [])
+    if removed:
+        click.echo("Removed from the catalog (no longer on the server):")
+        for path in removed:
+            click.echo(f"  {path}")
+    kept = pf.attrs.get("kept_missing", [])
+    if kept:
+        click.echo(f"Kept in the catalog, though no longer on the server: "
+                   f"{len(kept)} file(s)")
+    changed = pf.attrs.get("changed", [])
+    if changed:
+        click.echo(f"Changed upstream ({len(changed)}); run hm download to "
+                   "replace the local copies:")
+        for path in changed[:10]:
+            click.echo(f"  {path}")
+        if len(changed) > 10:
+            click.echo(f"  ... and {len(changed) - 10} more")
 
     # display unmatched files that were skipped
     unmatched = pf.attrs.get("unmatched", [])
@@ -615,7 +799,10 @@ def checkout(repo, target_branch):
                    "May be repeated.")
 @click.option("--fmt", help="Select paths matching a filename format.")
 @click.option("--remote", "remote_name",
-              help="Name of the configured data remote to use.")
+              help="Download every selected file from this data remote, "
+                   "instead of each source's own remote.")
+@click.option("--source", "sources", multiple=True,
+              help="Select the files of a catalog source. May be repeated.")
 @click.option("--output", type=click.Path(file_okay=False),
               help="Output directory. Defaults to the repository worktree.")
 @click.option("--max-workers", type=click.IntRange(min=1), default=4,
@@ -624,27 +811,36 @@ def checkout(repo, target_branch):
               help="Show the download plan using only local catalog metadata.")
 @click.pass_obj
 def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
-             output, max_workers, dry_run):
+             sources, output, max_workers, dry_run):
     """
-    Download selected files from a configured data remote.
+    Download selected files from the catalog's data remotes.
 
+    Each file comes from the remote of the source that cataloged it.
     Preview the selection with --dry-run. Every nonempty download displays
     its plan and asks for confirmation before transferring files.
     """
     if download_all and (files or tsv_names):
         raise ClickException("--all cannot be combined with file paths or --tsv")
-    if not files and not tsv_names and not download_all and not filters and not fmt:
-        raise ClickException("Provide file paths, --tsv, --all, --filter, or --fmt")
+    if (not files and not tsv_names and not download_all and not filters
+            and not fmt and not sources):
+        raise ClickException(
+            "Provide file paths, --tsv, --all, --source, --filter, or --fmt")
     if repo.worktree is None and output is None:
         raise ClickException("--output is required when downloading from a bare repo")
     with _translate_cli_errors(DownloadError, ValueError):
         plan = repo.plan_download(
             output, file_paths=files, tsv_names=tsv_names, all_files=download_all,
-            filter=filters or None, fmt=fmt, remote_name=remote_name)
+            filter=filters or None, fmt=fmt, remote_name=remote_name,
+            sources=sources or None)
         if dry_run:
             click.echo(plan.summary())
-            for item in plan.items[:20]:
-                click.echo(f"  {item.relative_path.as_posix()}")
+            listed = [(item, []) for item in plan.items] + [
+                (item, ["from .hm/objects"]) for item in plan.stored_items]
+            for item, notes in listed[:20]:
+                if item.replaces:
+                    notes = notes + ["replaces an outdated file"]
+                note = f" ({', '.join(notes)})" if notes else ""
+                click.echo(f"  {item.relative_path.as_posix()}{note}")
             if plan.file_count > 20:
                 click.echo(f"  ... {plan.file_count - 20} more file(s)")
             return

@@ -41,6 +41,9 @@ State Management
    :members:
    :show-inheritance:
 
+.. automodule:: hallmark.repo.catalog
+   :members:
+
 Data Handling
 -------------
 
@@ -133,10 +136,17 @@ formats cannot be combined with this flag and leave the complete catalog unchang
 Declining clone's prompt keeps the catalog and exits successfully.
 A filter or filename format never authorizes a transfer.
 
-``Repo.clone(url, path)`` downloads by default without prompting. Pass
-``download=False`` for catalog-only or bare clones. An optional ``approve(plan)``
-callback gates a nonempty transfer: only Boolean True downloads; refusal keeps
-the catalog. A bare destination with downloads enabled fails before cloning.
+Like ``Repo.download``, ``Repo.clone(url, path)`` transfers data only with
+approval: an ``approve(plan)`` callback returning Boolean True, or
+``approved=True``. Without approval, or when it is declined, the catalog is
+cloned without data. Pass ``download=False`` for catalog-only or bare clones. A
+bare destination with downloads enabled fails before cloning.
+
+When a remote shares paths with a source already catalogued, ``Repo.add``
+refuses unless ``on_duplicate`` says otherwise: ``"skip"`` leaves those paths
+out, or a callable receives a ``hallmark.remote.add.Duplicates`` listing each
+path and whether its content matches, and returns ``"skip"``, ``"abort"`` or
+``("prefix", "DIR")``. Skipped paths are in the result's ``attrs["skipped"]``.
 
 For separate Python downloads, first inspect the selected files::
 
@@ -191,8 +201,13 @@ reference unchanged.
 ``Repo.download`` returns a dictionary containing ``succeeded``,
 ``failed``, ``total_bytes``, and ``errors``. Check ``failed`` and ``errors``
 for individual transfer failures. ``plan.skipped_items`` lists existing files
-whose checksums match. Execution checks destinations again before connecting.
-Its result also includes ``skipped`` paths when more files match at execution.
+whose checksums match. ``plan.outdated_items`` lists earlier downloads that no
+longer match their catalog row; each item's ``replaces`` is the SHA-1 of the
+file it replaces, whose bytes stay in ``.hm/objects``. Execution checks
+destinations again before connecting and replaces only files the approved plan
+listed. Its result also includes ``skipped`` paths when more files match at
+execution, ``replaced`` paths, and ``unchanged`` paths that were fetched to
+compare and already held the same content.
 Unknown catalog paths and existing-file conflicts raise ``DownloadError``
 before transfer. Configuration errors and failed SSH
 connection checks raise ``DownloadError`` before downloads begin.

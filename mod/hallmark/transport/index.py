@@ -6,6 +6,8 @@ import re
 from html.parser import HTMLParser
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
+from ..utils import names_repository_metadata
+
 from .base import (
     CapabilityError,
     DownloadError,
@@ -99,7 +101,7 @@ def _resolve_listing_link(root_url, directory, href, kind):
     relative = path[len(root_path):]
     if not relative:
         return None
-    if any(part.lower() in {".hm", ".git"} for part in relative.split("/")):
+    if names_repository_metadata(relative):
         return None
     is_directory = kind == "directory" or resolved.path.endswith("/")
     relative = validate_remote_path(relative.rstrip("/")).as_posix()

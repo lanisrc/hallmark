@@ -29,6 +29,7 @@ from ..transport.base import (
     validate_backend_name,
     validate_profile_name,
     reject_control_characters,
+    reject_url_secrets,
     copy_backend_options,
 )
 
@@ -113,7 +114,12 @@ def _update_remote_config(
                 "Multiple remotes are configured; specify --remote-name")
 
     if remote_name is not None:
+        previous_name = selected.get("name") or "origin"
         selected["name"] = remote_name
+        # Sources refer to their remote by name.
+        for source in config.get("sources") or []:
+            if isinstance(source, dict) and source.get("remote") == previous_name:
+                source["remote"] = remote_name
     if remote_url is not None:
         selected["url"] = remote_url
     if remote_auth == "":
@@ -157,6 +163,16 @@ def _single_data_config(config) -> Optional[dict]:
         return None
     # return the first (and only) entry in the "data" list
     return data[0]
+
+
+def remote_name_of(remote: dict) -> str:
+    """
+    Return a data remote's name.
+
+    A catalogue with one remote may leave it unnamed; it is then ``origin``
+    everywhere a remote is chosen or reported.
+    """
+    return remote.get("name") or "origin"
 
 
 def normalize_remotes(remotes) -> list[dict]:
@@ -424,6 +440,11 @@ def set_config(
     if fmt is not None:
         # ensure the new format string is a nonempty string
         fmt = require_nonempty_string(fmt, label="fmt")
+        check_pattern_fields(fmt)
+        if config.get("sources"):
+            raise ValueError(
+                "A remote catalog's formats sort the files of its sources; "
+                "add one with hm add URL --fmt PATTERN")
         # retrieve the old filename format from the repository's configuration
         old_fmt = single_data_format(repo.state.config)
 
@@ -438,8 +459,6 @@ def set_config(
             if not repo.state.data.empty and old_fmt is None:
                 raise ValueError("Cannot verify catalog without its saved pattern")
 
-            # parse the new filename format using the parse library
-            parser = parse.compile(fmt, case_sensitive=True)
             # iterate over each record in the existing data as a dictionary
             for record in repo.state.data.to_dict(orient="records"):
                 # convert the record to a path using the old filename format
@@ -448,17 +467,17 @@ def set_config(
                 # otherwise, use just the filename
                 target = old_path.as_posix() if "/" in fmt else old_path.name
                 # match the target string against the new format
-                match = parser.parse(target)
+                named = literal_fields(fmt, target)
 
                 # if it does not match the new format, it is considered incompatible
-                if match is None:
+                if named is None:
                     incompatible += 1
                     # skip this record as it is incompatible with the new format
                     continue
                 # construct a new row for the migrated data based on the named groups
                 rows.append({
                     "sha1": record["sha1"],
-                    **match.named,
+                    **named,
                     "path": old_path.as_posix()})
 
             # if there are any incompatible records, raise an error
@@ -499,6 +518,7 @@ def set_config(
         if isinstance(remote_url, str):
             reject_control_characters(remote_url, "Remote URL")
         remote_url = require_nonempty_string(remote_url, label="remote_url")
+        reject_url_secrets(remote_url)
     if remote_auth not in (None, ""):
         validate_profile_name(remote_auth)
 
@@ -585,6 +605,68 @@ def filename_fields(fmt: str) -> list[str]:
             seen.add(field_name)
             fields.append(field_name)
     return fields
+
+
+# Catalogue columns that downloads read for themselves. A local filename
+# field with one of these names would be taken for a size or checksum.
+LOCAL_RESERVED_FIELDS = frozenset({
+    "path", "sha1", "md5", "sha256", "sha512", "checksum", "checksum_algorithm",
+    "checksum_source", "size_bytes", "mtime"})
+
+
+def check_pattern_fields(fmt: str, reserved=LOCAL_RESERVED_FIELDS) -> None:
+    """
+    Refuse a filename pattern whose fields reuse catalogue column names.
+
+    Args:
+        fmt (str): Filename pattern.
+        reserved (Collection[str]): Names the catalogue uses itself.
+
+    Raises:
+        ValueError: If a field name is reserved.
+    """
+    clashes = sorted(set(filename_fields(fmt)) & set(reserved))
+    if clashes:
+        raise ValueError(
+            "Rename the pattern field(s) " + ", ".join(clashes)
+            + ": the catalogue uses these names for its own columns")
+
+
+def literal_format(fmt: str) -> str:
+    """
+    Return a filename format without its format specs.
+
+    Field values are stored as the text the filename holds, so ``005`` in
+    ``x_{doy:03d}.h5`` stays ``005``, as ``hm add PATTERN`` records it.
+    Parse with the full format to validate a name and with this one to read
+    its values.
+
+    Args:
+        fmt (str): Format string, possibly with specs such as ``{doy:03d}``.
+
+    Returns:
+        str: The same format with every ``{name:spec}`` reduced to ``{name}``.
+    """
+    parts = []
+    for literal, field_name, _, _ in Formatter().parse(fmt):
+        parts.append(literal.replace("{", "{{").replace("}", "}}"))
+        if field_name is not None:
+            parts.append("{" + field_name + "}")
+    return "".join(parts)
+
+
+def literal_fields(fmt: str, target: str):
+    """
+    Return the field text of a name that matches ``fmt``, or None.
+
+    Args:
+        fmt (str): Format string with optional specs, used to validate.
+        target (str): Name or relative path to parse.
+    """
+    if parse.parse(fmt, target, case_sensitive=True) is None:
+        return None
+    match = parse.parse(literal_format(fmt), target, case_sensitive=True)
+    return None if match is None else match.named
 
 
 def validate_tsv_filename(value) -> str:

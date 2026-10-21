@@ -20,7 +20,7 @@ class Source:
         if self.remote.scheme in {"http", "https"}:
             self.transport = HttpBackend(self)
 
-    def read_text(self, path):
+    def read_text(self, path, **_):
         self.reads.append(path)
         assert path in self.pages, f"Unexpected payload request: {path}"
         return self.pages[path]
@@ -191,7 +191,7 @@ def test_only_conventional_checksum_metadata_is_read():
     })
     entries = discover_remote_files(source, filter="*.fits")
     assert entries == [RemoteEntry(path="data.fits", checksum_algorithm="sha256",
-                                   checksum=digest)]
+                                   checksum=digest, checksum_source="published")]
     assert source.reads == ["", "sha256sums.txt"]
 
 
@@ -230,7 +230,8 @@ def test_sftp_metadata_and_progress_callback():
         on_directory("nested")
         yield RemoteEntry(path="nested/file.bin", size=20)
 
-    source.transport = SimpleNamespace(iter_entries=entries, prepare=lambda: None)
+    source.transport = SimpleNamespace(iter_entries=entries, prepare=lambda: None,
+                                       complete_entries=lambda found: found)
     snapshots = []
     selected = discover_remote_files(
         source, filter="**/*.fits", progress=snapshots.append

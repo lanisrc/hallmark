@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from __future__ import annotations
+import errno
 import re
 import hashlib
 import os
@@ -31,6 +32,25 @@ CHECKSUM_ALGORITHMS_BY_STRENGTH = tuple(
     sorted(CHECKSUM_ALGORITHMS, key=CHECKSUM_LENGTHS.__getitem__, reverse=True))
 # create a frozenset of supported checksum algorithms for efficient membership testing.
 SUPPORTED_CHECKSUM_ALGORITHMS = frozenset(CHECKSUM_ALGORITHMS)
+
+
+def infer_checksum_algorithm(digest) -> str | None:
+    """
+    Return the algorithm a hexadecimal digest's length identifies, or None.
+
+    Each supported algorithm has its own digest length, so a digest published
+    without its algorithm, as in a plain ``checksums.txt``, still names it.
+
+    Args:
+        digest: Hexadecimal digest.
+    """
+    text = str(digest).strip().lower()
+    for algorithm, length in CHECKSUM_LENGTHS.items():
+        if len(text) == length and is_valid_checksum(algorithm, text):
+            return algorithm
+    return None
+
+
 # remote request timeout settings for network operations (connect timeout, read timeout)
 REMOTE_REQUEST_TIMEOUT = (10, 30)
 # define a frozenset of internal repo names that should be ignored during processing.
@@ -131,8 +151,7 @@ def calculate_file_checksum(
     chunk_size: int = FILE_IO_CHUNK_SIZE,
     ) -> str:
     """
-    Used in repo.objects by _verify_file_checksum and repo.objects by
-    _calculate_sha1.
+    Used in repo.objects by _calculate_sha1.
     Compute a file checksum using streaming reads.
 
     Uses hashlib.file_digest when available and retains compatibility
@@ -168,6 +187,68 @@ def calculate_file_checksum(
         return digest.hexdigest()
 
 
+def calculate_file_checksums(path: Path, algorithms,
+                             chunk_size: int = FILE_IO_CHUNK_SIZE) -> dict:
+    """
+    Compute several checksums of a file in one streaming pass.
+
+    Args:
+        path: Path to the file.
+        algorithms: Checksum algorithm names, such as ``("sha1", "sha256")``.
+        chunk_size: Size of chunks to read at a time (default: 1 MB).
+
+    Returns:
+        dict[str, str]: Hexadecimal digest for each requested algorithm.
+
+    Raises:
+        ValueError: If an algorithm is not supported by hashlib.
+    """
+    digests = {name: hashlib.new(name) for name in
+               {str(algorithm).strip().lower() for algorithm in algorithms}}
+    with Path(path).open("rb") as handle:
+        while True:
+            block = handle.read(chunk_size)
+            if not block:
+                break
+            for digest in digests.values():
+                digest.update(block)
+    return {name: digest.hexdigest() for name, digest in digests.items()}
+
+
+# Filesystems that cannot hard-link a file report these errors.
+NO_HARD_LINK_ERRORS = {errno.EPERM, errno.EXDEV, errno.EMLINK, errno.ENOSYS,
+                  errno.ENOTSUP, errno.EOPNOTSUPP}
+
+
+def publish_no_overwrite(source: Path, target: Path) -> None:
+    """
+    Give a finished file its final name, failing if that name exists.
+
+    The file appears under the final name complete or not at all. A hard
+    link refuses an existing target atomically and leaves ``source`` in
+    place for the caller to remove. Filesystems without hard links fall back
+    to a rename after checking the target, which a concurrent writer could
+    still race.
+
+    Args:
+        source: Finished temporary file in the target's directory.
+        target: Final path.
+
+    Raises:
+        FileExistsError: If ``target`` already exists.
+    """
+    try:
+        os.link(source, target)
+    except FileExistsError:
+        raise
+    except OSError as exc:
+        if exc.errno not in NO_HARD_LINK_ERRORS:
+            raise
+        if os.path.lexists(target):
+            raise FileExistsError(errno.EEXIST, "File exists", str(target)) from None
+        os.replace(source, target)
+
+
 @contextmanager
 def use_working_directory(path):
     '''
@@ -189,9 +270,8 @@ def use_working_directory(path):
 @contextmanager
 def replace_file_on_success(path: Path, *, suffix: str = ".tmp", overwrite=True):
     """
-    Used in repo.dothm by write_yaml and write_tsv, remote.download by
-    _download_and_verify_file,
-    and repo.objects by _copy_and_verify_file.
+    Used in repo.dothm by write_yaml and write_tsv, and repo.objects by
+    _copy_and_verify_file and _record_stat.
     Context manager that yields a temporary file path for atomic writes.
     The temporary file is created in the same directory as the target path
     and is replaced with the target path upon successful completion.
@@ -221,7 +301,7 @@ def replace_file_on_success(path: Path, *, suffix: str = ".tmp", overwrite=True)
         if overwrite:
             temp_path.replace(path)
         else:
-            os.link(temp_path, path)
+            publish_no_overwrite(temp_path, path)
     # always clean up the temporary file if an exception occurs or after replacement
     finally:
         temp_path.unlink(missing_ok=True)
@@ -229,7 +309,7 @@ def replace_file_on_success(path: Path, *, suffix: str = ".tmp", overwrite=True)
 
 def load_yaml(source):
     """
-    Used in repo.history by _load_revision_yaml.
+    Used in repo.dothm by load_state.
     Load YAML from text or a readable stream.
     Empty YAML documents are represented consistently as an empty
     dictionary.
@@ -428,6 +508,20 @@ def convert_format_value(value: str, spec: str):
     return value
 
 
+def names_repository_metadata(path) -> bool:
+    """
+    Return whether any segment of a relative path is ``.hm`` or ``.git``.
+
+    Case is ignored, as on macOS and Windows filesystems, so ``data/.Git``
+    counts too. Every check for repository metadata in paths uses this.
+
+    Args:
+        path: Relative path with ``/`` separators.
+    """
+    return any(part.lower() in REPOSITORY_INTERNAL_NAMES
+               for part in str(path).split("/"))
+
+
 def validate_relative_path(value, *, label: str = "path") -> Path:
     """
     Used in repo.config by row_to_path, transport.base by validate_remote_path,
@@ -471,8 +565,8 @@ def validate_relative_path(value, *, label: str = "path") -> Path:
         # invalid path: raise ValueError indicating it must be a safe relative path
         raise ValueError(
             f"{label} must be a safe relative path: {raw_path!r}")
-    # if the path starts with ".hm" or ".git"
-    if (path.parts and path.parts[0].lower() in REPOSITORY_INTERNAL_NAMES):
+    # A .hm or .git folder at any depth would plant repository metadata.
+    if names_repository_metadata(raw_path):
         # raise ValueError to prevent targeting repository metadata
         raise ValueError(
             f"{label} cannot target repository metadata: {raw_path!r}")
@@ -483,9 +577,9 @@ def validate_relative_path(value, *, label: str = "path") -> Path:
 
 def resolve_path_in_root(root, value, *, label: str = "path") -> Path:
     """
-    Used in remote.download by _download_and_verify_file, repo by _resolve_worktree_path
-    and
-    add_worktree, and repo.changes by find_changed_and_missing_files.
+    Used in remote.download by _check_existing_files, repo by
+    _resolve_worktree_path and add_worktree, and repo.changes by
+    find_changed_and_missing_files.
     Resolve a relative path beneath root without following symlinks outside it.
 
     Args:

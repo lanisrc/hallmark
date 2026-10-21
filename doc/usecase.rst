@@ -166,7 +166,8 @@ Files that have already downloaded successfully remain available.
 SSH access and file paths
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The client requires OpenSSH ``ssh`` and ``sftp`` version 9.6 or newer
+The client requires OpenSSH ``ssh`` and ``sftp`` version 8.0 or newer
+(RHEL 8 and later, Ubuntu 20.04 and later, current macOS)
 with connection multiplexing enabled.
 Linux and macOS have integration-test jobs. Windows SSH transport is
 not supported.
@@ -280,9 +281,9 @@ Frank can prepare a catalog directly from the files on the server::
     hm download --all --dry-run
     hm download --all
 
-This creates ``lab/.hm`` with only the matching run files in ``data.tsv``.
-Without a filter or format, the catalog contains all discovered files below
-the supplied URL. Initialization downloads no dataset contents.
+This creates ``lab/.hm`` with the run files in ``data.tsv``; other files below
+the URL are listed as ``file:`` entries in ``config.yml``. Add ``--filter`` to
+catalog only some of them. Initialization downloads no dataset contents.
 The final command displays the transfer plan and asks Frank for confirmation.
 
 Both SSH and SFTP sources use structured SFTP directory enumeration. The server

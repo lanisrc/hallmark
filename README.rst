@@ -18,8 +18,8 @@ observational data calibration pipelines and theory data analyses
 tools, |hallmark|_ is a lightweight package designed to version
 control and manage data products in a complex workflow.
 It provides a common Python API and CLI for local files and remote data
-accessed through HTTP(S), SSH/SFTP, and CyVerse. Additional data services
-can be supported through backend plugins.
+accessed through HTTP(S), WebDAV, S3, SSH/SFTP, and CyVerse. Additional data
+services can be supported through backend plugins.
 By using |hallmark|_ with other packages such as |yukon|_ and
 |banyan|_ in `Project Laniakea <l6a_>`_, researchers can utilize
 computing infrastructures in a global scale to accelerate their
@@ -46,6 +46,8 @@ Features:
 
 Examples of using ``ParaFrame`` with Python API or Command Line Interface (CLI)
 can be found in the Jupyter Notebook tutorials in the ``demo`` folder.
+``demo/demo_private_data.ipynb`` shows several sources, the object store and
+private servers.
 
 ``Installation``
 -----------------
@@ -77,8 +79,10 @@ Private data remotes
 |hallmark|_ can download data products from HTTP(S), SSH, and SFTP servers.
 A data remote specifies where the files are stored, while a Git remote
 is used to share the history of the data index.
-For a private server, |hallmark|_ uses OpenSSH 9.6 or newer with a trusted
+For a private server, |hallmark|_ uses OpenSSH 8.0 or newer with a trusted
 host key and key-based authentication that does not require a prompt.
+Servers that require interactive two-factor authentication (such as Duo on
+some HPC login nodes) are not supported yet.
 
 Create a repository, stage a remote catalog, then commit it::
 
@@ -107,8 +111,10 @@ catalogs with them right away::
 Every nonempty CLI transfer asks for confirmation. For separate Python
 downloads, callers can inspect
 ``repo.plan_download()`` and then execute ``repo.download(plan, approved=True)``.
-Optional authentication profiles remain local and can be selected with
-``add --auth PROFILE`` or ``set-config --remote-auth PROFILE``.
+Optional authentication profiles for SSH, HTTP(S) and S3 remain local and can be
+selected with ``add --auth PROFILE`` or ``set-config --remote-auth PROFILE``.
+Profiles name where each secret comes from (an environment variable, the
+system keyring or a password-manager command); no secret is stored.
 The obsolete ``build`` and remote initialization interfaces have been removed.
 Use ``init``, ``add`` and ``commit`` for new remote catalogs.
 
@@ -118,12 +124,14 @@ server while their data remotes point elsewhere. Git clones preserve the full
 catalog and its history. Clone displays a data download plan and asks for
 confirmation by default; declining keeps the catalog. Use ``hm clone CATALOG
 PATH --no-download`` for catalog only. Filters narrow the download and cannot
-accompany ``--no-download``. Python ``Repo.clone`` downloads without prompting
-unless an ``approve(plan)`` callback is supplied; use ``download=False`` to skip.
+accompany ``--no-download``. Python ``Repo.clone`` downloads only with
+approval, an ``approve(plan)`` callback or ``approved=True``, as
+``Repo.download`` requires; use ``download=False`` to skip.
 Bare destinations require ``--no-download`` / ``download=False``.
 
-The public ``DataBackend`` interface supports generic HTTP/SSH, CyVerse, and
-registered plugins for collaboration-specific APIs.
+The public ``DataBackend`` interface supports generic HTTP/SSH, WebDAV,
+S3-compatible storage (``pip install hallmark[s3]``), CyVerse, and registered
+plugins for collaboration-specific APIs.
 See `Data backends <doc/backends.rst>`_ for configuration and an extension example.
 
 Examples and configuration details are described in
@@ -132,9 +140,10 @@ Examples and configuration details are described in
 Current limits
 --------------
 
-Remote ``add`` supports one dataset root per repository; each filename format
-has its own TSV, and a single format uses ``data.tsv``. Keep remote catalogs
-separate from locally versioned files.
+Remote ``add`` catalogs one or more remote selections (sources), possibly on
+different servers. Each filename format of the catalog has its own TSV, and a
+single format uses ``data.tsv``. Keep remote catalogs separate from locally
+versioned files.
 Local ``add`` selects files by one filename format; ``commit`` stores their
 contents in ``.hm/objects``. Clone copies catalog history and downloads from
 its configured data remote; transfer of a local object store is not implemented.

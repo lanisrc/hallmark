@@ -18,7 +18,7 @@ def metadata_server(monkeypatch):
     """Serve registered metadata and record each requested URL."""
     pages, reads = {}, []
 
-    def read_text(context, path):
+    def read_text(context, path, **_):
         url = context.remote.url.rstrip("/") + "/" + path
         reads.append(url)
         if url not in pages:
@@ -61,7 +61,25 @@ def test_remote_add_does_not_require_filename_inference(tmp_path, metadata_serve
     assert repo.plan_download().file_count == 1
 
 
-def test_empty_filtered_add_is_valid(tmp_path, metadata_server):
+def test_empty_filtered_add_is_an_error_and_keeps_catalog(tmp_path, metadata_server):
+    pages, _ = metadata_server
+    root = "https://example.test/data/"
+    pages[root] = '<h1>Index of data</h1><a href="notes.txt">notes.txt</a>'
+    repo = Repo.init(tmp_path / "clone")
+    before = {name: (repo.dothm.path / name).read_bytes()
+              for name in ("config.yml", "data.tsv", ".git/index")}
+    with pytest.raises(ValueError) as error:
+        repo.add(root, filter="run*.h5")
+    message = str(error.value)
+    assert "No remote files matched" in message
+    assert "run*.h5" in message and root in message
+    assert "previous catalogue kept" in message
+    assert before == {name: (repo.dothm.path / name).read_bytes() for name in before}
+    assert repo.state.data.empty
+
+
+def test_a_fmt_matching_no_file_keeps_files_as_file_entries(tmp_path,
+                                                             metadata_server):
     pages, _ = metadata_server
     root = "https://example.test/data/"
     pages[root] = '<h1>Index of data</h1><a href="notes.txt">notes.txt</a>'
@@ -116,7 +134,7 @@ def test_filtered_git_clone_preserves_history_without_objects(tmp_path, monkeypa
     def fail(*args, **kwargs):
         raise AssertionError("Filtered metadata clone must not transfer data")
 
-    monkeypatch.setattr("hallmark.remote.download._download_and_verify_file", fail)
+    monkeypatch.setattr("hallmark.remote.download._download_into_store", fail)
     plans = []
     repo = Repo.clone(str(source.dothm.path), tmp_path / "clone", filter="run1.h5",
                       download=True, approve=lambda plan: plans.append(plan) or False)
@@ -348,7 +366,7 @@ def test_snapshot_clone_does_not_require_payload_authentication(
 
 
 def test_snapshot_access_failure_never_falls_back_to_git(tmp_path, monkeypatch):
-    def inaccessible(context, path):
+    def inaccessible(context, path, **_):
         raise DownloadError("Metadata server requires authentication")
 
     def fail(*args, **kwargs):
@@ -406,6 +424,34 @@ def test_published_local_catalog_is_rejected(tmp_path, metadata_server, download
     with pytest.raises(CloneError, match="This repository tracks local files"):
         Repo.clone(root, target, download=download)
     assert not target.exists()
+
+
+def test_snapshot_catalogues_larger_than_small_documents_can_be_cloned(
+        tmp_path, monkeypatch):
+    from http_server import LocalServer
+    from hallmark.transport import OperationContext
+
+    original = OperationContext.__init__
+
+    def small_text_limit(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        # A published config.yml stays small; the catalogue grows with files.
+        self.text_limit = 1024
+
+    monkeypatch.setattr(OperationContext, "__init__", small_text_limit)
+    server = LocalServer()
+    server.files.update({
+        "config.yml": (b"data:\n- db: data.tsv\nremote:\n- name: origin\n"
+                       b"  url: https://payload.test/data/\n"),
+        "meta.yml": b"{}\n",
+        "data.tsv": b"path\tsha1\n" + b"".join(
+            f"run/{index:06d}.h5\t{'a' * 40}\n".encode() for index in range(2000)),
+    })
+    try:
+        repo = Repo.clone(server.url, tmp_path / "copy", download=False)
+    finally:
+        server.close()
+    assert len(repo.state.data) == 2000
 
 
 ROOT = "https://example.test/data/"

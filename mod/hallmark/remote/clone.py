@@ -18,12 +18,16 @@ from ..utils import as_list_of_dicts
 from ..repo.config import (
     filename_fields,
     normalize_remotes,
+    remote_name_of,
     validate_tsv_filename,
     row_to_path,
 )
 from ..transport import OperationContext, RemoteSpec
-from ..transport.base import RemoteObjectMissing, validate_remote_path
+from ..transport.base import (
+    RemoteObjectMissing, reject_url_credentials, reject_url_secrets,
+    validate_remote_path)
 from ..repo.worktree import Worktree
+from .sources import normalize_sources
 
 
 def _catalog_filenames(config):
@@ -37,7 +41,9 @@ def _catalog_filenames(config):
             names.add(validate_tsv_filename(entry["db"]))
         if entry.get("file"):
             validate_remote_path(entry["file"])
-    normalize_remotes(config.get("remote"))
+    remotes = normalize_remotes(config.get("remote"))
+    normalize_sources(config.get("sources"),
+                      [remote_name_of(remote) for remote in remotes])
     return sorted(names)
 
 
@@ -104,7 +110,7 @@ def _read_catalog_snapshot(context):
         raise CloneError("Published catalog config.yml must contain a data mapping")
     try:
         meta_text = context.read_text("meta.yml")
-        data_text = context.read_text("data.tsv")
+        data_text = context.read_text("data.tsv", large=True)
     except RemoteObjectMissing as exc:
         raise CloneError(
             "Published Hallmark catalog is missing required metadata") from exc
@@ -118,7 +124,7 @@ def _read_catalog_snapshot(context):
              "data.tsv": data_text}
     for name in _catalog_filenames(config):
         if name not in files:
-            files[name] = context.read_text(name)
+            files[name] = context.read_text(name, large=True)
     _validate_snapshot(files, config)
     return files
 
@@ -170,9 +176,10 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
     """
     Clone an existing Git catalog or published HTTP/SFTP catalog snapshot.
 
-    Existing destinations are rejected before source access. An incomplete
-    destination created by this call is removed on failure. Local-file catalogs
-    without a data server are rejected before destination creation. Dataset discovery
+    Source URLs with credentials and existing destinations are rejected
+    before source access. An incomplete destination created by this call is
+    removed on failure. Local-file catalogs without a data server are rejected
+    before destination creation. Dataset discovery
     belongs to ``Repo.add(URL)``.
 
     Args:
@@ -191,6 +198,12 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
         ValueError: If source options are invalid.
         DownloadError: If remote metadata cannot be read or validated.
     """
+    # Git records the source URL in .hm/.git/config, so it must hold no secret.
+    # Local paths may contain "?" or "#"; only URLs carry queries and fragments.
+    if "://" in str(url):
+        reject_url_secrets(str(url))
+    else:
+        reject_url_credentials(str(url))
     destination = Path(path).expanduser().absolute()
     if destination.exists() or destination.is_symlink():
         raise DestinationExistsError(

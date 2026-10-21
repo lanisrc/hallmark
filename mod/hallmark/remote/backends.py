@@ -23,9 +23,12 @@ from ..transport.base import (
 from ..transport.cyverse import CyVerseBackend
 from ..transport.http import HttpBackend
 from ..transport.ssh import SshBackend
+from ..transport.s3 import S3Backend
+from ..transport.webdav import WebDavBackend
 
 
-_registered = {"http": HttpBackend, "ssh": SshBackend, "cyverse": CyVerseBackend}
+_registered = {"http": HttpBackend, "ssh": SshBackend, "cyverse": CyVerseBackend,
+               "webdav": WebDavBackend, "s3": S3Backend}
 _loaded = {}
 _lock = RLock()
 
@@ -97,7 +100,8 @@ def get_backend(name):
 
 
 __all__ = [
-    "DataBackend", "HttpBackend", "SshBackend", "CyVerseBackend",
+    "DataBackend", "HttpBackend", "SshBackend", "CyVerseBackend", "WebDavBackend",
+    "S3Backend",
     "register_backend", "RemoteEntry", "RemoteSpec", "OperationContext",
     "CapabilityError", "DownloadError", "RemoteConfigurationError",
     "RemoteObjectMissing", "TransferCancelled",

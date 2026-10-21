@@ -1,3 +1,4 @@
+import shlex
 from pathlib import Path
 from shutil import rmtree
 from tempfile import TemporaryDirectory
@@ -6,7 +7,7 @@ from git.exc import GitCommandError
 
 from ..error import CheckoutError, DestinationExistsError, DothmError
 from ..utils import resolve_path_in_root
-from ..remote.add import is_remote_catalog
+from .state import is_remote_catalog
 from .config import branch_filename_format, row_to_path, single_data_format
 from .manifest import iter_manifest_entries
 from .history import (
@@ -59,39 +60,58 @@ def resolve_checkout_target(repo, target):
     raise CheckoutError(f'no branch or commit named "{target}"')
 
 
+def _refuse_pending_state_changes(repo):
+    """
+    Used by checkout for remote catalogues.
+    Refuse to switch while .hm holds changes, saying how to resolve them.
+
+    Unstaging keeps .hm files changed on disk, as git keeps the working copy,
+    so the message names the git command that discards them.
+    """
+    staged = sorted({diff.a_path or diff.b_path
+                     for diff in repo.dothm.index.diff("HEAD")})
+    if staged:
+        raise CheckoutError(
+            "Commit or unstage hallmark state changes before checkout: "
+            + ", ".join(staged)
+            + " (hm commit -m MESSAGE, or hm restore --staged .)")
+    unstaged = sorted({diff.a_path or diff.b_path
+                       for diff in repo.dothm.index.diff(None)})
+    if unstaged:
+        raise CheckoutError(
+            "Unstaged changes in .hm block checkout: " + ", ".join(unstaged)
+            + ". Discard them with: git -C " + shlex.quote(str(repo.dothm.path))
+            + " restore " + " ".join(shlex.quote(path) for path in unstaged))
+
+
 def checkout(repo, target_branch):
     # Validate and normalize the target branch name
     target_branch = repo._validate_branch_name(target_branch)
 
     if repo.worktree is None:
         raise CheckoutError("cannot checkout without a worktree")
-    target_state = load_branch_state(repo, target_branch)
+    # Resolve the target once and load the state of exactly that revision.
+    target_kind, resolved_target = resolve_checkout_target(repo, target_branch)
+    target_state = _load_revision_state(repo, resolved_target)
     if is_remote_catalog(repo.state) or is_remote_catalog(target_state):
         if any(not state.data.empty and not is_remote_catalog(state)
                for state in (repo.state, target_state)):
             raise CheckoutError(
                 "Cannot switch between local files and remote catalogs")
-        if repo.dothm.index.diff("HEAD") or repo.dothm.index.diff(None):
-            raise CheckoutError("Commit hallmark state changes before checkout")
-        catalog_kind, catalog_target = resolve_checkout_target(repo, target_branch)
-        if catalog_kind == "commit":
-            repo.dothm.git.checkout("--detach", catalog_target)
+        _refuse_pending_state_changes(repo)
+        if target_kind == "commit":
+            repo.dothm.git.checkout("--detach", resolved_target)
         else:
             repo.dothm.git.checkout(target_branch)
         repo.state = repo.dothm.load_state()
         return True
     ensure_clean_tracked_files(repo)
 
-    target_kind, resolved_target = resolve_checkout_target(repo, target_branch)
     has_local = target_kind == "branch"
     has_remote = target_kind == "remote"
     remote_revision = resolved_target if has_remote else None
 
     current_tracked = tracked_paths(repo)
-    if target_kind == "commit":
-        target_state = _load_revision_state(repo, resolved_target)
-    else:
-        target_state = load_branch_state(repo, target_branch)
     # Get the data format string for the target branch configuration
     target_fmt = single_data_format(target_state.config)
     if target_fmt is None:

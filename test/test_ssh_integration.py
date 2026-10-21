@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from urllib.parse import quote
 
@@ -21,7 +22,7 @@ from hallmark.cli import hallmark
 from hallmark.transport import OperationContext, RemoteSpec
 from conftest import download_selection
 from hallmark.transport.base import (
-    DownloadError, RemoteObjectMissing, TransferCancelled,
+    CapabilityError, DownloadError, RemoteObjectMissing, TransferCancelled,
 )
 from hallmark.transport.ssh import SshBackend
 
@@ -60,6 +61,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin prohibit-password
 MaxSessions 4
+LogLevel VERBOSE
 Subsystem sftp internal-sftp
 """)
     mode = getattr(request, "param", None)
@@ -125,6 +127,10 @@ Host *
         daemon.terminate()
         daemon.wait(timeout=5)
         log.close()
+        # The client hides its errors, so a failed test shows the server's side.
+        report = getattr(request.node, "report_call", None)
+        if report is not None and report.failed:
+            sys.stderr.write((tmp_path / "sshd.log").read_text(errors="replace"))
 
 
 @pytest.mark.parametrize("scheme", ["ssh", "sftp"])
@@ -393,6 +399,8 @@ def test_ssh_listing_omits_symlinks_and_rejects_controls(ssh_server, tmp_path):
             list(context.transport.iter_entries())
 
 
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="root reads files whatever their permissions")
 def test_permission_denied_preserves_existing_file(ssh_server, tmp_path):
     source = ssh_server["root"] / "private"
     source.write_bytes(b"unreadable")
@@ -437,7 +445,8 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
             repo.worktree,
             [(Path("large"), None)])
         try:
-            _wait_for_partial_file(repo.worktree, "*.part", len(payload), task)
+            # Partial transfers live in the cache, never in the worktree.
+            _wait_for_partial_file(repo.objects.tmp, ".large.*", len(payload), task)
             destination.write_bytes(b"original")
             assert len(transports) == 1
             transports[0]._master.terminate()
@@ -447,7 +456,8 @@ def test_disconnected_master_cleans_partial_transfer(ssh_server, tmp_path, monke
                 transport.context.cancel()
     assert result["failed"] == 1
     assert destination.read_bytes() == b"original"
-    assert not list(Path(repo.worktree).glob("*.part"))
+    assert list(repo.objects.tmp.iterdir()) == []
+    assert sorted(path.name for path in repo.worktree.iterdir()) == [".hm", "large"]
     assert not transports[0]._processes
 
 
@@ -487,3 +497,28 @@ def test_add_records_profile_reference(ssh_server, tmp_path, monkeypatch):
     repo = Repo.init(tmp_path / "catalog")
     repo.add(ssh_server["url"], auth="lab")
     assert Repo(repo.worktree).state.config["remote"][0]["auth"] == "lab"
+
+
+def test_server_hashing_over_a_real_shell(ssh_server, tmp_path):
+    root = ssh_server["root"]
+    (root / "a b#.dat").write_bytes(b"science")
+    (root / "nested").mkdir()
+    (root / "nested/$(id).dat").write_bytes(b"more")
+    repo = Repo.init(tmp_path / "repo")
+    repo.add(ssh_server["url"], server_checksum="sha256")
+    rows = repo.state.data.set_index("path")
+    assert rows.loc["a b#.dat", "checksum"] == hashlib.sha256(b"science").hexdigest()
+    assert rows.loc["nested/$(id).dat", "checksum"] == \
+        hashlib.sha256(b"more").hexdigest()
+    assert set(rows["checksum_source"]) == {"server"}
+    result = repo.download(repo.plan_download(all_files=True), approved=True)
+    assert (result["succeeded"], result["failed"]) == (2, 0)
+
+
+@pytest.mark.parametrize("ssh_server", ["sftp-only"], indirect=True)
+def test_server_hashing_needs_a_login_shell(ssh_server, tmp_path):
+    (ssh_server["root"] / "item").write_bytes(b"data")
+    repo = Repo.init(tmp_path / "repo")
+    with pytest.raises(CapabilityError, match="SFTP-only"):
+        repo.add(ssh_server["url"], server_checksum="sha256")
+    assert repo.state.data.empty

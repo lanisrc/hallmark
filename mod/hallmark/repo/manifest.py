@@ -8,6 +8,8 @@ from collections.abc import Iterator
 import pandas as pd
 
 from ..utils import string_or_none
+from .catalog import ENTRY, catalog_rows
+from .state import is_remote_catalog
 from .config import (
     filename_fields,
     row_to_path,
@@ -105,13 +107,14 @@ def file_versions_by_path(state, *, fmt: str | None = None) -> dict[str, str]:
         dict[str, str]: Dictionary mapping relative file paths to their
         corresponding SHA-1 checksums.
     """
-    if "path" in state.data.columns and "sha1" not in state.data.columns:
+    if is_remote_catalog(state):
         from ..transport.base import validate_remote_path
 
+        # Every catalogued file: rows of each TSV and file: entries.
         return {validate_remote_path(record["path"]).as_posix():
                 json.dumps({key: str(value) for key, value in record.items()
-                            if str(value)}, sort_keys=True)
-                for record in state.data.to_dict(orient="records")}
+                            if key != ENTRY and str(value)}, sort_keys=True)
+                for record in catalog_rows(state)}
     # call iter_manifest_entries to get an iterator of (path, checksum) tuples
     return {path.as_posix(): checksum
             for path, checksum in iter_manifest_entries(state, fmt=fmt)}

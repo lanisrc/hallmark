@@ -1,22 +1,77 @@
 """
-Utilities for storing and restoring content-addressed objects.
+Keep file contents in ``.hm/objects``, named by their SHA-1.
 
-This module defines the ``Objects`` class, which manages the Hallmark
-object store. Files are stored using their SHA-1 checksum and can later
-be restored to a specified location.
+One store serves both kinds of catalogue, as git's object database does.
+``hm commit`` copies local files in, and ``checkout`` copies them back out
+as writable files. Downloads arrive through a temporary
+``objects/tmp/.NAME.RANDOM`` file that only gets its final name once it is
+complete and verified, as rsync does; they are then hard-linked into the
+worktree, read-only, so a file appears there whole or not at all and the
+same bytes are never stored twice.
+
+Every object is read-only. Some objects are the only copy of a committed
+local file, so nothing in the store may be deleted by hand.
+
+A download stays hard-linked to its object, so writing to it in place, after
+``chmod`` or as root, would change the object too. Each object therefore has
+a record of its size and modification time in ``objects/stat/``, as git's
+index and git-annex's inode cache keep for the files they track. A link is
+only trusted while its object still matches that record.
 """
 
 import hashlib
+import os
+import secrets
 import shutil
+import stat
+import tempfile
+import time
 from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Union
 
 from ..utils import (
     FILE_IO_CHUNK_SIZE,
+    NO_HARD_LINK_ERRORS,
     replace_file_on_success,
+    publish_no_overwrite,
     calculate_file_checksum,
     is_valid_checksum)
+
+# Leftovers older than this come from downloads that stopped; an active
+# transfer keeps updating its temporary file's modification time.
+STALE_TEMP_SECONDS = 24 * 3600
+# Windows cannot delete a read-only file or detect in-place edits through a
+# hard link, so downloads there are copied instead.
+LINK_INTO_WORKTREE = os.name != "nt"
+_WRITE_BITS = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+
+
+def _make_read_only(path: Path) -> None:
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    os.chmod(path, mode & ~_WRITE_BITS)
+
+
+def _make_writable(path: Path) -> None:
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    os.chmod(path, mode | stat.S_IWUSR)
+
+
+def _link_over(source: Path, destination: Path) -> None:
+    """Hard-link ``source`` to ``destination``, replacing it atomically."""
+    while True:
+        temp = destination.with_name(f".{destination.name}.{secrets.token_hex(4)}")
+        try:
+            os.link(source, temp)
+            break
+        except FileExistsError:
+            continue
+    try:
+        os.replace(temp, destination)
+    finally:
+        # rename() leaves both names when they already link the same file.
+        temp.unlink(missing_ok=True)
 
 
 class Objects:
@@ -27,15 +82,18 @@ class Objects:
     their SHA-1 checksum, allowing them to be efficiently retrieved and
     restored.
     """
-    def __init__(self, path: Union[Path, str]):
+    def __init__(self, path: Union[Path, str], name: str = "objects"):
         """
         Initialize the object store.
 
         Args:
-            path (Path or str): Path to the Hallmark repository. The object
-                store is located in the ``objects`` subdirectory.
+            path (Path or str): Main ``.hm`` directory; linked worktrees pass
+                the same directory so they share one store.
+            name (str): Store directory beneath ``path``.
         """
-        self.root = Path(path) / "objects"
+        self.root = Path(path) / name
+        self.tmp = self.root / "tmp"
+        self.stats = self.root / "stat"
 
     @staticmethod
     def _copy_and_verify_file(
@@ -44,6 +102,7 @@ class Objects:
         *,
         expected_sha1: str,
         chunk_size: int = FILE_IO_CHUNK_SIZE,
+        overwrite: bool = True,
         ) -> Path:
         """
         Used by store and restore.
@@ -54,6 +113,8 @@ class Objects:
             dest (Path): Destination file path.
             expected_sha1 (str): Expected SHA-1 checksum of the source file.
             chunk_size (int): Size of chunks to read at a time.
+            overwrite (bool): Replace an existing destination; otherwise
+                fail with FileExistsError.
 
         Returns:
             Path: Path to the copied file.
@@ -72,7 +133,7 @@ class Objects:
         digest = hashlib.sha1()
 
         # Use replace_file_on_success to create a temporary file for the copy operation
-        with replace_file_on_success(dest) as temp_path:
+        with replace_file_on_success(dest, overwrite=overwrite) as temp_path:
             # read the source file in binary mode and write to the temporary file
             with src.open("rb") as source, temp_path.open("wb") as target:
                 while True:
@@ -178,6 +239,22 @@ class Objects:
         """
         return self._path_for_checksum(sha1)
 
+    def checksums(self) -> list[str]:
+        """
+        Return the SHA-1 of every stored object, sorted.
+
+        Stat records and unfinished downloads are not objects and are left out.
+        """
+        if not self.root.is_dir():
+            return []
+        found = []
+        for folder in self.root.iterdir():
+            if len(folder.name) != 2 or not folder.is_dir():
+                continue
+            found.extend(folder.name + entry.name for entry in folder.iterdir()
+                         if is_valid_checksum("sha1", folder.name + entry.name))
+        return sorted(found)
+
     def missing_checksums(self, checksums: Iterable[str]) -> list[str]:
         """
         Return a sorted list of checksums that are not present in the object store.
@@ -195,9 +272,99 @@ class Objects:
             for checksum in unique_checksums
             if not self.contains(checksum))
 
+    def _keep_or_replace(self, target: Path, sha1: str) -> bool:
+        """
+        Return whether an existing object still holds the content it is named after.
+
+        An object whose content no longer matches, because a linked file was
+        edited in place, is removed so the caller can store the content again.
+        """
+        if self._calculate_sha1(target) == self._validate_sha1(sha1):
+            return True
+        target.unlink()
+        return False
+
+    def _stat_path(self, sha1: str) -> Path:
+        normalized = self._validate_sha1(sha1)
+        return self.stats / normalized[:2] / normalized[2:]
+
+    def _record_stat(self, sha1: str) -> None:
+        """Record the size and modification time of a verified object."""
+        info = self.object_path(sha1).stat()
+        record = self._stat_path(sha1)
+        record.parent.mkdir(parents=True, exist_ok=True)
+        with replace_file_on_success(record) as temp:
+            temp.write_text(f"{info.st_size} {info.st_mtime_ns}\n", encoding="ascii")
+
+    def _recorded_stat(self, sha1: str) -> Optional[tuple]:
+        try:
+            size, mtime_ns = self._stat_path(sha1).read_text(encoding="ascii").split()
+            return int(size), int(mtime_ns)
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def changed(self, sha1: str) -> bool:
+        """
+        Return whether an object no longer matches its recorded stat.
+
+        Nothing is hashed or removed, so this suits read-only reports. An
+        object without a record, or a missing object, is not reported.
+
+        Args:
+            sha1 (str): Object to check.
+        """
+        recorded = self._recorded_stat(sha1)
+        try:
+            info = self.object_path(sha1).stat()
+        except FileNotFoundError:
+            return False
+        return recorded is not None and recorded != (info.st_size, info.st_mtime_ns)
+
+    def verify(self, sha1: str) -> bool:
+        """
+        Return whether an object can be trusted to hold its named content.
+
+        An object matching its recorded stat is trusted without hashing. One
+        that differs is hashed: if the bytes still match, as after ``touch``,
+        the record is renewed; otherwise the object was changed in place and
+        is discarded, so it is downloaded again rather than linked anywhere
+        else. An object stored before records existed is trusted and recorded.
+
+        Args:
+            sha1 (str): Object to check.
+
+        Returns:
+            bool: True if the object exists and holds its content.
+        """
+        path = self.object_path(sha1)
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            return False
+        recorded = self._recorded_stat(sha1)
+        if recorded == (info.st_size, info.st_mtime_ns):
+            return True
+        if recorded is not None and self._calculate_sha1(path) != sha1.lower():
+            self.discard(sha1)
+            return False
+        self._record_stat(sha1)
+        return True
+
+    def discard(self, sha1: str) -> None:
+        """
+        Remove an object and its record from the store.
+
+        Worktree files hard-linked to it keep their bytes.
+
+        Args:
+            sha1 (str): Object to remove.
+        """
+        self.object_path(sha1).unlink(missing_ok=True)
+        self._stat_path(sha1).unlink(missing_ok=True)
+
     def store(self, src: Path, sha1: str, *, actual_sha1: Optional[str] = None) -> Path:
         """
-        Store a file in the object store using its SHA-1 checksum.
+        Store a copy of a file in the object store using its SHA-1 checksum.
 
         Args:
             src (Path): Path to the source file to store.
@@ -206,7 +373,7 @@ class Objects:
                 If provided, it will be used to verify the integrity of the source file.
 
         Returns:
-            Path: Path to the stored file.
+            Path: Path to the stored, read-only object.
 
         Raises:
             ValueError: If the actual SHA-1 checksum of the source file does not match
@@ -229,16 +396,15 @@ class Objects:
                 f'File "{src}" changed after it was added: '
                 f"expected SHA-1 {expected_sha1}, got {actual_sha1}. "
                 "Run hm add again before committing.")
-        # if the file already exists in the object store, return its path
-        if stored.is_file():
-            return stored
-
-        # return the path to the stored file after copying it atomically
-        return self._copy_and_verify_file(src, stored, expected_sha1=expected_sha1)
+        if not (stored.is_file() and self._keep_or_replace(stored, expected_sha1)):
+            self._copy_and_verify_file(src, stored, expected_sha1=expected_sha1)
+            _make_read_only(stored)
+        self._record_stat(expected_sha1)
+        return stored
 
     def restore(self, sha1: str, dest: Path) -> Path:
         """
-        Restore a file from the object store to a specified destination.
+        Restore a writable copy of an object to a specified destination.
         Args:
             sha1 (str): SHA-1 checksum of the object to restore.
             dest (Path): Destination path for the restored file.
@@ -256,4 +422,133 @@ class Objects:
             raise FileNotFoundError(
                 f"object {sha1} not found in objects store")
         # otherwise, copy the stored file to the destination atomically
-        return self._copy_and_verify_file(stored, dest, expected_sha1=sha1)
+        restored = self._copy_and_verify_file(stored, dest, expected_sha1=sha1)
+        # Objects are read-only, but local files stay editable in the worktree.
+        _make_writable(restored)
+        return restored
+
+    @contextmanager
+    def temp_file(self, name: str):
+        """
+        Yield an empty temporary file named ``.NAME.RANDOM`` in the store.
+
+        The file is removed on exit unless it was published.
+
+        Args:
+            name (str): Base name of the file being downloaded.
+        """
+        self.tmp.mkdir(parents=True, exist_ok=True)
+        descriptor, temp = tempfile.mkstemp(prefix=f".{name}.", dir=self.tmp)
+        os.close(descriptor)
+        try:
+            yield Path(temp)
+        finally:
+            Path(temp).unlink(missing_ok=True)
+
+    def publish(self, temp: Path, sha1: str) -> Path:
+        """
+        Store a verified temporary file as the object for its SHA-1.
+
+        An existing object with the same content is kept, so files already
+        linked to it stay linked. An object whose content no longer matches,
+        because a linked file was edited in place, is replaced.
+
+        Args:
+            temp (Path): Complete temporary file whose SHA-1 is ``sha1``.
+            sha1 (str): SHA-1 of the file's content.
+
+        Returns:
+            Path: The object's path.
+        """
+        target = self.object_path(sha1)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _make_read_only(temp)
+        try:
+            publish_no_overwrite(temp, target)
+        except FileExistsError:
+            if not self._keep_or_replace(target, sha1):
+                os.replace(temp, target)
+        self._record_stat(sha1)
+        return target
+
+    def is_linked(self, sha1: str, path: Path) -> bool:
+        """
+        Return whether ``path`` is a hard link to the object for ``sha1``.
+
+        Args:
+            sha1 (str): Object to compare with.
+            path (Path): File in the worktree; symbolic links never match.
+        """
+        try:
+            target = self.object_path(sha1).stat()
+            found = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        return (stat.S_ISREG(found.st_mode)
+                and (found.st_dev, found.st_ino) == (target.st_dev, target.st_ino))
+
+    def materialize(self, sha1: str, destination: Path, *,
+                    replace: bool = False) -> str:
+        """
+        Place the object for ``sha1`` at a destination as a download.
+
+        The object is hard-linked, read-only, where possible. Where the
+        destination is on another filesystem, or links are unavailable, a
+        verified writable copy is made instead. An existing destination is
+        only replaced when asked, and then atomically, so it is never missing.
+
+        Args:
+            sha1 (str): Object to place.
+            destination (Path): File path; its folder must exist.
+            replace (bool): Replace an existing destination.
+
+        Returns:
+            str: ``"linked"`` or ``"copied"``.
+
+        Raises:
+            FileExistsError: If ``destination`` exists and ``replace`` is False.
+            FileNotFoundError: If the object is not stored.
+        """
+        source = self.object_path(sha1)
+        if LINK_INTO_WORKTREE:
+            try:
+                if replace:
+                    _link_over(source, Path(destination))
+                else:
+                    os.link(source, destination)
+                return "linked"
+            except FileExistsError:
+                raise
+            except OSError as exc:
+                if exc.errno not in NO_HARD_LINK_ERRORS:
+                    raise
+        if not source.is_file():
+            raise FileNotFoundError(f"object {sha1} not found in the object store")
+        self._copy_and_verify_file(source, destination, expected_sha1=sha1,
+                                   overwrite=replace)
+        _make_writable(destination)
+        return "copied"
+
+    def cleanup_stale_temps(self, max_age: float = STALE_TEMP_SECONDS) -> int:
+        """
+        Remove temporary files left by downloads that stopped long ago.
+
+        Args:
+            max_age (float): Minimum age in seconds since the last write.
+
+        Returns:
+            int: Number of files removed.
+        """
+        if not self.tmp.is_dir():
+            return 0
+        cutoff = time.time() - max_age
+        removed = 0
+        for entry in os.scandir(self.tmp):
+            try:
+                if (entry.is_file(follow_symlinks=False)
+                        and entry.stat(follow_symlinks=False).st_mtime < cutoff):
+                    os.unlink(entry.path)
+                    removed += 1
+            except FileNotFoundError:
+                continue
+        return removed

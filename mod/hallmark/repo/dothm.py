@@ -16,14 +16,23 @@
 from __future__ import annotations
 
 from configparser import NoOptionError, NoSectionError
+from contextlib import contextmanager
 from functools import cached_property
 from pathlib import Path
 from typing import Optional, Union
 from io import BytesIO
 import json
+import os
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 
 from git import Repo
 from git.exc import GitCommandError
+from shutil import rmtree
 from tempfile import TemporaryFile
 
 import pandas as pd
@@ -33,9 +42,10 @@ from ..error import CloneError, DothmError
 from ..utils import (replace_file_on_success,
                      load_yaml_file,
                      validate_path_name,
-                     resolve_path_in_root,
+                     validate_relative_path,
                      load_yaml)
-from .state import State
+from .catalog import file_entries, table_names as _table_names
+from .state import State, normalize_rows
 from .config import row_to_path, single_data_format
 
 
@@ -90,6 +100,19 @@ def write_yaml(data, handle) -> None:
         width=float("inf"))
 
 
+def _read_tsv_blob(blob, empty: pd.DataFrame) -> pd.DataFrame:
+    """Read a staged or committed TSV; an empty file gives ``empty``."""
+    content = blob.data_stream.read()
+    if not content.strip():
+        return empty
+    return pd.read_csv(BytesIO(content), sep="\t", dtype=str, keep_default_na=False)
+
+
+def data_tsv_text(data: pd.DataFrame) -> str:
+    """Return catalogue rows as ``data.tsv`` text: normalized, sorted, LF endings."""
+    return normalize_rows(data).to_csv(sep="\t", index=False, lineterminator="\n")
+
+
 class Dothm(Repo):
     """Local ``.hm`` storage backend.
 
@@ -118,33 +141,6 @@ class Dothm(Repo):
     @cached_property
     def path(self) -> Path:
         return Path(self.working_tree_dir)
-
-    def stage_file_version(self, record: dict) -> None:
-        """
-        Stage a version of a file in the repository.
-
-        Args:
-            record (dict): A dictionary containing the file version information.
-        """
-        # Get the relative path of the file within the repository
-        relative = Path(record["path"])
-        # create the path for storing the versioned file within the "versions" directory
-        entry_path = Path("versions") / relative
-        # resolve the full path of the versioned file within the repository's root
-        path = resolve_path_in_root(self.path, entry_path, label="version path")
-        # ensure the parent directory exists before writing the file
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        # write the file content to a temporary file and replace the original on success
-        with replace_file_on_success(path) as temp_path:
-            # write the JSON representation of the record to the temporary file
-            temp_path.write_text(
-                json.dumps(
-                    {**record, "path": relative.as_posix()},
-                    sort_keys=True,
-                    default=str), encoding="utf-8")
-        # add the versioned file to the git index
-        self.index.add([entry_path.as_posix()])
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -309,12 +305,16 @@ remote:
             state.data = data.reindex(columns=columns).fillna("").astype(str)
 
         elif "data.tsv" in blobs:
-            content = blobs["data.tsv"].data_stream.read()
-            if content.strip():
-                state.data = pd.read_csv(
-                    BytesIO(content), sep="\t", dtype=str, keep_default_na=False
-                )
+            state.data = _read_tsv_blob(blobs["data.tsv"], state.data)
 
+        try:
+            names = _table_names(state.config)[1:]
+        except ValueError:
+            # Commands that read a malformed config.yml report it themselves.
+            names = []
+        for name in names:
+            state.tables[name] = (_read_tsv_blob(blobs[name], pd.DataFrame())
+                                  if name in blobs else pd.DataFrame())
         return state
 
     def stage_text(self, path: str, text: str) -> None:
@@ -332,186 +332,218 @@ remote:
         self.git.update_index("--add", "--cacheinfo", "100644", sha, path)
 
 
-    def restore_index(self, paths: list[str]) -> None:
+    @contextmanager
+    def state_lock(self):
         """
-        Restore the Git index for the specified paths.
+        Hold an advisory lock while the state is re-read, changed and saved.
+
+        Commands that run for minutes, such as downloads and scans, re-read
+        the state under this lock before saving, so a change another command
+        saved in the meantime is kept rather than overwritten.
+        """
+        with open(Path(self.git_dir) / "hallmark.lock", "a+b") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            else:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                else:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+    def _legacy_record_paths(self) -> list[str]:
+        """Return the index's per-row ``versions/`` records from older layouts."""
+        return [path for path, stage in self.index.entries if stage == 0
+                and (path == "versions.yml" or path.startswith("versions/"))]
+
+    def _remove_from_index(self, paths) -> None:
+        """Remove paths from the index in one Git process, however many there are."""
+        with TemporaryFile() as names:
+            names.write(b"".join(os.fsencode(str(path)) + b"\0" for path in paths))
+            names.seek(0)
+            self.git.update_index("--force-remove", "-z", "--stdin", istream=names)
+
+    def _drop_legacy_records(self) -> None:
+        """
+        Stop tracking the per-row ``versions/`` records older commits keep.
+
+        data.tsv is the catalogue's one record. Older commits stay readable,
+        because ``load_state`` still reads their records.
+        """
+        legacy = self._legacy_record_paths()
+        if legacy:
+            self._remove_from_index(legacy)
+        rmtree(self.path / "versions", ignore_errors=True)
+        (self.path / "versions.yml").unlink(missing_ok=True)
+
+    def _reset_to_head(self, head, paths) -> None:
+        """Reset index entries to HEAD, removing those HEAD does not have."""
+        if head is None:
+            self._remove_from_index(paths)
+        else:
+            self.index.reset(head, paths=sorted(paths), working_tree=False)
+
+    def restore_index(self, files=(), rows=()) -> None:
+        """
+        Unstage paths, leaving every file in ``.hm`` as it is on disk.
 
         Args:
-            paths (list[str]): List of file paths to restore.
+            files (Sequence[str]): Paths inside ``.hm`` such as ``config.yml``,
+                or ``"."`` to unstage everything.
+            rows (Sequence[str]): Catalogue paths whose rows return to HEAD;
+                a folder selects every row beneath it.
 
         Raises:
-            ValueError: If no paths are provided or if a specified path does not exist
-              in the index or HEAD.
+            ValueError: If nothing is given, or a path matches nothing staged
+                or committed.
         """
-        if not paths:
+        if not files and not rows:
             raise ValueError("Usage: hm restore --staged <path> [<path> ...]")
-
-        index = self.index
         head = self.head.commit if self.head.is_valid() else None
-        head_paths = {
-            blob.path for blob in head.tree.traverse() if blob.type == "blob"
-        } if head is not None else set()
-        index_paths = {path for path, stage in index.entries if stage == 0}
-
-        if "." in paths:
-            if head is None:
-                index.entries.clear()
-                index.write()
-            else:
-                index.reset(head, working_tree=False)
-            return
-
-        old_head = {}
-        old_index = {}
-        for revision, known, records in (
-            ("HEAD", head_paths, old_head),
-            (None, index_paths, old_index),
-        ):
-            if "versions.yml" in known or (revision and head is None):
-                continue
-            state = self.load_state(revision, staged=True)
-            fmt = single_data_format(state.config)
-            for record in state.data.fillna("").to_dict(orient="records"):
-                record["path"] = row_to_path(record, fmt).as_posix()
-                records[f"versions/{record['path']}"] = record
-
-        known = head_paths | index_paths | old_head.keys() | old_index.keys()
-        selected = set()
-        for path in paths:
-            matches = {
-                name for name in known
-                if name == path or name.startswith(path + "/")
-            }
-            if not matches:
-                label = (
-                    path.removeprefix("versions/")
-                    if path.startswith("versions/") else f".hm/{path}"
-                )
-                raise ValueError(
-                    f"No staged or committed path matches {label!r}"
-                )
-            selected.update(matches)
-
-        versions_selected = any(
-            path.startswith("versions/") for path in selected
-        )
-        if versions_selected and "versions.yml" in head_paths:
-            changed = {
-                diff.a_path or diff.b_path for diff in index.diff(head)
-            }
-            versions_selected = any(
-                path.startswith("versions/") for path in selected & changed
-            )
-
-        original = index.entries.copy()
+        original = self.index.entries.copy()
         try:
-            if versions_selected and "versions.yml" not in index_paths:
-                columns = list(self.load_state(staged=True).data.columns)
-                for path, record in old_index.items():
-                    self.stage_text(
-                        path, json.dumps(record, sort_keys=True, default=str)
-                    )
-                self.stage_text(
-                    "versions.yml", yaml.safe_dump({"columns": columns})
-                )
-
-            index = self.index
-            if head is None:
-                for path in selected:
-                    index.entries.pop((path, 0), None)
-                index.write()
-            else:
-                index.reset(
-                    head, paths=sorted(selected), working_tree=False
-                )
-
-            if versions_selected:
-                for path in selected & old_head.keys():
-                    self.stage_text(
-                        path,
-                        json.dumps(
-                            old_head[path], sort_keys=True, default=str
-                        ),
-                    )
-
-                state = self.load_state(staged=True)
-                if "versions.yml" in head_paths:
-                    same_versions = not any(
-                        (diff.a_path or diff.b_path).startswith("versions/")
-                        for diff in self.index.diff(head)
-                    )
+            if "." in files:
+                if head is None:
+                    # Each access to self.index reads a new index object.
+                    index = self.index
+                    index.entries.clear()
+                    index.write()
                 else:
-                    records = {
-                        f"versions/{record['path']}": record
-                        for record in state.data.to_dict(orient="records")
-                    }
-                    same_versions = records == old_head
-
-                if same_versions and "data.tsv" in head_paths:
-                    reset_paths = ["data.tsv", "versions.yml"]
-                    if "versions.yml" not in head_paths:
-                        reset_paths.extend(
-                            path for path, stage in self.index.entries
-                            if stage == 0 and path.startswith("versions/")
-                        )
-                    self.index.reset(
-                        head, paths=reset_paths, working_tree=False
-                    )
-                else:
-                    self.stage_text(
-                        "data.tsv",
-                        state.data.to_csv(
-                            sep="\t", index=False, lineterminator="\n"
-                        ),
-                    )
+                    self.index.reset(head, working_tree=False)
+                return
+            head_paths = ({blob.path for blob in head.tree.traverse()
+                           if blob.type == "blob"} if head is not None else set())
+            index_paths = {path for path, stage in self.index.entries if stage == 0}
+            for path in files:
+                if path not in head_paths | index_paths:
+                    raise ValueError(
+                        f"No staged or committed path matches '.hm/{path}'")
+            if files:
+                self._reset_to_head(head, files)
+            if rows:
+                self._restore_rows(head, head_paths, rows)
         except Exception:
             index = self.index
             index.entries = original
             index.write()
             raise
 
+    def _restore_rows(self, head, head_paths, rows) -> None:
+        """Return the selected catalogue rows of every TSV to HEAD and stage them."""
+        staged = self.load_state(staged=True)
+        committed = self.load_state("HEAD") if head is not None else State()
+
+        def under(path):
+            return [row for row in rows if path == row or path.startswith(row + "/")]
+
+        def frame(state, name):
+            if name == "data.tsv":
+                return state.data
+            return state.tables.get(name, pd.DataFrame())
+
+        names = list(dict.fromkeys([
+            "data.tsv", *staged.tables, *committed.tables]))
+        plans, matched = [], set()
+        for name in names:
+            staged_rows, committed_rows = frame(staged, name), frame(committed, name)
+            staged_paths = self._row_paths(staged, staged_rows)
+            committed_paths = self._row_paths(committed, committed_rows)
+            matched |= {row for path in staged_paths + committed_paths
+                        for row in under(path)}
+            plans.append((name, staged_rows, committed_rows,
+                          [not under(path) for path in staged_paths],
+                          [bool(under(path)) for path in committed_paths]))
+        entries = {entry["file"] for state in (staged, committed)
+                   for _, entry in file_entries(state.config)}
+        for row in rows:
+            if row in matched:
+                continue
+            if row in entries:
+                raise ValueError(
+                    f"{row!r} is a file: entry of config.yml; restore it with "
+                    "hm restore --staged .hm/config.yml")
+            raise ValueError(f"No staged or committed path matches {row!r}")
+        for name, staged_rows, committed_rows, keep, take in plans:
+            if all(keep) and not any(take):
+                continue
+            restored = pd.concat([staged_rows[keep], committed_rows[take]],
+                                 ignore_index=True, sort=False)
+            if (name in head_paths
+                    and set(restored.columns) == set(committed_rows.columns)
+                    and normalize_rows(restored[committed_rows.columns]).equals(
+                        normalize_rows(committed_rows))):
+                # Unstaging every change restores HEAD's own bytes.
+                legacy = ([path for path in head_paths
+                           if path == "versions.yml" or path.startswith("versions/")]
+                          + self._legacy_record_paths() if name == "data.tsv" else [])
+                self._reset_to_head(head, [name, *legacy])
+                continue
+            self.stage_text(name, data_tsv_text(restored))
+            legacy = self._legacy_record_paths() if name == "data.tsv" else []
+            if legacy:
+                self._remove_from_index(legacy)
+
+    @staticmethod
+    def _row_paths(state, frame) -> list:
+        """Return each row's catalogue path, built from its fields if needed."""
+        if frame.empty:
+            return []
+        fmt = single_data_format(state.config)
+        return [row_to_path(record, fmt).as_posix()
+                for record in frame.to_dict(orient="records")]
 
     def save_state(self, state: State) -> None:
+        """
+        Write and stage ``config.yml``, ``meta.yml``, ``data.tsv`` and the
+        other TSVs that ``config.yml`` names.
+
+        Rows are saved, and kept in memory, in the form load_state returns, so
+        saving a loaded state changes nothing. Each row's path is checked first.
+        A table without columns, never written, is not created.
+
+        Args:
+            state (State): State to save; its rows are normalized in place.
+        """
         fmt = single_data_format(state.config)
-        paths = set()
-        records = state.data.fillna("").to_dict(orient="records")
-
-        for record in records:
-            record["path"] = row_to_path(record, fmt).as_posix()
-            paths.add(f"versions/{record['path']}")
-
-        for_deletion = [
-            path
-            for path, stage in self.index.entries
-            if stage == 0
-            and path.startswith("versions/")
-            and path not in paths
-        ]
-        if for_deletion:
-            # These are generated metadata files. Leaving them on disk makes
-            # Git treat them as untracked blockers when another branch has them.
-            self.index.remove(for_deletion, working_tree=True, force=True)
-            for path in for_deletion:
-                parent = (self.path / path).parent
-                while parent != self.path / "versions":
-                    try:
-                        parent.rmdir()
-                    except OSError:
-                        break
-                    parent = parent.parent
-
-        for record in records:
-            self.stage_file_version(record)
-
+        state.data = normalize_rows(state.data)
+        for record in state.data.to_dict(orient="records"):
+            row_to_path(record, fmt)
+        names = _table_names(state.config)[1:]
+        state.tables = {name: normalize_rows(state.tables.get(name, pd.DataFrame()))
+                        for name in names}
+        for frame in state.tables.values():
+            for path in frame.get("path", []):
+                validate_relative_path(path, label="catalogue path")
         self.write_yaml(state.config, "config")
         self.write_yaml(state.meta, "meta")
         self.write_tsv(state.data, "data")
-        self.write_yaml(
-            {"columns": list(state.data.columns)}, "versions"
-        )
-        self.index.add([
-            "config.yml", "meta.yml", "data.tsv", "versions.yml"
-        ])
+        written = [name for name, frame in state.tables.items()
+                   if len(frame.columns)]
+        for name in written:
+            self.write_tsv(state.tables[name], name)
+        self._add_to_index(["config.yml", "meta.yml", "data.tsv", *written])
+        self._drop_legacy_records()
+
+    def _add_to_index(self, paths) -> None:
+        """
+        Stage worktree files in one Git process.
+
+        GitPython hashes each added file in its own subprocess. Plumbing
+        reads literal, NUL-separated paths, so names need no pathspec quoting
+        and unchanged files are only checked, not hashed again.
+
+        Args:
+            paths: Paths relative to the ``.hm`` worktree.
+        """
+        with TemporaryFile() as names:
+            names.write(b"".join(os.fsencode(str(path)) + b"\0" for path in paths))
+            names.seek(0)
+            self.git.update_index("--add", "-z", "--stdin", istream=names)
 
     def read_yaml(self, stem: Union[Path, str]) -> dict:
         """
@@ -562,32 +594,15 @@ remote:
             encoding="utf-8",
             keep_default_na=False)
 
-    def write_tsv(
-            self,
-            data: pd.DataFrame,
-            stem: Union[Path, str],
-            *,
-            na_rep: str = ""
-            ) -> None:
+    def write_tsv(self, data: pd.DataFrame, stem: Union[Path, str]) -> None:
         """
-        Dump a pandas DataFrame to a TSV file, ensuring atomic write operations.
+        Write catalogue rows to a TSV file atomically, as ``data_tsv_text`` does.
 
         Args:
-            data (pd.DataFrame): The DataFrame to be dumped to TSV.
+            data (pd.DataFrame): The rows to write.
             stem (Union[Path, str]): The stem of the file name (without extension).
-            na_rep (str, optional): String representation for missing values.
-                Defaults to an empty string.
         """
         path = self._storage_path(stem, ".tsv")
-
-        # Use a temporary file to ensure atomic write operations, preventing
-        # data corruption in case of interruptions during the write process.
         with replace_file_on_success(path) as temp_path:
-            # Write the DataFrame to a temporary file in TSV format, ensuring that
-            # the index is not included and UTF-8 encoding is used for compatibility.
-            data.to_csv(
-                temp_path,
-                sep="\t",
-                index=False,
-                encoding="utf-8",
-                na_rep=na_rep)
+            with temp_path.open("w", encoding="utf-8", newline="") as handle:
+                handle.write(data_tsv_text(data))

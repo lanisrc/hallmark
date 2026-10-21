@@ -31,7 +31,6 @@ from hallmark.repo.manifest import (
     build_file_table,
     file_versions_by_path)
 from hallmark.repo.history import (
-    _parse_data_tsv,
     load_branch_state,
     load_head_state)
 
@@ -688,8 +687,7 @@ def test_checkout_rewrites_tracked_files_and_shares_objects(tmp_path):
     repo.add("a{a}_i{i}.h5")
     repo.commit("main data")
 
-    main_objects = sorted(p.relative_to(repo.dothm.path)
-            for p in (repo.dothm.path / "objects").rglob("*") if p.is_file())
+    main_objects = repo.objects.checksums()
     assert len(main_objects) == 2
 
     repo.create_branch("experiment")
@@ -709,8 +707,7 @@ def test_checkout_rewrites_tracked_files_and_shares_objects(tmp_path):
                 for path in Path(str(repo.worktree)).glob("*.h5"))
     assert main_files == ["a0_i0.h5", "a0_i30.h5"]
 
-    objects_after = [p for p in (repo.dothm.path /
-                            "objects").rglob("*") if p.is_file()]
+    objects_after = repo.objects.checksums()
     assert len(objects_after) == 4
 
     repo.checkout("experiment")
@@ -1380,6 +1377,8 @@ def test_checkout_restores_only_changed_target_files(monkeypatch, tmp_path):
 ### Repo.clone() tests ###
 
 def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
+    from hallmark.transport.http import HttpBackend
+
     source = Repo.init(tmp_path / "source")
     _write_files(source.worktree, ["a0_i0.h5"])
     source.add("a{a}_i{i}.h5")
@@ -1387,28 +1386,22 @@ def test_repo_clone_downloads_after_plan_approval(monkeypatch, tmp_path):
     expected_sha1 = Repo.checksum(source.worktree / "a0_i0.h5")
     source.commit("add source data")
 
-    captured = {}
+    captured = []
 
-    def fake_download_file(context, relative_path, destination, sha1, chunk_size):
-        captured["url"] = context.remote.file_url(str(relative_path))
-        captured["sha1"] = sha1
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text("downloaded\n", encoding="utf-8")
-        return destination.stat().st_size
+    def fetch(self, relative_path, destination, *, chunk_size=8192):
+        captured.append(self.context.remote.file_url(relative_path))
+        Path(destination).write_text("a0_i0.h5\n", encoding="utf-8")
 
-    monkeypatch.setattr(
-        "hallmark.remote.download._download_and_verify_file", fake_download_file
-    )
+    monkeypatch.setattr(HttpBackend, "fetch", fetch)
 
     clone = Repo.clone(str(source.dothm.path), tmp_path / "clone",
                        download=True, approve=lambda plan: plan.file_count == 1)
 
-    assert captured == {
-        "url": "https://example.com/data/a0_i0.h5",
-        "sha1": expected_sha1,
-    }
-    assert (clone.worktree / "a0_i0.h5").read_text(encoding="utf-8") == \
-        "downloaded\n"
+    assert captured == ["https://example.com/data/a0_i0.h5"]
+    downloaded = clone.worktree / "a0_i0.h5"
+    assert downloaded.read_text(encoding="utf-8") == "a0_i0.h5\n"
+    # The file is the stored object, verified against the catalogued SHA-1.
+    assert clone.objects.is_linked(expected_sha1, downloaded)
     assert clone.download_result["succeeded"] == 1
     assert clone.download_result["failed"] == 0
 
@@ -1424,7 +1417,7 @@ def test_repo_clone_can_skip_remote_data_download(monkeypatch, tmp_path):
         raise AssertionError("download should not be attempted")
 
     monkeypatch.setattr(
-        "hallmark.remote.download._download_and_verify_file", fail_download
+        "hallmark.remote.download._download_into_store", fail_download
     )
 
     clone = Repo.clone(str(source.dothm.path), tmp_path / "clone", download=False)
@@ -1530,28 +1523,20 @@ def test_dump_yml_preserves_existing_file_when_serialization_fails(monkeypatch,
         "Expected no temporary files to remain after failed write_yaml"
 
 
-def test_dump_tsv_supports_missing_value_representation(tmp_path):
+def test_write_tsv_writes_missing_values_as_empty_text(tmp_path):
     """
-    Test that the Dothm.write_tsv() method correctly represents missing values in the
-    output TSV file. This test creates a repository, constructs a DataFrame with missing
-    values, and calls write_tsv() with a custom na_rep argument. It checks that
-    the output TSV file is created and that the missing values are represented as
-    specified in the na_rep argument.
-    Args:
-        tmp_path (Path): A temporary directory provided by pytest.
+    Dothm.write_tsv writes catalogue rows in their one saved form: missing
+    values as empty fields, whole-number floats without ".0", rows sorted by
+    path and LF line endings on every platform.
     """
     repo = Repo.init(tmp_path / "repo")
     frame = pd.DataFrame({
-        "path": ["first.dat", "second.dat"], "value": ["present", None]})
-    repo.dothm.write_tsv(frame, "custom.TSV", na_rep="None")
+        "path": ["second.dat", "first.dat"], "value": [None, 5.0]})
+    repo.dothm.write_tsv(frame, "custom.TSV")
     output_path = repo.dothm.path / "custom.TSV"
 
-    assert output_path.is_file(), \
-        f"Expected TSV file {output_path} to be created, but it does not exist"
-    assert output_path.read_text(encoding="utf-8") == (
-        "path\tvalue\n""first.dat\tpresent\n""second.dat\tNone\n"), \
-        f"Expected TSV output with 'None' for missing values, \
-            got:\n{output_path.read_text(encoding='utf-8')}"
+    assert output_path.read_bytes() == (
+        b"path\tvalue\nfirst.dat\t5\nsecond.dat\t\n")
 
 
 @pytest.mark.parametrize(
@@ -1871,6 +1856,7 @@ def test_object_store_rejects_corrupted_object_during_restore(tmp_path):
     source.write_text("original\n", encoding="utf-8")
     sha1 = Repo.checksum(source)
     stored = objects.store(source, sha1)
+    stored.chmod(0o644)
     stored.write_text("corrupted\n", encoding="utf-8")
     destination = tmp_path / "destination.dat"
     destination.write_text("existing\n", encoding="utf-8")
@@ -2641,25 +2627,28 @@ def test_worktree_changes_accepts_uppercase_expected_checksum(tmp_path):
 
 ### repo.history tests ###
 
-def test_parse_data_tsv_preserves_na_tokens_and_blank_values():
+def test_loaded_catalogue_preserves_na_tokens_and_blank_values(tmp_path):
     """
-    Test that _parse_data_tsv correctly preserves 'NA' tokens and blank values when
-    parsing a TSV string. This test provides a TSV string with 'NA' and blank values
-    and checks that the resulting DataFrame has the expected values.
+    Loading a committed data.tsv keeps 'NA' and blank values as text instead
+    of turning them into missing values.
     """
-    frame = _parse_data_tsv("sha1\tname\n""first\tNA\n""second\t\n")
+    repo = Repo.init(tmp_path / "repo")
+    (repo.dothm.path / "data.tsv").write_text("sha1\tname\nfirst\tNA\nsecond\t\n")
+    repo.dothm.index.add(["data.tsv"])
+    frame = repo.dothm.load_state(staged=True).data
 
     assert frame["name"].tolist() == ["NA", ""], \
         f"Expected ['NA', ''], got {frame['name'].tolist()}"
 
 
-def test_parse_data_tsv_empty_text_returns_empty_state_schema():
-    """
-    Empty TSV text should parse to an empty DataFrame with the canonical State schema.
-    """
-    frame = _parse_data_tsv("   \n")
+def test_loading_an_empty_catalogue_gives_the_state_schema(tmp_path):
+    """An empty data.tsv loads as an empty catalogue with the State schema."""
+    repo = Repo.init(tmp_path / "repo")
+    (repo.dothm.path / "data.tsv").write_text("   \n")
+    repo.dothm.index.add(["data.tsv"])
+    frame = repo.dothm.load_state(staged=True).data
 
-    assert frame.empty, "Expected parsed frame to be empty for blank TSV text"
+    assert frame.empty, "Expected an empty catalogue for blank data.tsv"
     assert list(frame.columns) == ["sha1"], \
         f"Expected canonical columns ['sha1'], got {list(frame.columns)}"
 
@@ -3270,9 +3259,6 @@ def test_load_head_state_reads_committed_versions_and_metadata(tmp_path):
     repo.add("a{a}_i{i}.h5")
     committed_config = repo.dothm.read_yaml("config")
 
-    data_path = repo.dothm.path / "data.tsv"
-    data_path.write_text("unrelated file contents\n", encoding="utf-8")
-    repo.dothm.index.add(["data.tsv"])
     repo.commit("Committed versions")
 
     path.write_text("changed\n", encoding="utf-8")

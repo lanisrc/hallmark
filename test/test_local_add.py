@@ -394,7 +394,8 @@ def test_add_has_no_force_or_all_option(local_repo, option):
 
     output = _invoke("add", option, "notes.txt", exit_code=2)
 
-    assert f"No such option: {option}" in output
+    # Click 8.2+ quotes the name: "No such option '--force'."
+    assert "No such option" in output and option in output
     _assert_catalog(repo, ["a0_i0.h5", "a0_i30.h5", "a0_i60.h5"])
     _assert_status(repo, untracked=["notes.txt"])
 
@@ -464,7 +465,7 @@ def test_nested_remote_add_keeps_url_workflow_and_download_discovery(
     monkeypatch.chdir(nested)
     reads = []
 
-    def read_text(context, path):
+    def read_text(context, path, **_):
         reads.append(path)
         assert path == "", "Remote add must only read the directory listing"
         return ('<h1>Index of data</h1>'
@@ -477,8 +478,9 @@ def test_nested_remote_add_keeps_url_workflow_and_download_discovery(
 
     saved = Repo(repo.worktree)
     assert saved.state.data["path"].tolist() == ["M87_001.txt"]
+    # Status covers every catalogued file, including notes.txt's file: entry.
     assert saved.status()["staged"] == {
-        "state": INITIAL_STATE, "added": ["M87_001.txt"],
+        "state": INITIAL_STATE, "added": ["M87_001.txt", "notes.txt"],
         "modified": [], "deleted": [],
     }
     assert saved.status()["worktree"] == {"modified": [], "deleted": []}
@@ -568,12 +570,12 @@ def test_pattern_change_is_case_sensitive_and_atomic(local_repo, command):
     _assert_status(repo)
 
 
-def test_remote_format_update_preserves_catalog_without_sha1(
+def test_remote_format_update_is_refused_without_changes(
         local_repo, monkeypatch):
     repo = local_repo
     reads = []
 
-    def read_text(context, path):
+    def read_text(context, path, **_):
         reads.append(path)
         assert path == ""
         return ('<h1>Index of data</h1>'
@@ -586,34 +588,19 @@ def test_remote_format_update_preserves_catalog_without_sha1(
     before = Repo(repo.worktree)
     assert "sha1" not in before.state.data.columns
 
-    _invoke("set-config", "--fmt", "{name}.fits")
+    # A remote catalogue's formats sort files as hm add finds them.
+    output = _invoke("set-config", "--fmt", "{name}.fits", exit_code=1)
+    assert "hm add URL --fmt" in output
 
     saved = Repo(repo.worktree)
     pd.testing.assert_frame_equal(saved.state.data, before.state.data)
-    assert saved.state.meta == before.state.meta
-    assert saved.state.config["remote"] == before.state.config["remote"]
-    assert saved.state.config["data"][0]["fmt"] == "{name}.fits"
-    assert saved.status() == {
-        "branch": "main",
-        "commit": saved.dothm.head.commit.hexsha[:7],
-        "staged": {
-            "state": ["config.yml"],
-            "added": [],
-            "modified": [],
-            "deleted": [],
-        },
-        "worktree": {"modified": [], "deleted": []},
-        "untracked": [],
-        "remote_catalog": True,
-    }
-    assert _invoke("status") == (
-        "On branch main\n\nChanges to be committed:\n"
-        "  state:   config.yml\n"
-    )
+    assert saved.state.config == before.state.config
+    assert saved.state.config["sources"] == [{"name": "origin", "remote": "origin"}]
+    assert saved.dothm.index.diff("HEAD") == []
     assert reads == [""]
     assert not saved.objects.root.exists()
     assert not any((repo.worktree / path).exists()
-                   for path in saved.state.data["path"])
+                   for path in ("M87_001.fits", "M87_002.fits"))
 
 
 def test_overlapping_add_paths_hash_each_matching_file_once(
@@ -684,3 +671,26 @@ def test_equal_contents_at_different_paths_stay_independent(local_repo):
     assert changed[paths[0]] != versions[paths[0]]
     assert changed[paths[1]] == versions[paths[1]]
     _assert_status(repo, state=["data.tsv"], modified=[paths[0]])
+
+
+def test_a_source_field_keeps_a_catalogue_of_local_files(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    path = repo.worktree / "SR1_M87_2017.uvfits"
+    path.write_text("visibilities\n", encoding="utf-8")
+    repo.add("{release}_{source}_{year}.uvfits")
+    assert repo.commit("Local data")
+    # The commit stored the file; a remote catalogue would have stored nothing.
+    assert repo.objects.checksums() == [Repo.checksum(path)]
+    path.write_text("edited\n", encoding="utf-8")
+    assert repo.status()["worktree"]["modified"] == ["SR1_M87_2017.uvfits"]
+
+
+@pytest.mark.parametrize("field", ["sha1", "checksum", "size_bytes", "mtime", "md5"])
+def test_local_patterns_cannot_reuse_catalogue_columns(tmp_path, field):
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "x_1.h5").write_text("one\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=f"Rename the pattern field.*{field}"):
+        repo.add(f"x_{{{field}}}.h5")
+    with pytest.raises(ValueError, match="Rename the pattern field"):
+        repo.set_config(fmt=f"x_{{{field}}}.h5")
+    assert repo.state.data.empty

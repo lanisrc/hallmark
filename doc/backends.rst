@@ -18,9 +18,19 @@ implementations:
   without a login shell.
 * ``CyVerseBackend`` extends HTTP support with CyVerse directory and metadata
   parsing.
+* ``WebDavBackend`` (``webdav``) lists collections with WebDAV ``PROPFIND``
+  requests and transfers files over HTTP(S). It suits servers without a
+  browsable index, such as Nextcloud, ownCloud and iRODS davrods, and records
+  the checksums those servers keep (``oc:checksums``) as ``server`` checksums.
+* ``S3Backend`` (``s3``) lists and transfers objects in AWS S3 and compatible
+  stores for ``s3://BUCKET/PREFIX/`` remotes. It needs the optional ``boto3``
+  dependency (``pip install hallmark[s3]``).
 
-Without an explicit backend, Hallmark selects one from the data URL. Explicit
-selection takes precedence. For example:
+Without an explicit backend, Hallmark selects one from the data URL:
+``ssh`` for SSH and SFTP URLs, ``s3`` for S3 URLs, ``webdav`` for ``webdav://`` and ``webdavs://``
+URLs (stored as ``http://`` and ``https://``) and for signed-in CyVerse
+``/dav/`` URLs, ``cyverse`` for other CyVerse URLs, and ``http`` otherwise.
+Explicit selection takes precedence. For example:
 
 .. code-block:: bash
 
@@ -95,6 +105,9 @@ operation has been cancelled.
      - Yield ``RemoteEntry`` records with literal logical paths relative to the
        dataset root. Report completed directories through the optional callback.
        Missing sizes, timestamps and published checksums remain ``None``.
+       Set ``checksum_source="server"`` on a digest the service itself reports;
+       the catalogue records it so collaborators can tell it from a published
+       checksum file (``"published"``).
    * - ``read_text(relative_path, limit)``
      - Read metadata within the supplied byte limit and return decoded text.
        Reject oversized responses and propagate access or connection errors.
@@ -111,6 +124,10 @@ Raise
 ``RemoteObjectMissing`` for an absent metadata object. These exceptions are
 available from ``hallmark.remote.backends``. Do not disguise authentication failures
 as missing objects.
+
+Backends that use local credentials declare ``auth_type = "http"`` (or
+``"s3"``); the operation context then provides the remote's profile as
+``context.auth``. Subclasses of ``HttpBackend`` inherit HTTP profile support.
 
 Discovery reads listings and published metadata only. It must not download
 payloads to infer checksums. The shared downloader owns approval, destination
@@ -149,6 +166,7 @@ For example, an HTTP service can publish a small ``manifest.json`` array with
                    size=record.get("size"),
                    checksum_algorithm="sha256" if digest else None,
                    checksum=digest,
+                   checksum_source="server" if digest else None,
                )
            if on_directory is not None:
                on_directory("")

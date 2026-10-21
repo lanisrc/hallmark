@@ -33,6 +33,10 @@ authors = [
     {name = "Arshia Akhtarkavan"}
 ]
 
+[project.optional-dependencies]
+keyring = ["keyring"]
+s3 = ["boto3>=1.28"]
+
 [project.scripts]
 hallmark = "hallmark.cli:hallmark"
 hm = "hallmark.cli:hallmark"
@@ -43,6 +47,7 @@ Repository = "https://github.com/l6a/hallmark"
 Issues = "https://github.com/l6a/hallmark/issues"
 
 [dependency-groups]
+s3-test = ["boto3>=1.28", "moto[s3]>=5"]
 dev = ["pytest", "pytest-cov", "pytest-timeout"]
 doc = ["sphinx"]
 lint = ["ruff"]

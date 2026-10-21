@@ -22,7 +22,8 @@ from hallmark.transport.sftp import _Packet
 def local_sftp(tmp_path, monkeypatch):
     """Connect the transport to a local SFTP subsystem without networking."""
     server = next((path for path in (
-        "/usr/lib/openssh/sftp-server", "/usr/libexec/sftp-server",
+        "/usr/lib/openssh/sftp-server", "/usr/libexec/openssh/sftp-server",
+        "/usr/libexec/sftp-server",
     ) if Path(path).exists()), None)
     if server is None:
         pytest.skip("Local OpenSSH SFTP subsystem binary is unavailable")

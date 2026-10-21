@@ -17,10 +17,65 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from ..utils import string_or_none
+
 # Define the default columns for the state DataFrame
 COLUMNS = ["sha1"]
 # TSV that holds the rows of a lone data entry without a "db" name
 DEFAULT_DB = "data.tsv"
+
+
+def cell_text(value) -> str:
+    """
+    Return a catalogue value as the text it is saved and loaded as.
+
+    Missing values become ``""`` and whole-number floats lose their ``.0``,
+    which pandas adds when a numeric column has gaps.
+    """
+    text = string_or_none(value)
+    return "" if text is None else text
+
+
+def normalize_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return catalogue rows in their one saved form: text, sorted by path.
+
+    Every writer goes through this, so saving rows that were just loaded
+    changes nothing.
+
+    Args:
+        frame (pd.DataFrame): Catalogue rows.
+
+    Returns:
+        pd.DataFrame: A copy with text values, sorted by ``path`` if present.
+    """
+    rows = frame.copy()
+    for column in rows.columns:
+        rows[column] = rows[column].map(cell_text).astype(object)
+    if "path" in rows.columns:
+        rows = rows.sort_values("path", kind="stable")
+    return rows.reset_index(drop=True)
+
+
+def is_remote_catalog(state) -> bool:
+    """
+    Return whether a state catalogs files on a data server.
+
+    A remote catalogue records its ``sources`` in ``config.yml``; its rows'
+    ``sha1``, when known, describes downloaded content rather than a
+    committed object. Catalogues written before sources existed are
+    recognized by a ``path`` column without ``sha1``, and are given their
+    sources before a ``sha1`` column is ever added. Column names alone never
+    decide: a local filename pattern may have a ``{source}`` field.
+
+    Args:
+        state (State): Repository state to classify.
+    """
+    config = state.config if isinstance(state.config, dict) else {}
+    if isinstance(config.get("sources"), list):
+        return True
+    return any("path" in frame.columns and "sha1" not in frame.columns
+               for frame in [state.data, *getattr(state, "tables", {}).values()])
 
 
 def _prepare_file_rows(frame: pd.DataFrame) -> pd.DataFrame:
@@ -53,10 +108,7 @@ def _prepare_file_rows(frame: pd.DataFrame) -> pd.DataFrame:
     # normalize the data by retaining only the relevant columns
     normalized = frame.loc[:, columns].copy()
     for column in parameter_columns:
-        # normalize non-checksum columns to string type,
-        # replacing NaN values with empty strings
-        normalized[column] = normalized[column].map(
-            lambda value: (""if pd.isna(value) else str(value)))
+        normalized[column] = normalized[column].map(cell_text)
 
     return normalized
 
@@ -71,6 +123,8 @@ class State:
         meta: Repository metadata.
         data: Tabular file index containing indexed object checksums
         (``sha1``) and associated metadata.
+        tables: The other TSVs that ``config.yml``'s ``data`` entries name,
+        by file name, such as one per filename format of a remote catalogue.
     """
 
     config:    dict         = field(default_factory=dict)
@@ -78,6 +132,7 @@ class State:
     data:      pd.DataFrame = field(
         default_factory=lambda: pd.DataFrame(columns=COLUMNS)
     )
+    tables:    dict         = field(default_factory=dict)
 
     def update(self, pf) -> None:
         """

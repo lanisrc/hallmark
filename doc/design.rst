@@ -34,7 +34,7 @@ Architecture
 
 A |hallmark|_ repository is the entry point for a version-controlled
 dataset index.
-It has three architecture components with different responsibilities:
+It has four architecture components with different responsibilities:
 
 1.  ``State``:
     the canonical in-memory data container, where all index mutations
@@ -46,7 +46,13 @@ It has three architecture components with different responsibilities:
 
 3.  ``Worktree``:
     an on-disk working tree/directory, where data files are discovered
-    and consumed.
+    and consumed; and
+
+4.  ``Objects``:
+    file contents in ``.hm/objects``, stored by SHA-1 as git stores blobs.
+    ``commit`` copies local files in and ``checkout`` copies them out as
+    writable files; downloads are published there and hard-linked into the
+    ``Worktree``, read-only.
 
 The data flow can be summarized as::
 
@@ -67,6 +73,28 @@ The data flow can be summarized as::
                            |access
                            v
                          Other tools
+
+Downloads keep ``Worktree``, ``Objects``, ``State`` and ``Dothm`` in step
+(``Worktree <-> Objects <-> State <-> Dothm``), moving between them only in
+this order:
+
+1.  download into ``Objects``, into a temporary file that gets its final
+    name only once complete and verified;
+2.  hard-link the stored object into the ``Worktree``, atomically replacing
+    an outdated earlier download whose bytes stay in ``Objects``;
+3.  record its SHA-1 in the ``State``, read again under a lock; and
+4.  save the ``State`` to ``Dothm``, staged for the user to commit.
+
+A crash between any two steps leaves the repository consistent: at worst a
+temporary file, a stored object not yet linked, or a linked file whose SHA-1
+is not recorded. The next download records it, without a transfer when the
+catalogue has a checksum for the file and after fetching it to compare when not.
+
+The catalogue itself is ``config.yml``, ``meta.yml`` and one TSV per filename
+format (``data.tsv`` for a single format, or for none), with one line per file;
+files no format matches are ``file:`` entries in ``config.yml``. See
+``doc/data_backend.md`` for every command's effect on these files and on
+``.hm/objects``.
 
 
 API

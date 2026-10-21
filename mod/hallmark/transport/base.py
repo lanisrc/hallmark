@@ -95,6 +95,70 @@ def reject_control_characters(value: str, label: str) -> None:
         raise RemoteConfigurationError(f"{label} contains control characters")
 
 
+def reject_url_credentials(url: str) -> None:
+    """
+    Refuse a URL carrying a password, or an HTTP(S) username or token.
+
+    SSH usernames are allowed. Error messages never repeat the URL.
+
+    Raises:
+        RemoteConfigurationError: If the URL contains credentials.
+    """
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        raise RemoteConfigurationError("Invalid remote URL") from None
+    if parsed.password is not None or (
+            parsed.username is not None
+            and parsed.scheme.lower() in {"http", "https"}):
+        raise RemoteConfigurationError(
+            "URLs must not contain credentials; configure them locally, for "
+            "example in ~/.netrc, ~/.ssh/config or a Git credential helper")
+
+
+def reject_url_secrets(url: str) -> None:
+    """
+    Refuse a data-remote URL that would store a secret in the catalog.
+
+    Passwords, HTTP(S) usernames (often access tokens), query strings and
+    fragments are rejected; SSH usernames are allowed. Error messages never
+    repeat the URL.
+
+    Raises:
+        RemoteConfigurationError: If the URL could contain a secret.
+    """
+    reject_url_credentials(url)
+    if "?" in url or "#" in url:
+        raise RemoteConfigurationError(
+            "Remote URLs must not contain a query or fragment; "
+            "percent-encode ? and # in file names")
+
+
+def decode_metadata(content: bytes, charset: str | None = None) -> str:
+    """
+    Decode remote metadata, such as an index page or checksum file, strictly.
+
+    The server's declared charset is used, otherwise UTF-8, the same rule on
+    every backend. Undecodable bytes raise rather than become replacement
+    characters, which would garble file names.
+
+    Args:
+        content (bytes): Text as received.
+        charset (str, optional): Charset the server declared.
+
+    Raises:
+        DownloadError: If the charset is unknown or the bytes do not decode.
+    """
+    encoding = charset or "utf-8"
+    try:
+        return bytes(content).decode(encoding)
+    except LookupError:
+        raise DownloadError(
+            f"Remote text declares an unknown charset {charset!r}") from None
+    except UnicodeDecodeError:
+        raise DownloadError(f"Remote text is not valid {encoding}") from None
+
+
 def validate_remote_path(value) -> Path:
     """Validate a literal catalog path without decoding or trimming it."""
     raw = str(value)
@@ -150,6 +214,9 @@ class RemoteEntry:
         mtime (float, optional): Modification time reported by the server.
         checksum_algorithm (str, optional): Published checksum algorithm.
         checksum (str, optional): Published digest.
+        checksum_source (str, optional): Where the digest came from:
+            ``published`` for a checksum file next to the data, ``server``
+            for a digest the server reports or computes.
 
     Unavailable metadata remains None; file contents are not read to fill it.
     """
@@ -159,6 +226,32 @@ class RemoteEntry:
     mtime: float | None = None
     checksum_algorithm: str | None = None
     checksum: str | None = None
+    checksum_source: str | None = None
+
+
+_DEFAULT_BACKENDS = {"ssh": "ssh", "sftp": "ssh", "s3": "s3"}
+_S3_BUCKET = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
+
+
+def _s3_root(url, parsed, port):
+    """Validate an ``s3://BUCKET/PREFIX/`` URL and return its literal prefix."""
+    if parsed.username is not None or parsed.password is not None or port:
+        raise RemoteConfigurationError(
+            "S3 URLs name only a bucket and prefix: s3://BUCKET/PREFIX/")
+    if "?" in url or "#" in url:
+        raise RemoteConfigurationError(
+            "S3 URLs cannot contain query or fragment fields; "
+            "percent-encode ? and # in key names")
+    if not _S3_BUCKET.fullmatch(parsed.hostname) or ".." in parsed.hostname:
+        raise RemoteConfigurationError("Invalid S3 bucket name")
+    try:
+        root = unquote(parsed.path or "/", errors="strict")
+    except UnicodeError:
+        raise RemoteConfigurationError("S3 URL must encode UTF-8") from None
+    reject_control_characters(root, "S3 prefix")
+    if ".." in root.split("/") or "\\" in root or root.startswith("//"):
+        raise RemoteConfigurationError("S3 prefix cannot contain traversal")
+    return root if root.startswith("/") else "/" + root
 
 
 @dataclass(frozen=True)
@@ -176,7 +269,7 @@ class RemoteSpec:
         root (str): Dataset root, decoded for SSH and SFTP.
         user (str, optional): Explicit SSH username.
         port (int, optional): Explicit port number.
-        auth (str, optional): Local SSH authentication profile name.
+        auth (str, optional): Local authentication profile name.
         backend (str): Registered backend name, resolved from the URL by default.
         backend_options (Mapping): Deeply immutable backend configuration.
     """
@@ -195,10 +288,11 @@ class RemoteSpec:
     def __post_init__(self):
         selected = self.backend
         if selected is None:
-            selected = "ssh" if self.scheme in {"ssh", "sftp"} else "http"
+            selected = _DEFAULT_BACKENDS.get(self.scheme, "http")
             if selected == "http" and (self.host == "cyverse.org"
                                       or self.host.endswith(".cyverse.org")):
-                selected = "cyverse"
+                # Signed-in CyVerse access is WebDAV; /dav-anon/ serves HTML.
+                selected = "webdav" if self.root.startswith("/dav/") else "cyverse"
         object.__setattr__(self, "backend", validate_backend_name(selected))
         object.__setattr__(self, "backend_options",
                            readonly_backend_options(self.backend_options))
@@ -211,7 +305,7 @@ class RemoteSpec:
 
         Args:
             url (str): HTTP(S) URL or SSH/SFTP URL with an absolute dataset root.
-            auth (str, optional): Local SSH profile name. Unsupported for HTTP(S).
+            auth (str, optional): Local auth profile name.
             backend (str, optional): Registered backend name. Defaults to URL
                 detection. Parsing does not load plugins or resolve profiles.
             backend_options (Mapping, optional): Backend-specific configuration.
@@ -234,13 +328,17 @@ class RemoteSpec:
         except ValueError:
             raise RemoteConfigurationError("Invalid remote URL host or port") from None
         scheme = parsed.scheme.lower()
-        if scheme not in {"http", "https", "ssh", "sftp"}:
+        if scheme not in {"http", "https", "ssh", "sftp", "s3"}:
             raise RemoteConfigurationError(
-                "Use an http(s):// or ssh://HOST/absolute/root/ URL; "
-                "scp shorthand and this scheme are unsupported"
+                "Use an http(s)://, s3://BUCKET/ or ssh://HOST/absolute/root/ "
+                "URL; scp shorthand and this scheme are unsupported"
             )
         if not host or port == 0 or parsed.netloc.endswith(":"):
             raise RemoteConfigurationError("Invalid remote URL host or port")
+        if scheme == "s3":
+            root = _s3_root(url, parsed, port)
+            return cls(url, scheme, host, root, None, None, auth,
+                       backend, backend_options)
         if scheme in {"ssh", "sftp"}:
             validate_ssh_host(host)
             if parsed.password is not None:
@@ -272,12 +370,10 @@ class RemoteSpec:
                     "SSH root must be absolute, without traversal or backslashes"
                 )
         else:
+            # Catalogues are shared, so their URLs must hold no secret.
+            reject_url_secrets(url)
+            # Whether a backend accepts the profile is checked when it is used.
             root, user = parsed.path, None
-            if auth is not None:
-                raise RemoteConfigurationError(
-                    "Auth profiles currently support SSH/SFTP only; "
-                    "HTTP retains Requests .netrc authentication"
-                )
         return cls(url, scheme, host, root, user, port, auth,
                    backend, backend_options)
 
@@ -297,6 +393,20 @@ class RemoteSpec:
         parsed = urlsplit(self.url)
         root = self.root.rstrip("/") + "/" + path
         return urlunsplit((self.scheme, parsed.netloc, quote(root, safe="/"), "", ""))
+
+    def subpath(self, root: str) -> RemoteSpec:
+        """
+        Return the spec of a folder beneath this root with the same settings.
+
+        Args:
+            root (str): Literal relative folder, or ``""`` for this root.
+        """
+        if not root:
+            return self
+        folder = root if root.endswith("/") else root + "/"
+        return RemoteSpec.from_url(self.file_url(folder), self.auth,
+                                   backend=self.backend,
+                                   backend_options=self.backend_options)
 
     @property
     def display(self) -> str:
@@ -319,6 +429,11 @@ class DataBackend:
         context (OperationContext): Resources and settings for this operation.
     """
 
+    # The local profile type this backend reads from ``context.auth``:
+    # "http", "s3", or "ssh" (read from ``context.settings``). None means
+    # the backend accepts no auth profile.
+    auth_type = None
+
     def __init__(self, context):
         self.context = context
 
@@ -339,6 +454,21 @@ class DataBackend:
         """
         raise NotImplementedError
 
+    def complete_entries(self, entries):
+        """
+        Fill in metadata that costs a request per file, for selected files.
+
+        Discovery calls this after filtering, so a backend that must ask for
+        each file's checksum only asks for the files a source keeps.
+
+        Args:
+            entries (list[RemoteEntry]): Selected entries.
+
+        Returns:
+            list[RemoteEntry]: The entries, completed where the backend can.
+        """
+        return entries
+
     def iter_entries(self, on_directory=None):
         """
         Yield file metadata from a recursive directory listing.
@@ -351,6 +481,22 @@ class DataBackend:
             CapabilityError: If the transport does not provide directory listings.
         """
         raise CapabilityError("Recursive listing is unsupported by this transport")
+
+    def server_checksums(self, relative_paths, algorithm):
+        """
+        Have the server compute checksums of files without transferring them.
+
+        Args:
+            relative_paths (list[str]): Literal paths relative to the root.
+            algorithm (str): ``md5``, ``sha1``, ``sha256`` or ``sha512``.
+
+        Returns:
+            dict[str, str]: Lowercase hexadecimal digest for every path.
+
+        Raises:
+            CapabilityError: If the server cannot compute checksums.
+        """
+        raise CapabilityError("This backend cannot compute checksums on the server")
 
     def read_text(self, relative_path, limit):
         """
