@@ -44,10 +44,10 @@ def _validate_folder(value, label: str) -> str:
         return ""
     if not isinstance(value, str):
         raise ValueError(f"{label} must be a relative folder")
-    folder = validate_remote_path(value.rstrip("/")).as_posix()
-    if folder in ("", "."):
+    if value.rstrip("/") == ".":
         return ""
-    return folder + "/"
+    folder = validate_remote_path(value.rstrip("/")).as_posix()
+    return "" if folder == "." else folder + "/"
 
 
 def _normalize_filter(value) -> tuple:
