@@ -23,6 +23,7 @@ from hallmark.error import (
     CloneError)
 from hallmark.repo.config import (
     row_to_path,
+    fmt_entries_from_config,
     single_data_format,
     filename_fields)
 from hallmark.repo.manifest import (
@@ -2152,6 +2153,43 @@ def test_row_to_path_rejects_unsafe_paths(fmt, row):
     """
     with pytest.raises(ValueError):
         row_to_path(row, fmt)
+
+
+### fmt_entries_from_config tests ###
+
+def test_fmt_entries_from_config_accepts_mapping_or_list():
+    """
+    Test that fmt_entries_from_config accepts a mapping or a list of mappings for the
+    "data" key in the configuration. It should return a list of valid mapping entries.
+    """
+    entry = {"fmt": "data_{number}.txt", "db": "data.tsv"}
+
+    assert fmt_entries_from_config({"data": entry}) == [entry], f"Expected list with \
+        single mapping entry, got {fmt_entries_from_config({'data': entry})}"
+    assert fmt_entries_from_config({
+        "data": [{"file": "README.md"}, entry, ]}) == [entry], \
+        f"Expected list with only valid mapping entries, \
+            got {fmt_entries_from_config({'data': [{'file': 'README.md'}, entry]})}"
+    assert fmt_entries_from_config({}) == [], \
+        f"Expected empty list for missing 'data' key, got {fmt_entries_from_config({})}"
+
+
+@pytest.mark.parametrize(
+    "data, message",[
+        ("invalid", 'config "data" must be a mapping or list'),
+        ([{"fmt": "data_{number}.txt"}, "invalid"], "data entry 1")])
+def test_fmt_entries_from_config_rejects_invalid_sections(data, message):
+    """
+    Test that fmt_entries_from_config raises a ValueError for invalid data sections.
+    Args:
+        data: The invalid data section to test.
+        message: The expected error message to match in the ValueError.
+    Raises:
+        ValueError: If the data section is not a mapping or list, or if any entry
+        in the list is not a mapping.
+    """
+    with pytest.raises(ValueError, match=message):
+        fmt_entries_from_config({"data": data})
 
 
 ### filename_fields tests ###

@@ -18,12 +18,12 @@ from hallmark.transport.base import RemoteSpec
 
 def test_source_folders_are_normalized_and_round_trip():
     source = SourceSpec("osn", "osn", root="m87/sims", prefix="osn",
-                        fmt="{sim}.h5", filter="*.h5")
+                        filter="*.h5")
     assert (source.root, source.prefix, source.filter) == (
         "m87/sims/", "osn/", ("*.h5",))
     assert source.to_config() == {"name": "osn", "remote": "osn",
                                   "root": "m87/sims/", "prefix": "osn/",
-                                  "fmt": "{sim}.h5", "filter": ["*.h5"]}
+                                  "filter": ["*.h5"]}
     assert SourceSpec.from_config(source.to_config()) == source
     assert SourceSpec("origin", "origin").to_config() == {
         "name": "origin", "remote": "origin"}
@@ -42,7 +42,6 @@ def test_source_folders_are_normalized_and_round_trip():
     {"root": "/absolute"},
     {"prefix": ".hm/data"},
     {"prefix": "data/.git/"},
-    {"fmt": " "},
     {"filter": ["*.h5", ""]},
 ])
 def test_invalid_sources_are_rejected(kwargs):
@@ -61,15 +60,18 @@ def test_source_lists_check_names_and_remotes():
         normalize_sources(entries, ["origin"])
     with pytest.raises(ValueError, match="only"):
         normalize_sources([{"name": "a", "remote": "origin", "url": "x"}])
+    # Formats belong to the catalogue, not to one source.
+    with pytest.raises(ValueError, match="only"):
+        normalize_sources([{"name": "a", "remote": "origin", "fmt": "{x}.h5"}])
     with pytest.raises(ValueError, match="list"):
         normalize_sources({"name": "a", "remote": "origin"})
 
 
 def test_selection_identity_ignores_filter_order():
-    source = SourceSpec("a", "origin", fmt="{x}.h5", filter=["*.h5", "run*"])
-    assert source.selects_like("{x}.h5", ("run*", "*.h5"))
-    assert not source.selects_like("{x}.fits", ("run*", "*.h5"))
-    assert not source.selects_like("{x}.h5", None)
+    source = SourceSpec("a", "origin", filter=["*.h5", "run*"])
+    assert source.selects_like(("run*", "*.h5"))
+    assert not source.selects_like(("run*",))
+    assert not source.selects_like(None)
 
 
 def remotes(*urls, names=None):
@@ -138,7 +140,7 @@ def legacy_state(rows=("a.h5", "b.h5")):
 def test_legacy_catalogues_read_as_one_source_without_changes():
     state = legacy_state()
     before = (state.config.copy(), state.data.copy())
-    assert effective_sources(state) == [SourceSpec("origin", "origin", fmt="{x}.h5")]
+    assert effective_sources(state) == [SourceSpec("origin", "origin")]
     assert state.config == before[0]
     pd.testing.assert_frame_equal(state.data, before[1])
     assert rows_of(state.data, effective_sources(state)[0],
@@ -148,12 +150,12 @@ def test_legacy_catalogues_read_as_one_source_without_changes():
 def test_materialize_records_the_legacy_source():
     state = legacy_state()
     sources = materialize_sources(state)
-    assert state.config["sources"] == [
-        {"name": "origin", "remote": "origin", "fmt": "{x}.h5"}]
+    assert state.config["sources"] == [{"name": "origin", "remote": "origin"}]
     assert state.config["remote"] == [
         {"name": "origin", "url": "https://data.test/eht/"}]
-    assert state.config["data"] == [{"db": "data.tsv"}]
-    assert state.data["source"].tolist() == ["origin", "origin"]
+    # The format stays the catalogue's, sorting every source's files.
+    assert state.config["data"] == [{"db": "data.tsv", "fmt": "{x}.h5"}]
+    assert state.data["catalog_source"].tolist() == ["origin", "origin"]
     assert effective_sources(state) == sources
     assert materialize_sources(state) == sources
 
@@ -167,7 +169,7 @@ def test_local_manifests_and_unconfigured_catalogues_have_no_sources():
 
 def test_rows_of_selects_rows_by_source():
     sources = [SourceSpec("a", "origin"), SourceSpec("b", "osn")]
-    frame = pd.DataFrame({"path": ["1", "2", "3"], "source": ["a", "b", "a"]})
+    frame = pd.DataFrame({"path": ["1", "2", "3"], "catalog_source": ["a", "b", "a"]})
     assert rows_of(frame, sources[0], sources).tolist() == [True, False, True]
 
 

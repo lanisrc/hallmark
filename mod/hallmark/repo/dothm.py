@@ -42,7 +42,9 @@ from ..error import CloneError, DothmError
 from ..utils import (replace_file_on_success,
                      load_yaml_file,
                      validate_path_name,
+                     validate_relative_path,
                      load_yaml)
+from .catalog import file_entries, table_names as _table_names
 from .state import State, normalize_rows
 from .config import row_to_path, single_data_format
 
@@ -96,6 +98,14 @@ def write_yaml(data, handle) -> None:
         Dumper=_HallmarkYamlDumper,
         sort_keys=False,
         width=float("inf"))
+
+
+def _read_tsv_blob(blob, empty: pd.DataFrame) -> pd.DataFrame:
+    """Read a staged or committed TSV; an empty file gives ``empty``."""
+    content = blob.data_stream.read()
+    if not content.strip():
+        return empty
+    return pd.read_csv(BytesIO(content), sep="\t", dtype=str, keep_default_na=False)
 
 
 def data_tsv_text(data: pd.DataFrame) -> str:
@@ -295,12 +305,16 @@ remote:
             state.data = data.reindex(columns=columns).fillna("").astype(str)
 
         elif "data.tsv" in blobs:
-            content = blobs["data.tsv"].data_stream.read()
-            if content.strip():
-                state.data = pd.read_csv(
-                    BytesIO(content), sep="\t", dtype=str, keep_default_na=False
-                )
+            state.data = _read_tsv_blob(blobs["data.tsv"], state.data)
 
+        try:
+            names = _table_names(state.config)[1:]
+        except ValueError:
+            # Commands that read a malformed config.yml report it themselves.
+            names = []
+        for name in names:
+            state.tables[name] = (_read_tsv_blob(blobs[name], pd.DataFrame())
+                                  if name in blobs else pd.DataFrame())
         return state
 
     def stage_text(self, path: str, text: str) -> None:
@@ -418,53 +432,77 @@ remote:
             raise
 
     def _restore_rows(self, head, head_paths, rows) -> None:
-        """Return the selected catalogue rows to HEAD and stage the result."""
+        """Return the selected catalogue rows of every TSV to HEAD and stage them."""
         staged = self.load_state(staged=True)
         committed = self.load_state("HEAD") if head is not None else State()
 
         def under(path):
             return [row for row in rows if path == row or path.startswith(row + "/")]
 
-        staged_paths = self._row_paths(staged)
-        committed_paths = self._row_paths(committed)
-        matched = {row for path in staged_paths + committed_paths
-                   for row in under(path)}
+        def frame(state, name):
+            if name == "data.tsv":
+                return state.data
+            return state.tables.get(name, pd.DataFrame())
+
+        names = list(dict.fromkeys([
+            "data.tsv", *staged.tables, *committed.tables]))
+        plans, matched = [], set()
+        for name in names:
+            staged_rows, committed_rows = frame(staged, name), frame(committed, name)
+            staged_paths = self._row_paths(staged, staged_rows)
+            committed_paths = self._row_paths(committed, committed_rows)
+            matched |= {row for path in staged_paths + committed_paths
+                        for row in under(path)}
+            plans.append((name, staged_rows, committed_rows,
+                          [not under(path) for path in staged_paths],
+                          [bool(under(path)) for path in committed_paths]))
+        entries = {entry["file"] for state in (staged, committed)
+                   for _, entry in file_entries(state.config)}
         for row in rows:
-            if row not in matched:
-                raise ValueError(f"No staged or committed path matches {row!r}")
-        keep = [not under(path) for path in staged_paths]
-        take = [bool(under(path)) for path in committed_paths]
-        restored = pd.concat([staged.data[keep], committed.data[take]],
-                             ignore_index=True, sort=False)
-        if (head is not None and set(restored.columns) == set(committed.data.columns)
-                and normalize_rows(restored[committed.data.columns]).equals(
-                    normalize_rows(committed.data))):
-            # Unstaging every change restores HEAD's own bytes.
-            legacy = [path for path in head_paths
-                      if path == "versions.yml" or path.startswith("versions/")]
-            self._reset_to_head(
-                head, ["data.tsv", *legacy, *self._legacy_record_paths()])
-            return
-        self.stage_text("data.tsv", data_tsv_text(restored))
-        legacy = self._legacy_record_paths()
-        if legacy:
-            self._remove_from_index(legacy)
+            if row in matched:
+                continue
+            if row in entries:
+                raise ValueError(
+                    f"{row!r} is a file: entry of config.yml; restore it with "
+                    "hm restore --staged .hm/config.yml")
+            raise ValueError(f"No staged or committed path matches {row!r}")
+        for name, staged_rows, committed_rows, keep, take in plans:
+            if all(keep) and not any(take):
+                continue
+            restored = pd.concat([staged_rows[keep], committed_rows[take]],
+                                 ignore_index=True, sort=False)
+            if (name in head_paths
+                    and set(restored.columns) == set(committed_rows.columns)
+                    and normalize_rows(restored[committed_rows.columns]).equals(
+                        normalize_rows(committed_rows))):
+                # Unstaging every change restores HEAD's own bytes.
+                legacy = ([path for path in head_paths
+                           if path == "versions.yml" or path.startswith("versions/")]
+                          + self._legacy_record_paths() if name == "data.tsv" else [])
+                self._reset_to_head(head, [name, *legacy])
+                continue
+            self.stage_text(name, data_tsv_text(restored))
+            legacy = self._legacy_record_paths() if name == "data.tsv" else []
+            if legacy:
+                self._remove_from_index(legacy)
 
     @staticmethod
-    def _row_paths(state) -> list:
+    def _row_paths(state, frame) -> list:
         """Return each row's catalogue path, built from its fields if needed."""
-        if state.data.empty:
+        if frame.empty:
             return []
         fmt = single_data_format(state.config)
         return [row_to_path(record, fmt).as_posix()
-                for record in state.data.to_dict(orient="records")]
+                for record in frame.to_dict(orient="records")]
 
     def save_state(self, state: State) -> None:
         """
-        Write and stage ``config.yml``, ``meta.yml`` and ``data.tsv``.
+        Write and stage ``config.yml``, ``meta.yml``, ``data.tsv`` and the
+        other TSVs that ``config.yml`` names.
 
         Rows are saved, and kept in memory, in the form load_state returns, so
         saving a loaded state changes nothing. Each row's path is checked first.
+        A table without columns, never written, is not created.
 
         Args:
             state (State): State to save; its rows are normalized in place.
@@ -473,10 +511,20 @@ remote:
         state.data = normalize_rows(state.data)
         for record in state.data.to_dict(orient="records"):
             row_to_path(record, fmt)
+        names = _table_names(state.config)[1:]
+        state.tables = {name: normalize_rows(state.tables.get(name, pd.DataFrame()))
+                        for name in names}
+        for frame in state.tables.values():
+            for path in frame.get("path", []):
+                validate_relative_path(path, label="catalogue path")
         self.write_yaml(state.config, "config")
         self.write_yaml(state.meta, "meta")
         self.write_tsv(state.data, "data")
-        self._add_to_index(["config.yml", "meta.yml", "data.tsv"])
+        written = [name for name, frame in state.tables.items()
+                   if len(frame.columns)]
+        for name in written:
+            self.write_tsv(state.tables[name], name)
+        self._add_to_index(["config.yml", "meta.yml", "data.tsv", *written])
         self._drop_legacy_records()
 
     def _add_to_index(self, paths) -> None:

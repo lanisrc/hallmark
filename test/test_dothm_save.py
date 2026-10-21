@@ -9,7 +9,8 @@ def remote_state(repo, paths, **columns):
     repo.state.config = {"data": [{"db": "data.tsv"}],
                          "remote": [{"name": "origin", "url": "https://x.test/d/"}],
                          "sources": [{"name": "origin", "remote": "origin"}]}
-    repo.state.data = pd.DataFrame({"path": paths, "source": "origin", **columns})
+    repo.state.data = pd.DataFrame(
+        {"path": paths, "catalog_source": "origin", **columns})
     return repo.state
 
 
@@ -95,20 +96,20 @@ def test_adding_a_source_leaves_other_rows_untouched(tmp_path, monkeypatch):
     from hallmark.transport import OperationContext
 
     listing = ('<h1>Index of data</h1><a href="M87_001.fits">M87_001.fits</a>'
-               '<a href="notes.txt">notes.txt</a>')
+               '<a href="M87_002.fits">M87_002.fits</a>')
     monkeypatch.setattr(OperationContext, "read_text",
                         lambda context, path, **_: listing)
     repo = Repo.init(tmp_path / "repo")
-    repo.add("https://x.test/d/{src}_{day:03d}.fits")
+    repo.add("https://x.test/d/{src}_{day:03d}.fits", filter="*001.fits")
     repo.commit("Catalogue")
-    repo.add("https://x.test/d/", filter="*.txt", source="notes")
+    repo.add("https://x.test/d/", filter="*002.fits", source="second")
     changed = {diff.a_path or diff.b_path for diff in repo.dothm.index.diff("HEAD")}
     assert changed == {"config.yml", "data.tsv"}
     head = repo.dothm.git.show("HEAD:data.tsv").splitlines()
     staged = repo.dothm.git.show(":data.tsv").splitlines()
-    # Existing rows keep their exact lines; only the new row and column appear.
-    assert [line.split("\t")[:9] for line in staged if "M87" in line] == [
-        line.split("\t") for line in head[1:]]
+    # Existing rows keep their exact lines; only the new row appears.
+    assert staged[0] == head[0] and len(staged) == len(head) + 1
+    assert [line for line in staged if "M87_001" in line] == head[1:]
 
 
 def test_local_patterns_and_paths_record_the_same_field_text(tmp_path):

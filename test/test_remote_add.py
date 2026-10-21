@@ -6,6 +6,7 @@ from click.testing import CliRunner
 from hallmark import Repo
 from hallmark.cli import hallmark
 from hallmark.error import CheckoutError, DestinationExistsError
+from hallmark.remote.add import is_remote_catalog, split_remote_pattern
 from hallmark.transport import OperationContext
 from hallmark.transport.base import DownloadError, RemoteObjectMissing
 
@@ -33,7 +34,10 @@ def test_remote_add_stages_without_payload_or_commit(tmp_path, remote_listing):
     repo.state.meta["project"] = "keep"
     repo.dothm.save_state(repo.state)
     frame = repo.add("https://example.test/data/{src}_{day:03d}.fits")
-    assert frame.path.tolist() == ["M87_001.fits", "M87_002.fits"]
+    # notes.txt matches no format, so it is a file: entry rather than a row.
+    assert frame.path.tolist() == ["M87_001.fits", "M87_002.fits", "notes.txt"]
+    assert repo.state.config["data"] == [
+        {"file": "notes.txt"}, {"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"}]
     assert repo.dothm.head.commit.hexsha == head
     assert repo.state.meta == {"project": "keep"}
     assert repo.state.data["src"].tolist() == ["M87", "M87"]
@@ -45,7 +49,7 @@ def test_remote_add_stages_without_payload_or_commit(tmp_path, remote_listing):
     assert repo.commit("Add remote EHT data")
     assert repo.dothm.head.commit.message.strip() == "Add remote EHT data"
     assert not repo.commit("No changes")
-    assert repo.plan_download().file_count == 2
+    assert repo.plan_download().file_count == 3
 
 
 def test_remote_add_merges_paths_and_leaves_unmatched_rows(tmp_path, remote_listing):
@@ -144,7 +148,7 @@ def test_second_server_needs_its_own_paths(tmp_path, remote_listing):
     assert repo.state.data.path.tolist() == [
         "M87_001.fits", "M87_002.fits", "mirror/M87_001.fits",
         "mirror/M87_002.fits", "mirror/notes.txt", "notes.txt"]
-    assert set(repo.state.data.source) == {"origin", "different-test"}
+    assert set(repo.state.data.catalog_source) == {"origin", "different-test"}
 
 
 def test_remote_add_rejects_local_data_before_network(tmp_path, remote_listing):
@@ -191,10 +195,19 @@ def test_cli_init_add_commit_status(tmp_path, monkeypatch, remote_listing):
     assert not Path("M87_001.fits").exists()
 
 
+def test_a_format_may_name_the_observed_source(tmp_path, remote_listing):
+    # hm detect names a field "source" for objects such as M87, so the
+    # catalogue keeps its own column under another name.
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{source}_{day:03d}.fits")
+    assert repo.state.data["source"].tolist() == ["M87", "M87"]
+    assert repo.state.data["catalog_source"].tolist() == ["origin", "origin"]
+
+
 def test_remote_parameter_cannot_turn_catalog_into_local_objects(
         tmp_path, remote_listing):
     repo = Repo.init(tmp_path / "data")
-    for field in ("sha1", "source", "size_bytes", "sha256"):
+    for field in ("sha1", "catalog_source", "size_bytes", "sha256"):
         with pytest.raises(ValueError, match=f"Rename the pattern field.*{field}"):
             repo.add(f"https://example.test/data/{{{field}}}_{{day}}.fits")
     assert repo.state.data.empty
@@ -203,12 +216,152 @@ def test_remote_parameter_cannot_turn_catalog_into_local_objects(
 
 def test_remote_add_preserves_other_catalog_tables(tmp_path, remote_listing):
     repo = Repo.init(tmp_path / "data")
-    repo.state.config["data"] = [{"db": "other.tsv"}]
+    repo.state.config["data"] = [{"fmt": "{src}_{day:03d}.fits", "db": "other.tsv"}]
     repo.dothm.save_state(repo.state)
-    with pytest.raises(ValueError, match="only the data.tsv"):
-        repo.add("https://example.test/data/")
-    assert repo.state.config["data"] == [{"db": "other.tsv"}]
-    assert remote_listing[1] == []
+    repo.add("https://example.test/data/")
+    assert repo.state.config["data"] == [
+        {"file": "notes.txt"}, {"db": "other.tsv", "fmt": "{src}_{day:03d}.fits"}]
+    assert repo.dothm.read_tsv("other.tsv")["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits"]
+    assert repo.state.data.empty
+    assert is_remote_catalog(repo.state)
+
+
+def test_remote_add_sorts_fmts_into_their_own_tsvs(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    frame = repo.add("https://example.test/data/", remote_fmt=[
+        {"fmt": "{src}_{day:03d}.fits", "db": "data.tsv"}, {"fmt": "notes.{ext}"}])
+    assert repo.state.config["data"] == [
+        {"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"},
+        {"db": "notes.{ext}.tsv", "fmt": "notes.{ext}"}]
+    assert repo.state.data["path"].tolist() == ["M87_001.fits", "M87_002.fits"]
+    assert repo.dothm.read_tsv("notes.{ext}.tsv")["ext"].tolist() == ["txt"]
+    assert sorted(frame["path"]) == ["M87_001.fits", "M87_002.fits", "notes.txt"]
+
+
+def test_remote_add_keeps_earlier_rows_in_each_tsv(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.state.config["data"] = [{"fmt": "{src}_{day:03d}.fits", "db": "fits.tsv"}]
+    repo.dothm.save_state(repo.state)
+    root = "https://example.test/data/"
+    repo.add(root, filter="*001.fits")
+    repo.add(root, filter="*002.fits")
+    assert repo.dothm.read_tsv("fits.tsv")["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits"]
+
+
+def test_cli_add_repeated_fmt_flags(tmp_path, monkeypatch, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, [
+        "add", "https://example.test/data/",
+        "--fmt", "{src}_{day:03d}.fits=fits", "--fmt", "notes.{ext}=notes"])
+    assert result.exit_code == 0, result.output
+    repo = Repo(repo.worktree)
+    assert repo.state.config["data"] == [
+        {"db": "fits.tsv", "fmt": "{src}_{day:03d}.fits"},
+        {"db": "notes.tsv", "fmt": "notes.{ext}"}]
+    assert repo.dothm.read_tsv("notes.tsv")["path"].tolist() == ["notes.txt"]
+
+
+def test_remote_add_turns_unmatched_files_into_file_entries(tmp_path, remote_listing):
+    remote_listing[0][""] = ('<h1>Index of data</h1>'
+                             '<a href="M87_001.fits">M87_001.fits</a>'
+                             '<a href="README.md">README.md</a>'
+                             '<a href="meta.yml">meta.yml</a>'
+                             '<a href="notes.txt">notes.txt</a>')
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    assert repo.state.config["data"] == [
+        {"name": "readme", "file": "README.md"}, {"file": "notes.txt"},
+        {"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"}]
+    assert repo.state.config["meta"] == [{"file": "meta.yml"}]
+    assert repo.state.data["path"].tolist() == ["M87_001.fits"]
+    assert repo.plan_download(all_files=True).file_count == 4
+
+
+def test_remote_add_keeps_earlier_file_entries(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    root = "https://example.test/data/"
+    repo.add(root + "{src}_{day:03d}.fits", filter="*.txt")
+    repo.add(root, filter="*.fits")
+    # Two filters are two sources, so each file: entry names its own.
+    assert [source["name"] for source in repo.state.config["sources"]] == [
+        "origin", "origin-2"]
+    assert repo.state.config["data"] == [
+        {"file": "notes.txt", "catalog_source": "origin"},
+        {"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"}]
+    assert repo.state.data["path"].tolist() == ["M87_001.fits", "M87_002.fits"]
+
+
+def test_remote_add_records_listed_checksum_on_file_entries(tmp_path, remote_listing):
+    digest = "0123456789abcdef0123456789abcdef"
+    remote_listing[0][""] = ('<h1>Index of data</h1>'
+                             '<a href="M87_001.fits">M87_001.fits</a>'
+                             '<a href="notes.txt">notes.txt</a>'
+                             '<a href="md5sums">md5sums</a>')
+    remote_listing[0]["md5sums"] = f"{digest}  notes.txt\n"
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    assert {"file": "notes.txt", "md5": digest} in repo.state.config["data"]
+
+
+def test_new_fmt_renames_data_tsv_and_sorts_unsorted_files(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    repo.add("https://example.test/data/", remote_fmt=[{"fmt": "notes.{ext}"}],
+             resort=False)
+    assert repo.state.config["data"] == [
+        {"db": "{src}_{day:03d}.fits.tsv", "fmt": "{src}_{day:03d}.fits"},
+        {"db": "notes.{ext}.tsv", "fmt": "notes.{ext}"}]
+    assert repo.dothm.read_tsv("{src}_{day:03d}.fits.tsv")["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits"]
+    assert repo.dothm.read_tsv("notes.{ext}.tsv")["path"].tolist() == ["notes.txt"]
+    assert repo.state.data.empty
+    assert is_remote_catalog(repo.state)
+
+
+def test_new_fmt_resort_moves_sorted_files_to_a_better_match(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    asked = []
+    repo.add("https://example.test/data/", remote_fmt=[{"fmt": "M87_{day:03d}.fits"}],
+             resort=lambda count: asked.append(count) or True)
+    assert asked == [2]
+    assert repo.dothm.read_tsv("{src}_{day:03d}.fits.tsv").empty
+    assert repo.dothm.read_tsv("M87_{day:03d}.fits.tsv")["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits"]
+
+
+def test_new_fmt_unsorted_keeps_sorted_files_in_place(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    repo.add("https://example.test/data/", remote_fmt=[{"fmt": "M87_{day:03d}.fits"}],
+             resort=False)
+    assert repo.dothm.read_tsv("{src}_{day:03d}.fits.tsv")["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits"]
+    assert repo.dothm.read_tsv("M87_{day:03d}.fits.tsv").empty
+
+
+def test_new_fmt_without_resort_answer_asks_for_one(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    with pytest.raises(ValueError, match="resort=True"):
+        repo.add("https://example.test/data/", remote_fmt=[{"fmt": "notes.{ext}"}])
+
+
+def test_cli_asks_whether_to_resort_for_a_new_fmt(tmp_path, monkeypatch,
+                                                  remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add("https://example.test/data/{src}_{day:03d}.fits")
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, [
+        "add", "https://example.test/data/", "--fmt", "notes.{ext}"],
+        input="unsorted\n")
+    assert result.exit_code == 0, result.output
+    assert "2 files are already sorted" in result.output
+    repo = Repo(repo.worktree)
+    assert repo.dothm.read_tsv("notes.{ext}.tsv")["path"].tolist() == ["notes.txt"]
 
 
 @pytest.mark.parametrize("options", ["[]\n", "scalar\n", "options: [\n"])
@@ -251,10 +404,11 @@ def test_add_cli_forwards_backend_and_selection(monkeypatch, tmp_path):
         "--source", "fits", "--prefix", "lab/", "--server-checksum", "sha256",
         "--skip-duplicates"])
     assert result.exit_code == 0, result.output
+    assert callable(captured.pop("resort"))
     assert captured == {
         "value": "ssh://lab-data/export/", "encoding": False,
         "auth": "lab", "backend": "ssh", "backend_options": {"collection": "latest"},
-        "filter": ("**/*.fits", "README*"), "remote_fmt": "{name}.fits",
+        "filter": ("**/*.fits", "README*"), "remote_fmt": [{"fmt": "{name}.fits"}],
         "remote": "lab", "source": "fits", "prefix": "lab/",
         "server_checksum": "sha256", "on_duplicate": "skip", "progress": True}
 
@@ -303,7 +457,7 @@ def test_remote_pattern_keeps_ssh_usernames():
     from hallmark.remote.add import split_remote_pattern
 
     assert split_remote_pattern("ssh://researcher@campus/srv/data/{run}.h5") == (
-        "ssh://researcher@campus/srv/data/", "{run}.h5")
+        "ssh://researcher@campus/srv/data/", [{"fmt": "{run}.h5"}])
 
 
 @pytest.mark.parametrize("url", [
@@ -500,7 +654,7 @@ SHARED = ["a.fits", "b.fits", "c.fits", "d.fits", "e.fits"]
 
 
 def _owners(repo):
-    return repo.state.data.set_index("path")["source"].to_dict()
+    return repo.state.data.set_index("path")["catalog_source"].to_dict()
 
 
 def test_content_comparison_uses_what_both_rows_record(tmp_path):
@@ -594,10 +748,11 @@ def test_file_and_folder_clashes_are_refused_even_when_skipping():
     def never(duplicates):
         raise AssertionError("asked about a clash that cannot be skipped")
 
-    others = pd.DataFrame({"path": ["runs", "a.fits"], "source": ["origin"] * 2})
+    others = pd.DataFrame(
+        {"path": ["runs", "a.fits"], "catalog_source": ["origin"] * 2})
     for decision in ("skip", never):
         with pytest.raises(ValueError, match=r"runs/1\.fits \(a file where another"):
-            _settle_duplicates([entry("runs/1.fits"), entry("a.fits")], None,
+            _settle_duplicates([entry("runs/1.fits"), entry("a.fits")],
                                others, SourceSpec("new", "new"),
                                [SourceSpec("origin", "origin")], decision,
                                can_prefix=True)
@@ -686,22 +841,24 @@ def test_nested_folder_reuses_its_remote_as_a_new_source(tmp_path, remote_listin
         {"name": "origin", "remote": "origin", "filter": ["*001.fits"]},
         {"name": "origin-sub", "remote": "origin", "root": "sub/",
          "filter": ["*.txt"]}]
-    rows = repo.state.data.set_index("path")["source"].to_dict()
+    rows = repo.state.data.set_index("path")["catalog_source"].to_dict()
     assert rows == {"M87_001.fits": "origin", "sub/notes.txt": "origin-sub"}
     plan = repo.plan_download(all_files=True)
     assert sorted(item.relative_path.as_posix() for item in plan.items) == [
         "M87_001.fits", "sub/notes.txt"]
 
 
-def test_two_patterns_in_one_folder_are_two_sources(tmp_path, remote_listing):
+def test_two_filters_in_one_folder_are_two_sources(tmp_path, remote_listing):
     repo = Repo.init(tmp_path / "data")
-    repo.add(ROOT + "{src}_{day:03d}.fits")
+    repo.add(ROOT + "{src}_{day:03d}.fits", filter="*.fits")
     repo.add(ROOT, filter="*.txt")
     assert [s["name"] for s in repo.state.config["sources"]] == ["origin", "origin-2"]
     data = repo.state.data.set_index("path")
     assert data.loc["M87_002.fits", "day"] == "002"
-    assert data.loc["notes.txt", "source"] == "origin-2"
-    assert data.loc["notes.txt", "day"] == ""
+    assert data.loc["M87_002.fits", "catalog_source"] == "origin"
+    # The catalogue's format sorts every source's files; notes.txt matches none.
+    assert ({"file": "notes.txt", "catalog_source": "origin-2"}
+            in repo.state.config["data"])
     with pytest.raises(ValueError, match="choose one with --source"):
         repo.add(ROOT)
     # Repeating a selection updates its own source.
@@ -709,22 +866,38 @@ def test_two_patterns_in_one_folder_are_two_sources(tmp_path, remote_listing):
     assert len(repo.state.config["sources"]) == 2
 
 
-def test_changing_a_pattern_names_the_source(tmp_path, remote_listing):
+def test_changing_filters_names_the_source(tmp_path, remote_listing):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT, filter="*.fits")
+    repo.commit("Catalogue")
+    with pytest.raises(ValueError, match="--source origin"):
+        repo.add(ROOT, filter=["*.fits", "*.txt"])
+    with pytest.raises(ValueError, match="do not fit"):
+        repo.add(ROOT, filter="*001.fits", source="origin")
+    assert repo.dothm.index.diff("HEAD") == []
+    repo.add(ROOT, filter=["*.fits", "*.txt"], source="origin")
+    assert repo.state.config["sources"] == [
+        {"name": "origin", "remote": "origin", "filter": ["*.fits", "*.txt"]}]
+    assert repo.state.data["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits", "notes.txt"]
+    with pytest.raises(ValueError, match="keeps its prefix"):
+        repo.add(ROOT, prefix="elsewhere")
+
+
+def test_a_new_format_sorts_the_catalogue_not_one_source(tmp_path, remote_listing):
     repo = Repo.init(tmp_path / "data")
     repo.add(ROOT + "{src}_{day:03d}.fits")
     repo.commit("Catalogue")
-    with pytest.raises(ValueError, match="--source origin"):
+    with pytest.raises(ValueError, match="2 files are already sorted"):
         repo.add(ROOT + "{name}.fits")
-    with pytest.raises(ValueError, match="do not fit"):
-        repo.add(ROOT + "{src}_001.fits", source="origin")
     assert repo.dothm.index.diff("HEAD") == []
-    repo.add(ROOT + "{name}.fits", source="origin")
-    assert repo.state.config["sources"] == [
-        {"name": "origin", "remote": "origin", "fmt": "{name}.fits"}]
-    assert repo.state.data["name"].tolist() == ["M87_001", "M87_002"]
-    assert "day" not in repo.state.data.columns
-    with pytest.raises(ValueError, match="keeps its prefix"):
-        repo.add(ROOT + "{name}.fits", prefix="elsewhere")
+    repo.add(ROOT + "{name}.fits", resort=True)
+    assert repo.state.config["sources"] == [{"name": "origin", "remote": "origin"}]
+    assert [entry.get("fmt") for entry in repo.state.config["data"]] == [
+        None, "{src}_{day:03d}.fits", "{name}.fits"]
+    # The more specific format still describes the fits files best.
+    assert repo.dothm.read_tsv("{src}_{day:03d}.fits.tsv")["path"].tolist() == [
+        "M87_001.fits", "M87_002.fits"]
 
 
 def test_readding_a_source_prunes_files_gone_from_the_server(
@@ -804,8 +977,8 @@ def test_remote_name_selects_or_creates_a_remote(tmp_path, remote_listing):
 
 def test_legacy_catalogue_gains_sources_on_its_next_add(tmp_path, remote_listing):
     repo = Repo.init(tmp_path / "data")
-    rows = repo.add(ROOT + "{src}_{day:03d}.fits").drop(
-        columns=["source", "checksum_source"])
+    rows = repo.add(ROOT + "{src}_{day:03d}.fits", filter="*.fits").drop(
+        columns=["catalog_source", "checksum_source"])
     # A catalogue as written before sources existed.
     repo.state.config = {"data": [{"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"}],
                          "remote": [{"name": "origin", "url": ROOT,
@@ -818,12 +991,14 @@ def test_legacy_catalogue_gains_sources_on_its_next_add(tmp_path, remote_listing
     assert legacy.plan_download(all_files=True).file_count == 2
     legacy.add(ROOT, filter="*.txt")
     assert legacy.state.config["sources"] == [
-        {"name": "origin", "remote": "origin", "fmt": "{src}_{day:03d}.fits"},
+        {"name": "origin", "remote": "origin"},
         {"name": "origin-2", "remote": "origin", "filter": ["*.txt"]}]
-    assert legacy.state.config["data"] == [{"db": "data.tsv"}]
-    assert legacy.state.data.set_index("path")["source"].to_dict() == {
-        "M87_001.fits": "origin", "M87_002.fits": "origin",
-        "notes.txt": "origin-2"}
+    # The format stays the catalogue's, and notes.txt matches none.
+    assert legacy.state.config["data"] == [
+        {"file": "notes.txt", "catalog_source": "origin-2"},
+        {"db": "data.tsv", "fmt": "{src}_{day:03d}.fits"}]
+    assert legacy.state.data.set_index("path")["catalog_source"].to_dict() == {
+        "M87_001.fits": "origin", "M87_002.fits": "origin"}
 
 
 def test_renaming_a_remote_keeps_its_sources(tmp_path, remote_listing):
@@ -1018,8 +1193,8 @@ def test_unstaging_a_folder_returns_its_rows_to_head(tmp_path, remote_listing):
 def _legacy_catalogue(tmp_path, remote, data):
     """Write a catalogue as Hallmark wrote one before sources existed."""
     repo = Repo.init(tmp_path / "data")
-    rows = repo.add(ROOT + "{src}_{day:03d}.fits").drop(
-        columns=["source", "checksum_source"])
+    rows = repo.add(ROOT + "{src}_{day:03d}.fits", filter="*.fits").drop(
+        columns=["catalog_source", "checksum_source"])
     repo.state.config = {"data": data, "remote": remote}
     repo.state.data = rows
     repo.dothm.save_state(repo.state)
@@ -1039,9 +1214,8 @@ def test_downloading_a_legacy_catalogue_records_its_source_first(
     legacy = _legacy_catalogue(tmp_path, remote, data)
     result = legacy.download(legacy.plan_download(all_files=True), approved=True)
     assert result["staged"] == 2 and result["catalog_upgraded"]
-    assert legacy.state.config["sources"] == [
-        {"name": "origin", "remote": "origin", "fmt": "{src}_{day:03d}.fits"}]
-    assert legacy.state.data["source"].tolist() == ["origin", "origin"]
+    assert legacy.state.config["sources"] == [{"name": "origin", "remote": "origin"}]
+    assert legacy.state.data["catalog_source"].tolist() == ["origin", "origin"]
     # Still a catalogue of server files: committing stores no payload, files
     # never downloaded are not "deleted", and the next add works.
     assert legacy.status()["worktree"]["deleted"] == []
@@ -1049,8 +1223,9 @@ def test_downloading_a_legacy_catalogue_records_its_source_first(
     reopened = Repo(legacy.worktree)
     assert reopened.state.data["sha1"].str.len().tolist() == [40, 40]
     reopened.add(ROOT, filter="*.txt")
-    assert reopened.state.data["path"].tolist() == [
-        "M87_001.fits", "M87_002.fits", "notes.txt"]
+    assert reopened.state.data["path"].tolist() == ["M87_001.fits", "M87_002.fits"]
+    assert ({"file": "notes.txt", "catalog_source": "origin-2"}
+            in reopened.state.config["data"])
 
 
 def test_a_legacy_catalogue_with_several_remotes_is_left_as_it_was(
@@ -1078,7 +1253,7 @@ def test_catalogue_rows_cannot_plant_repository_metadata(tmp_path, path):
                          "remote": [{"name": "origin", "url": ROOT}],
                          "sources": [{"name": "origin", "remote": "origin"}]}
     repo.state.data = __import__("pandas").DataFrame(
-        {"path": [path], "source": ["origin"]})
+        {"path": [path], "catalog_source": ["origin"]})
     with pytest.raises(Exception, match="repository metadata"):
         repo.plan_download(all_files=True)
 
@@ -1182,3 +1357,11 @@ def test_checkout_explains_how_to_clear_unstaged_hallmark_state(
     reopened = Repo(repo.worktree)
     assert reopened.checkout("other")
     assert reopened.state.config["remote"][0]["name"] == "origin"
+
+
+@pytest.mark.parametrize("value, fmt, message", [
+    ("file:///data/", None, "requires an HTTP"),
+    ("https://example.test/data/{src}.fits", "{src}.fits", "not both")])
+def test_split_remote_pattern_rejects_bad_input(value, fmt, message):
+    with pytest.raises(ValueError, match=message):
+        split_remote_pattern(value, fmt)

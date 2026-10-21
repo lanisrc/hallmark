@@ -90,9 +90,11 @@ temporary file, a stored object not yet linked, or a linked file whose SHA-1
 is not recorded. The next download records it, without a transfer when the
 catalogue has a checksum for the file and after fetching it to compare when not.
 
-The catalogue itself is ``config.yml``, ``meta.yml`` and ``data.tsv``, with
-one line per file. See ``doc/data_backend.md`` for every command's effect on
-these files and on ``.hm/objects``.
+The catalogue itself is ``config.yml``, ``meta.yml`` and one TSV per filename
+format (``data.tsv`` for a single format, or for none), with one line per file;
+files no format matches are ``file:`` entries in ``config.yml``. See
+``doc/data_backend.md`` for every command's effect on these files and on
+``.hm/objects``.
 
 
 API

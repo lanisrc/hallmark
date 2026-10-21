@@ -64,12 +64,14 @@ Suppose the export contains ``runs/run_001.h5``, ``runs/run_002.h5`` and
        --fmt 'runs/run_{run:03d}.h5'
    hm commit -m "Record remote catalog"
 
-This creates ``./lab/.hm`` and catalogs only the matching run files, with their
-sizes, modification times and any checksums. The ``checksum_source`` column says
-where each checksum came from: ``published`` for a checksum file such as
-``SHA256SUMS`` beside the data. The URL is the exact discovery root. A filename format selects paths and extracts
-parameters; it does not approve a download. A glob filter can select paths
-without defining parameters:
+This creates ``./lab/.hm`` and catalogs the run files in ``data.tsv``, with
+their sizes, modification times and any checksums. The ``checksum_source`` column
+says where each checksum came from: ``published`` for a checksum file such as
+``SHA256SUMS`` beside the data. ``README.md`` matches no format, so it is listed
+as a ``file:`` entry in ``config.yml``, with its published checksum if there is
+one. The URL is the exact discovery root. A filename format extracts parameters
+and sorts the files; it does not approve a download. A glob filter selects which
+paths to catalog:
 
 .. code-block:: bash
 
@@ -79,16 +81,43 @@ without defining parameters:
        --filter '**/*.h5'
    hm commit -m "Record remote catalog"
 
-Without ``--filter`` or ``--fmt``, discovery recursively covers every directory
-beneath the URL and catalogs all discovered files. A filter still traverses
+Without ``--filter``, discovery recursively covers every directory beneath the
+URL and catalogs every file it finds. A filter still traverses
 directories needed to find matching files. Discovery shows an indeterminate
 progress bar with counts of completed directories and discovered files.
 The percentage and completion time remain unknown until a total is available.
 
 A scan stages its catalog only after it completes. If the connection or access
-fails, or no file matches the URL, filter and filename format, ``add`` explains
+fails, or no file matches the URL and filter, ``add`` explains
 the problem, exits with an error and keeps the previously staged catalog
 unchanged; it never stages a partial result.
+
+Several filename formats can be cataloged at once by repeating ``--fmt``, each
+as ``FMT`` or ``FMT=DB``. Every format's files go to their own TSV, named by
+``DB`` or after the format itself:
+
+.. code-block:: bash
+
+   hm add 'ssh://lab-data/srv/exports/lab/' \
+       --fmt 'runs/run_{run:03d}.h5=runs' --fmt 'logs/run_{run:03d}.log=logs'
+
+A format added to an existing catalog is kept next to the earlier ones. When the
+catalog had a single format in ``data.tsv``, that TSV is renamed after its format.
+If files are already sorted into TSVs, ``hm add`` asks whether to sort them
+again with the new format (``resort``), moving each file to the format that fits
+it best, or to sort only files that no format matched yet (``unsorted``).
+Python callers pass ``resort=True`` or ``resort=False`` to ``Repo.add``.
+
+``hm detect REMOTE`` suggests formats for a configured remote, named like
+``origin`` or given as a URL inside it. A URL can point at a subfolder; only
+that folder is scanned and the remote itself is unchanged. The command prints
+the suggested formats and the ``hm add`` command that uses them; ``--add``
+catalogs with every detected format right away:
+
+.. code-block:: bash
+
+   hm detect origin
+   hm detect 'ssh://lab-data/srv/exports/lab/logs/' --add
 
 Both URL schemes use structured SFTP directory enumeration and file transfers.
 SFTP-only accounts work for discovery as well as downloading. Discovery
@@ -115,7 +144,10 @@ containing a backslash or newline cannot be hashed this way.
 
 The generated data remote is named ``origin`` and points to the source URL.
 Each ``add`` records a *source*: the remote, the folder beneath it, and the
-pattern and filters that selected its files. Its rows carry the source name.
+filters that selected its files. Its rows carry the source name in the
+``catalog_source`` column, leaving ``source`` free for a format field such as
+an observed object. Filename formats belong to the whole catalog: they sort the
+files of every source.
 The destination may already contain files, provided it has no ``.hm``;
 initialization preserves those files. An existing ``.hm`` is rejected before
 network access. ``hm init PATH`` always creates an empty local repository.
@@ -152,16 +184,16 @@ file, so only one of them can be downloaded there. Use ``--remote NAME`` to
 name a new remote or pick an existing one, and ``--source NAME`` to name the
 source.
 
-Repeating an ``add`` with the same URL, pattern and filters updates its source:
-new files are added, files gone from the server are removed, and ``add`` lists
-the removals. It also lists, as changed upstream, files you downloaded whose
-size, modification time or checksum the server now reports differently; the
-next ``download`` replaces them. A bare URL updates the single source of that
-folder. A different pattern in the same folder adds another source; to change
-an existing source's pattern instead, run ``add`` with ``--source NAME``. A new
-pattern must still match every catalogued file of that source, so a narrower
+Repeating an ``add`` with the same URL and filters updates its source: new
+files are added, files gone from the server are removed, and ``add`` lists the
+removals. It also lists, as changed upstream, files you downloaded whose size,
+modification time or checksum the server now reports differently; the next
+``download`` replaces them. A bare URL updates the single source of that
+folder. Different filters in the same folder add another source; to change an
+existing source's filters instead, run ``add`` with ``--source NAME``. New
+filters must still match every catalogued file of that source, so a narrower
 selection belongs on a new branch. ``set-config --fmt`` does not apply to
-remote catalogs.
+remote catalogs; add a format with ``hm add URL --fmt``.
 
 ``download`` fetches each file from the remote of the source that cataloged
 it, opening one connection per remote; the plan lists every remote and its file
@@ -697,9 +729,10 @@ for data directories. Percent-encode reserved characters in URL roots; catalog
 paths are literal relative names. Hallmark rejects traversal and observed
 destination symlinks; server permissions remain the access-control boundary.
 
-Discovered catalogs can use path rows and published catalogs can contain
-multiple TSVs. Existing local ``add``/``commit``/``checkout`` workflows still
-require a compatible one-format ``data.tsv`` repository; downloading does not
+Discovered catalogs can use path rows, one TSV per filename format and
+``file:`` entries for files no format matches; published catalogs can contain
+multiple TSVs. Local ``add``/``commit``/``checkout`` workflows still use a
+single format in ``data.tsv``; downloading does not
 populate the local object store. For local experiments, initialize a separate
 repository, copy in the downloaded files, configure their filename format,
 then add and commit them.

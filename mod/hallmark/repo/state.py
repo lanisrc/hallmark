@@ -21,6 +21,8 @@ from ..utils import string_or_none
 
 # Define the default columns for the state DataFrame
 COLUMNS = ["sha1"]
+# TSV that holds the rows of a lone data entry without a "db" name
+DEFAULT_DB = "data.tsv"
 
 
 def cell_text(value) -> str:
@@ -72,8 +74,8 @@ def is_remote_catalog(state) -> bool:
     config = state.config if isinstance(state.config, dict) else {}
     if isinstance(config.get("sources"), list):
         return True
-    columns = state.data.columns
-    return "path" in columns and "sha1" not in columns
+    return any("path" in frame.columns and "sha1" not in frame.columns
+               for frame in [state.data, *getattr(state, "tables", {}).values()])
 
 
 def _prepare_file_rows(frame: pd.DataFrame) -> pd.DataFrame:
@@ -121,6 +123,8 @@ class State:
         meta: Repository metadata.
         data: Tabular file index containing indexed object checksums
         (``sha1``) and associated metadata.
+        tables: The other TSVs that ``config.yml``'s ``data`` entries name,
+        by file name, such as one per filename format of a remote catalogue.
     """
 
     config:    dict         = field(default_factory=dict)
@@ -128,6 +132,7 @@ class State:
     data:      pd.DataFrame = field(
         default_factory=lambda: pd.DataFrame(columns=COLUMNS)
     )
+    tables:    dict         = field(default_factory=dict)
 
     def update(self, pf) -> None:
         """

@@ -478,8 +478,9 @@ def test_nested_remote_add_keeps_url_workflow_and_download_discovery(
 
     saved = Repo(repo.worktree)
     assert saved.state.data["path"].tolist() == ["M87_001.txt"]
+    # Status covers every catalogued file, including notes.txt's file: entry.
     assert saved.status()["staged"] == {
-        "state": INITIAL_STATE, "added": ["M87_001.txt"],
+        "state": INITIAL_STATE, "added": ["M87_001.txt", "notes.txt"],
         "modified": [], "deleted": [],
     }
     assert saved.status()["worktree"] == {"modified": [], "deleted": []}
@@ -487,7 +488,7 @@ def test_nested_remote_add_keeps_url_workflow_and_download_discovery(
     assert not (repo.worktree / "M87_001.txt").exists()
     _invoke("commit", "-m", "Remote catalog from subfolder")
     assert "nothing to commit, remote catalog unchanged" in _invoke("status")
-    assert "1 file(s)" in _invoke("download", "--all", "--dry-run")
+    assert "2 file(s)" in _invoke("download", "--all", "--dry-run")
     assert reads == [""]
 
 
@@ -587,15 +588,14 @@ def test_remote_format_update_is_refused_without_changes(
     before = Repo(repo.worktree)
     assert "sha1" not in before.state.data.columns
 
-    # The pattern belongs to the remote source, not the branch data spec.
+    # A remote catalogue's formats sort files as hm add finds them.
     output = _invoke("set-config", "--fmt", "{name}.fits", exit_code=1)
-    assert "--source" in output
+    assert "hm add URL --fmt" in output
 
     saved = Repo(repo.worktree)
     pd.testing.assert_frame_equal(saved.state.data, before.state.data)
     assert saved.state.config == before.state.config
-    assert saved.state.config["sources"] == [
-        {"name": "origin", "remote": "origin", "fmt": "{src}_{day:03d}.fits"}]
+    assert saved.state.config["sources"] == [{"name": "origin", "remote": "origin"}]
     assert saved.dothm.index.diff("HEAD") == []
     assert reads == [""]
     assert not saved.objects.root.exists()

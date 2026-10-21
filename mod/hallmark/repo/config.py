@@ -7,17 +7,22 @@ updating repository configuration values stored in ``config.yml``.
 
 from __future__ import annotations
 
+import re
+import string
+
 import pandas as pd
 import parse
 
 from copy import deepcopy
+from functools import lru_cache
 from pathlib import Path
 from string import Formatter
 from typing import Dict, Optional
 
+from ..fmt_detection import KNOWN_PROCESSING_STAGES, KNOWN_STATIC_FILE_STEMS
 from ..utils import (
-    convert_format_value, require_nonempty_string,
-    validate_path_name, validate_relative_path)
+    CHECKSUM_ALGORITHMS, as_list_of_dicts, convert_format_value,
+    require_nonempty_string, validate_path_name, validate_relative_path)
 
 from ..transport.base import (
     RemoteSpec,
@@ -27,6 +32,14 @@ from ..transport.base import (
     reject_url_secrets,
     copy_backend_options,
 )
+
+# maximum length of a literal segment in a format string that can be cleared
+_MAX_CLEARABLE_LITERAL_LENGTH = 2
+# known field values for specific format fields, used for parsing and matching
+KNOWN_FIELD_VALUES: dict[str, tuple[str, ...]] = {
+    "kind": KNOWN_PROCESSING_STAGES,
+    "stage": KNOWN_PROCESSING_STAGES,
+    "algorithm": CHECKSUM_ALGORITHMS}
 
 
 def _update_remote_config(
@@ -262,6 +275,40 @@ def normalize_remotes(remotes) -> list[dict]:
     return normalized
 
 
+def fmt_entries_from_config(config: dict) -> list[dict]:
+    """
+    Extract and validate the list of format entries from the repository configuration.
+
+    Args:
+        config (dict): The repository configuration dictionary.
+
+    Returns:
+        list[dict]: A list of format entries containing the "fmt" key.
+
+    Raises:
+        ValueError: If the configuration is invalid or if any entry is not a mapping.
+    """
+    # if the provided config is not a dictionary, raise a ValueError
+    if not isinstance(config, dict):
+        raise ValueError("config must be a mapping")
+    data = config.get("data")
+    # if the "data" section is not defined, return an empty list
+    if data is None:
+        return []
+
+    # coerce "data" into a list (a dict becomes a single-item list, as-is if a list)
+    entries = as_list_of_dicts(data)
+    if entries is None:
+        raise ValueError('config "data" must be a mapping or list of mappings')
+
+    # validate that each entry in the "data" list is a dictionary
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"config data entry {index} must be a mapping")
+    # return a list of entries that contain the "fmt" key
+    return [entry for entry in entries if "fmt" in entry]
+
+
 def single_data_format(config: dict) -> Optional[str]:
     """
     Extract the format string from a repository configuration that defines
@@ -396,8 +443,8 @@ def set_config(
         check_pattern_fields(fmt)
         if config.get("sources"):
             raise ValueError(
-                "Each remote source keeps its own pattern; change it with "
-                "hm add URL --fmt PATTERN --source NAME")
+                "A remote catalog's formats sort the files of its sources; "
+                "add one with hm add URL --fmt PATTERN")
         # retrieve the old filename format from the repository's configuration
         old_fmt = single_data_format(repo.state.config)
 
@@ -680,3 +727,455 @@ def row_to_path(row, fmt: str) -> Path:
     rendered_path = fmt.format(**values)
     # validate the rendered path to ensure it is a safe relative path
     return validate_relative_path(rendered_path, label="formatted data path")
+
+
+# cache for performance, since the same fmt may be used for many files in a dataset
+@lru_cache(maxsize=256)
+def _get_fmt_match_data(fmt: str) -> tuple[tuple, parse.Parser, int]:
+    """
+    Used by _get_fmt_match_plan.
+    Precompute the parse segments and parser for a given format string.
+
+    Args:
+        fmt: The format string to precompute match data for.
+
+    Returns:
+        A tuple containing:
+        - segments: A tuple of (literal, name, format_spec, conversion) tuples
+        - parser: The compiled parse parser.
+        - literal_char_count: The count of literal characters in the format string.
+    """
+    # get the parsed segments from the format string using string.Formatter
+    segments = tuple(Formatter().parse(fmt))
+    # compile the format string into a parse parser for efficient matching
+    parser = parse.compile(fmt, case_sensitive=True)
+    # count the number of literal characters in the format string by removing
+    # all field placeholders and measuring the length of the remaining string
+    literal_char_count = len(re.sub(r"\{[^}]*\}", "", fmt))
+    return segments, parser, literal_char_count
+
+
+# cache for performance, since the same set of fmts may be used for many files
+@lru_cache(maxsize=64)
+def _get_fmt_match_plan(fmts: tuple[str, ...]) -> tuple[tuple, ...]:
+    """
+    Used by _match_static_named_file_plain_only and _match_file_against_fmts.
+    Precompute the match plan for a list of format strings, sorting them by specificity.
+
+    Args:
+        fmts: A tuple of format strings to precompute match plans for.
+
+    Returns:
+        A tuple of tuples, where each inner tuple contains:
+        - index: The index of the format string in the original fmts tuple.
+        - segments: A tuple of (literal, name, format_spec, conversion) tuples.
+        - parser: The compiled parse parser.
+        - literal_char_count: The count of literal characters in the format string.
+    """
+    # sort the format indexes by their literal char count, from most to least specific
+    sorted_indexes = sorted(
+        range(len(fmts)), key=lambda index: -_get_fmt_match_data(fmts[index])[2])
+    # return a tuple of (index, segments, parser, literal_char_count) for each fmt
+    return tuple(
+        (index, *_get_fmt_match_data(fmts[index])) for index in sorted_indexes)
+
+
+def _leak_score(segments, result, greedy_names=frozenset()):
+    """
+    Used by _match_file_against_fmts and _match_static_named_file_plain_only.
+    Compute a "leak score" for a parse result, which counts how many times
+    the last character of a literal segment appears in the matched value
+    of a non-greedy named field. A score of 0 means no leaks, which is ideal.
+
+    Args:
+        segments: List of (literal, name, format_spec, conversion) tuples
+        result: The parse.Result object from parsing the rel_path string
+        greedy_names: Set of names that are considered greedy and should be ignored
+
+    Returns:
+        An integer leak score, where 0 indicates no leaks
+    """
+    leak = 0
+    # count how many times the last char of its literal appears in the matched value
+    for lit, name, _fmt_spec, _conv in segments:
+        # if the segment has no name or is greedy, skip it
+        if name is None or name in greedy_names:
+            continue
+        value = str(result.named.get(name, ""))
+        if lit and lit[-1] in string.punctuation:
+            leak += value.count(lit[-1])
+    return leak
+
+
+def _drop_and_greedy_search(segments, rel_path):
+    """
+    Used by _match_file_against_fmts.
+    Try all combinations of dropping fields and making fields greedy to find a
+    leak-free parse result. Is more expensive than _greedy_only_search,
+    so we only use it as a last resort.
+
+    Args:
+        segments: List of (literal, name, format_spec, conversion) tuples from fmt
+        rel_path: The file path string to parse
+
+    Returns:
+        A tuple of (parse.Result, drop_count) if a leak-free parse is found,
+        otherwise (None, None)
+    """
+    literal_positions = [] # list of (start_idx, end_idx) for each literal segment
+    search_start_idx = 0
+    # find all literal segments that are not matched in the rel_path
+    # meaning that their corresponding fields must be dropped to find a match
+    for lit, _name, _fs, _c in segments:
+        if not lit:
+            # if there are no literal characters in this segment, record its position
+            # even tho no lit is present, we still need to track position for dropping
+            literal_positions.append((search_start_idx, search_start_idx))
+            continue
+        # find the literal in the rel_path starting from the current search position
+        idx = rel_path.find(lit, search_start_idx)
+        # if the literal is not found, record None for its start and end positions
+        if idx == -1:
+            literal_positions.append((None, None))
+        else:
+            # if the literal is found, record its start and end positions
+            literal_positions.append((idx, idx + len(lit)))
+            # move the search start to the next position
+            search_start_idx = idx + len(lit)
+
+    # field names that appear more than once in the segments are considered repeated
+    seen_names: set[str] = set()
+    repeated_names: set[str] = set()
+    for _lit, name, _fs, _c in segments:
+        if name is None:
+            continue
+        if name in seen_names:
+            # if a name is repeated it requires special handling
+            repeated_names.add(name)
+        else:
+            seen_names.add(name)
+
+    # for repeated names, we need to resolve their values based on the first occurrence
+    resolved_values: dict[str, str] = {}
+    # track names that are dropped because their literal segment was not found
+    dropped_names: set[str] = set()
+    # track the first occurrence of each repeated name along with its value
+    first_seen: dict[str, tuple[int, str]] = {}
+    # find the values of repeated names based on their literal positions in rel_path
+    for idx, (_lit, name, _fs, _c) in enumerate(segments):
+        # if the name is not repeated, we don't need to resolve it
+        if not (name and name in repeated_names):
+            continue
+        _lit_start, lit_end = literal_positions[idx]
+        # if the literal segment was not found, we cannot resolve this name
+        if lit_end is None:
+            # if the name was seen before, we can use its first occurrence's value
+            if name in first_seen:
+                resolved_values.setdefault(name, first_seen[name][1])
+            # if name was not seen before, we drop it since we cannot resolve its value
+            else:
+                dropped_names.add(name)
+            # skip to the next segment since we cannot resolve this one
+            continue
+
+        # next start is the start index of the next literal segment unless at the end
+        next_lit_start = literal_positions[idx + 1][0] \
+            if idx + 1 < len(segments) else None
+        # the field is between the end of this literal and the start of the next literal
+        field_end = next_lit_start if next_lit_start is not None else len(rel_path)
+        # value is naive because it may not be correct
+        naive_field_value = rel_path[lit_end:field_end]
+        if name not in first_seen:
+            # if this is the first occurrence of the repeated name, store its value
+            first_seen[name] = (field_end, naive_field_value)
+        # if this is not the first, check if the naive value matches the first
+        elif name not in resolved_values and name not in dropped_names:
+            first_field_end, first_field_value = first_seen[name]
+            # if the first occurrence's value is found in the current field's value
+            if first_field_value in rel_path[first_field_end:]:
+                resolved_values[name] = first_field_value
+            else:
+                # if the naive value does not match the first, we drop this name
+                dropped_names.add(name)
+
+    # reconstruct the fmt with dropped names removed and repeated names resolved
+    parts = []
+    for lit, name, _fs, _c in segments:
+        # always include the literal part of the segment in the reconstructed format
+        parts.append(lit)
+        if name in dropped_names:
+            continue
+        if name in resolved_values:
+            # concatenate the literal and the resolved value for repeated names
+            parts[-1] = lit + resolved_values[name]
+            continue
+        # is still an unresolved repeated name, so we include it in the format string
+        if name is not None:
+            parts.append("{" + name + (":" + _fs if _fs else "") + "}")
+
+    raw_simplified_segments = list(Formatter().parse("".join(parts)))
+    simplified_segments = []
+    for lit, name, _fs, _c in raw_simplified_segments:
+        # if the literal is too long, split it into two segments
+        if name is not None and len(lit) > _MAX_CLEARABLE_LITERAL_LENGTH:
+            simplified_segments.append((lit[:-1], None, None, None))
+            simplified_segments.append((lit[-1:], name, _fs, _c))
+        # if the literal is short enough, keep it as a single segment
+        else:
+            simplified_segments.append((lit, name, _fs, _c))
+
+    # create a tuple of allowed values for each segment based on known field values
+    allowed_values_by_segment = tuple(frozenset(KNOWN_FIELD_VALUES[name])
+                            if name in KNOWN_FIELD_VALUES
+                             and not format_spec else None
+                            for _literal, name, format_spec, _conversion
+                             in simplified_segments)
+    # get set of global delimiters, which are the last characters of literal segments
+    global_delimiters = {
+        lit[-1] for lit, _name, _fs, _c in simplified_segments
+        if lit and lit[-1] in string.punctuation}
+
+    segment_count = len(simplified_segments)
+    path_length = len(rel_path)
+
+    @lru_cache(maxsize=None)
+    def solve(segment_idx, path_idx):
+        """
+        Recursive function to explore all combinations of dropping fields and
+        making fields greedy to find a leak-free parse result.
+        Utilizes memoization to avoid recomputing the same subproblems.
+
+        Args:
+            segment_idx: Current index in the simplified_segments list.
+                    prior to this index, all segments have been processed.
+            path_idx: Current index in the rel_path string.
+
+            Returns:
+                A tuple (drop_count, leak_count, future_matches) if a valid parse,
+                otherwise None.
+        """
+        # best case: all segments are processed
+        if segment_idx == segment_count:
+            # if the entire rel_path has been consumed, return a successful parse
+            return (0, 0, ()) if path_idx == path_length else None
+
+        # unpack the current segment into its components
+        lit, name, _fs, _c = simplified_segments[segment_idx]
+        # get the allowed values for this segment, if any
+        allowed_values = allowed_values_by_segment[segment_idx]
+        best = None # format is (drop_count, leak_count, future_matches)
+
+        # if the segment has a name and no allowed values, we can consider dropping it
+        if name is not None and not _fs and allowed_values is None:
+            # if the literal is short enough, we can consider dropping this field
+            if len(lit) <= _MAX_CLEARABLE_LITERAL_LENGTH:
+                # recursively try dropping this field and moving to the next segment
+                sub = solve(segment_idx + 1, path_idx)
+                # if dropping the field leads to a valid parse, consider it a candidate
+                if sub is not None:
+                    # unpack the result of the recursive call
+                    drop_count, leak_count, future_matches = sub
+                    candidate = (drop_count + 1, leak_count, future_matches)
+                    # if the candidate is better than the current best, update best
+                    # is better if it has fewer drops, or same drops but fewer leaks
+                    if best is None or candidate[:2] < best[:2]:
+                        best = candidate
+            # if the segment starts with a literal, try matching it against the rel_path
+            if rel_path.startswith(lit, path_idx):
+                # recursively try matching this field by moving to the next segment
+                # and updating the path index to account for the matched literal
+                sub = solve(segment_idx + 1, path_idx + len(lit))
+                # same logic as above
+                if sub is not None:
+                    drop_count, leak_count, future_matches = sub
+                    candidate = (drop_count + 1, leak_count, future_matches)
+                    if best is None or candidate[:2] < best[:2]:
+                        best = candidate
+
+        # if the segment has no name, it is a literal that must be matched
+        if rel_path.startswith(lit, path_idx):
+            # the field starts immediately after the matched literal
+            field_start = path_idx + len(lit)
+
+            # name is None means this is a literal segment
+            if name is None:
+                # recursively try matching the next segment after this literal
+                sub = solve(segment_idx + 1, field_start)
+                if sub is not None:
+                    if best is None or sub[:2] < best[:2]:
+                        best = sub
+            # if the segment has a name, it is a field that can be greedy
+            else:
+                # try all possible end positions for the field
+                for end in range(field_start, path_length + 1):
+                    # get the value of the field from the rel_path
+                    value = rel_path[field_start:end]
+                    # if allowed_values is provided, skip values that are not allowed
+                    if allowed_values is not None and value not in allowed_values:
+                        continue
+                    # recursively try matching the next segment after this field
+                    sub = solve(segment_idx + 1, end)
+                    if sub is not None:
+                        drop_count, leak_count, future_matches = sub
+                        value = rel_path[field_start:end]
+                        # the field is considered to have "leaked" if
+                        # the boundary character appears in its value
+                        extra_leak = sum(value.count(d) for d in global_delimiters)
+                        candidate = (drop_count, leak_count + extra_leak,
+                                     ((name, value),) + future_matches)
+                        if best is None or candidate[:2] < best[:2]:
+                            best = candidate
+        return best
+
+    # intial call for the recursive solve function
+    result = solve(0, 0)
+    # clear the cache to free memory after the search is complete
+    solve.cache_clear()
+    if result is None:
+        return None, None
+
+    drop_count, _leak_count, future_matches = result
+    # build a dictionary of the matched field names and their values
+    named = dict(future_matches)
+    named.update(resolved_values)
+
+    # return the matched named fields and the total number of dropped fields
+    return named, drop_count + len(dropped_names)
+
+
+def _match_static_named_file_plain_only(rel_path: str, fmt_entries: list[dict]
+                                        ) -> tuple[int, dict] | tuple[None, None]:
+    """
+    Used by match_file.
+    Match a static named file against a list of fmt entries using only the plain parse.
+
+    Args:
+        rel_path: The file path to match.
+        fmt_entries: The {"fmt", "db", "name"?} entry dicts.
+
+    Returns:
+        (entry_index, parse.Result), or (None, None) if nothing matches.
+    """
+    # create a tuple of all format strings from the fmt entries for sorting
+    fmts = tuple(entry["fmt"] for entry in fmt_entries)
+    # for each format string, try to parse the rel_path using the precomputed parser
+    for index, segments, parser, _literal_count in _get_fmt_match_plan(fmts):
+        result = parser.parse(rel_path)
+        # if the plain parse is successful and has no leaks
+        if result is not None and _leak_score(segments, result) == 0:
+            # return the index and named fields from the parse result
+            return index, result.named
+    # if no format matches, return (None, None)
+    return None, None
+
+
+def _match_file_against_fmts(rel_path: str, fmt_entries: list[dict]):
+    """
+    Used by match_file.
+    Find the best fmt entry for one file, across all of them at once.
+
+    Args:
+        rel_path: The file path to match.
+        fmt_entries: The {"fmt", "db", "name"?} entry dicts.
+
+    Returns:
+        (entry_index, parse.Result), or (None, None) if nothing matches.
+    """
+    # create a tuple of all format strings from the fmt entries for sorting
+    fmts = tuple(entry["fmt"] for entry in fmt_entries)
+    # list of fmts that successfully matched the rel_path
+    valid_fmts = [] # [(index, result, matched_literal_count, drop_count)]
+    # track the highest literal char count among the results
+    running_baseline_literal_char_count = -1
+
+    # from the precomputed match plan, try to parse the rel_path using each fmt
+    for (i, segments, parser, literal_char_count) in _get_fmt_match_plan(fmts):
+        # try to parse the rel_path using the precomputed parser for this fmt
+        plain_result = parser.parse(rel_path)
+        result = None
+        drop_count = 0
+        greedy_attempt = None
+
+        # first pass: try the plain parse result, which is the cheapest and most common
+        if plain_result is not None:
+            # a leak score of 0 means that no non-greedy fields have "leaked" into the
+            # matched value of a greedy field, which is ideal
+            if _leak_score(segments, plain_result) == 0:
+                result = plain_result.named
+            else:
+                # attempt a greedy parse to see if we can find a leak-free result
+                greedy_attempt = _drop_and_greedy_search(segments, rel_path)
+                greedy_result, greedy_drop_count = greedy_attempt
+                # if the greedy parse is successful and has no drops, we can use it
+                if greedy_result is not None and greedy_drop_count == 0:
+                    result = greedy_result
+
+        # if the literal_char_count is greater than the running baseline,
+        # this fmt is more specific, so we should try a more expensive search
+        if result is None and literal_char_count > running_baseline_literal_char_count:
+            # only track non-trivial literals (length >= 2) to avoid false negatives
+            literals = [lit for lit, _n, _fs, _c in segments if len(lit) >= 2]
+            # check if the fmt ends with a literal
+            trailing_literal = segments[-1][0] if segments[-1][1] is None else ""
+            # won't match if trailing lit or any non-trivial lits are not in path
+            skip = (
+                (len(trailing_literal) >= 2 and trailing_literal not in rel_path)
+                or (bool(literals) and not any(lit in rel_path for lit in literals)))
+            # if we don't skip, attempt a greedy parse to find a leak-free result
+            if not skip:
+                    if greedy_attempt is None:
+                        greedy_attempt = _drop_and_greedy_search(segments, rel_path)
+                    result, drop_count = greedy_attempt
+
+        # if no result was found for this fmt, continue to the next one
+        if result is None:
+            continue
+
+        # more specific match found if drop_count 0 and literal_char_count > baseline
+        if drop_count == 0:
+            running_baseline_literal_char_count = \
+                max(running_baseline_literal_char_count, literal_char_count)
+
+        # number of matched literal characters in the result with respect to rel_path
+        lit_count_matched_from_fmt = len(rel_path) - sum(
+            len(str(v)) for v in result.values())
+        # tracks raw fmt, valid parse result, matched literal count, and drop count
+        valid_fmts.append((i, result, lit_count_matched_from_fmt, drop_count))
+
+    if not valid_fmts:
+        return None, None
+
+    # the best format has the highest matched literal count with the lowest drop count
+    best_index, best_parse, _lit_count_matched_from_fmt, _drop_count = max(
+        valid_fmts, key=lambda m: (m[2], -m[3]))
+    return best_index, best_parse
+
+
+def match_file(rel_path: str, fmt_entries: list[dict]
+               ) -> tuple[int, dict] | tuple[None, None]:
+    """
+    Find the fmt entry that one file belongs to. Files whose whole stem is a
+    known static name never match, files whose last dotted stem piece is a
+    static name only match with a plain parse, and every other file goes
+    through the full matcher.
+
+    Args:
+        rel_path: The file path to match.
+        fmt_entries: The {"fmt", ...} entry dicts.
+
+    Returns:
+        (entry_index, named fields), or (None, None) if nothing matches.
+    """
+    # create a Path object for the relative path to extract its stem and last piece
+    path = Path(rel_path)
+    whole_stem = path.stem
+    last_piece = whole_stem.split(".")[-1]
+
+    if whole_stem.lower() in KNOWN_STATIC_FILE_STEMS:
+        # if the whole stem matches, we can skip matching against formats
+        return None, None
+    if last_piece.lower() in KNOWN_STATIC_FILE_STEMS:
+        # if the last piece of the stem matches, match using plain parse only
+        return _match_static_named_file_plain_only(rel_path, fmt_entries)
+    # otherwise, match against all formats using the full matching logic
+    return _match_file_against_fmts(rel_path, fmt_entries)

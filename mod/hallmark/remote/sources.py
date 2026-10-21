@@ -2,10 +2,12 @@
 Describe the remote selections a catalogue tracks.
 
 A data remote names a server root. A source is one ``hm add`` selection
-beneath a remote: a folder (``root``), an optional filename pattern and glob
-filters, and an optional local folder (``prefix``). Each catalogue row records
-its source, and its ``path`` is ``prefix + root +`` the path inside the folder,
-so files from several remotes share one ``data.tsv`` without colliding.
+beneath a remote: a folder (``root``), optional glob filters, and an optional
+local folder (``prefix``). Each catalogued file records its source, and its
+``path`` is ``prefix + root +`` the path inside the folder, so files from
+several remotes share one catalogue without colliding. Filename formats are
+the catalogue's, in ``config.yml``'s ``data`` section, and sort every
+source's files.
 """
 
 from __future__ import annotations
@@ -17,12 +19,12 @@ from urllib.parse import unquote
 
 import pandas as pd
 
-from ..repo.config import normalize_remotes, remote_name_of, single_data_format
+from ..repo.catalog import SOURCE, catalog_tables
+from ..repo.config import normalize_remotes, remote_name_of
 from ..transport.base import RemoteSpec, validate_remote_path
 from ..utils import CHECKSUM_ALGORITHMS
 
-SOURCE_FIELDS = ("name", "remote", "root", "prefix", "fmt", "filter",
-                 "server_checksum")
+SOURCE_FIELDS = ("name", "remote", "root", "prefix", "filter", "server_checksum")
 SERVER_CHECKSUMS = CHECKSUM_ALGORITHMS
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
@@ -68,7 +70,6 @@ class SourceSpec:
         remote (str): Name of the data remote that serves the files.
         root (str): Folder beneath the remote URL, ``""`` or ending in ``/``.
         prefix (str): Local folder for the files, ``""`` or ending in ``/``.
-        fmt (str, optional): Filename pattern relative to ``root``.
         filter (tuple[str, ...]): Glob filters relative to ``root``.
         server_checksum (str, optional): Algorithm the server computes for
             files without a published checksum.
@@ -78,7 +79,6 @@ class SourceSpec:
     remote: str
     root: str = ""
     prefix: str = ""
-    fmt: Optional[str] = None
     filter: tuple = ()
     server_checksum: Optional[str] = None
 
@@ -90,9 +90,6 @@ class SourceSpec:
         # Path validation refuses .hm and .git folders at any depth.
         prefix = _validate_folder(self.prefix, "Source prefix")
         object.__setattr__(self, "prefix", prefix)
-        if self.fmt is not None and (not isinstance(self.fmt, str)
-                                     or not self.fmt.strip()):
-            raise ValueError(f"Source {self.name!r} pattern must be a string")
         object.__setattr__(self, "filter", _normalize_filter(self.filter))
         if self.server_checksum not in (None, *SERVER_CHECKSUMS):
             raise ValueError(
@@ -108,13 +105,13 @@ class SourceSpec:
             raise ValueError(
                 "Sources support only " + ", ".join(SOURCE_FIELDS) + " fields")
         return cls(entry.get("name"), entry.get("remote"), entry.get("root", ""),
-                   entry.get("prefix", ""), entry.get("fmt"), entry.get("filter"),
+                   entry.get("prefix", ""), entry.get("filter"),
                    entry.get("server_checksum"))
 
     def to_config(self) -> dict:
         """Return the ``config.yml`` entry, omitting empty fields."""
         entry = {"name": self.name, "remote": self.remote}
-        for key in ("root", "prefix", "fmt"):
+        for key in ("root", "prefix"):
             if getattr(self, key):
                 entry[key] = getattr(self, key)
         if self.filter:
@@ -123,9 +120,9 @@ class SourceSpec:
             entry["server_checksum"] = self.server_checksum
         return entry
 
-    def selects_like(self, fmt, filter) -> bool:
-        """Return whether a pattern and filters repeat this source's selection."""
-        return self.fmt == fmt and set(self.filter) == set(_normalize_filter(filter))
+    def selects_like(self, filter) -> bool:
+        """Return whether filters repeat this source's selection."""
+        return set(self.filter) == set(_normalize_filter(filter))
 
     def local_path(self, path_in_root: str) -> str:
         """Return the catalogue path of a file found inside ``root``."""
@@ -196,20 +193,21 @@ def effective_sources(state) -> list:
     names = remote_names(config)
     if "sources" in config:
         return normalize_sources(config["sources"], names)
-    columns = state.data.columns
-    legacy = "path" in columns and "sha1" not in columns
+    legacy = any("path" in frame.columns and "sha1" not in frame.columns
+                 for frame in catalog_tables(state).values())
     if not legacy or len(names) != 1:
         return []
-    return [SourceSpec(names[0], names[0], fmt=single_data_format(config))]
+    return [SourceSpec(names[0], names[0])]
 
 
 def materialize_sources(state) -> list:
     """
     Write a legacy catalogue's synthesized source into the state.
 
-    The single remote is named, ``sources`` is recorded, each row gains its
-    ``source`` and the pattern moves from ``data`` to the source. A state
-    that already records sources is returned unchanged.
+    The single remote is named, ``sources`` is recorded and each row of
+    every TSV gains its ``source``; ``file:`` entries name no source while
+    there is only one. A state that already records sources is returned
+    unchanged.
 
     Args:
         state (State): Repository state to update in place.
@@ -227,12 +225,13 @@ def materialize_sources(state) -> list:
     if remotes:
         config["remote"] = remotes
     config["sources"] = [source.to_config() for source in sources]
-    for spec in config.get("data") or []:
-        if isinstance(spec, dict):
-            spec.pop("fmt", None)
-    if sources and not state.data.empty:
-        state.data = state.data.copy()
-        state.data["source"] = sources[0].name
+    if sources:
+        if not state.data.empty:
+            state.data = state.data.copy()
+            state.data[SOURCE] = sources[0].name
+        for name, frame in state.tables.items():
+            if not frame.empty:
+                state.tables[name] = frame.assign(**{SOURCE: sources[0].name})
     return sources
 
 
@@ -306,8 +305,8 @@ def rows_of(frame: pd.DataFrame, source: SourceSpec, sources: Sequence) -> pd.Se
     Rows without a ``source`` value belong to the only source of a legacy
     catalogue.
     """
-    if "source" in frame.columns:
-        values = frame["source"].fillna("").astype(str)
+    if SOURCE in frame.columns:
+        values = frame[SOURCE].fillna("").astype(str)
         if len(sources) == 1:
             return values.isin({source.name, ""})
         return values == source.name

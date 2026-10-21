@@ -17,6 +17,7 @@ from ..transport import OperationContext, RemoteSpec
 from ..transport.base import DownloadError, validate_remote_path
 from .plan import DownloadItem, DownloadPlan
 from .sources import effective_sources, materialize_sources
+from ..repo.catalog import SOURCE, catalog_rows, catalog_tables, file_entries
 from ..repo.state import is_remote_catalog
 from ..utils import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH,
@@ -658,10 +659,11 @@ def _select_download_items(
                 f"TSV {tsv_name!r} is not configured. "
                 f"Configured TSVs: {configured}")
 
-        if tsv_name == "data.tsv":
-            # The catalogue is the state, loaded from the index; data.tsv on
+        staged = catalog_tables(repo.state).get(tsv_name)
+        if staged is not None and (tsv_name == "data.tsv" or len(staged.columns)):
+            # The catalogue is the state, loaded from the index; a TSV on
             # disk can hold unstaged rows.
-            add_frame(repo.state.data, fmt_entries,
+            add_frame(staged, fmt_entries,
                       explicit_only=tsv_name not in requested_tsvs)
             continue
         # Construct the path to the TSV file in the repository's dothm directory.
@@ -916,9 +918,8 @@ def _route_items(repo, items, remote_name, source_names=None):
             raise DownloadError(
                 f"Unknown source(s): {', '.join(unknown)}. Catalog sources: "
                 + (", ".join(by_name) or "<none>"))
-    data = repo.state.data
-    owners = (dict(zip(data["path"].astype(str), data["source"].astype(str)))
-              if {"path", "source"} <= set(data.columns) else {})
+    owners = {row["path"]: row.get(SOURCE, "")
+              for row in catalog_rows(repo.state)}
     override = (_select_remote_config(repo, remote_name)
                 if remote_name is not None else None)
     default = None
@@ -1179,7 +1180,7 @@ def _stage_download_sha1(repo, plan, sha1_by_path, results) -> None:
     """
     if not sha1_by_path:
         return
-    if not is_remote_catalog(repo.state) or "path" not in repo.state.data.columns:
+    if not is_remote_catalog(repo.state):
         return
     # A download can take hours, so the catalogue is read again under the
     # lock: only SHA-1 cells are filled in, and other changes are kept.
@@ -1195,10 +1196,10 @@ def _stage_download_sha1(repo, plan, sha1_by_path, results) -> None:
 def _stage_into_current_state(repo, plan, sha1_by_path, results) -> None:
     """Used by _stage_download_sha1, with the state lock held."""
     state = repo.dothm.load_state()
-    if not is_remote_catalog(state) or "path" not in state.data.columns:
+    if not is_remote_catalog(state):
         return
     upgraded = False
-    if "sha1" not in state.data.columns and "sources" not in state.config:
+    if "sources" not in state.config:
         if not materialize_sources(state):
             results["staging_note"] = (
                 "SHA-1s not recorded: this catalog predates sources and names "
@@ -1207,29 +1208,54 @@ def _stage_into_current_state(repo, plan, sha1_by_path, results) -> None:
         upgraded = True
     planned = {item.relative_path.as_posix(): item for item in
                plan.items + plan.stored_items + plan.skipped_items}
-    data = state.data.copy()
-    if "sha1" not in data.columns:
-        data["sha1"] = ""
-    known = data["sha1"].fillna("").astype(str)
-    updates = 0
-    for index, path in data["path"].astype(str).items():
-        sha1 = sha1_by_path.get(path)
-        if sha1 is None or known[index] or path not in planned:
-            continue
-        row = data.loc[index].to_dict()
-        catalogued = _parse_checksum(row.get("checksum"), row.get("checksum_algorithm"))
-        item = planned[path]
+
+    def stageable(path, catalogued, row):
+        """Return the SHA-1 to record for a catalogued file, or None."""
+        sha1, item = sha1_by_path.get(path), planned.get(path)
+        if sha1 is None or item is None:
+            return None
         size, modified = _row_metadata(row)
         # The catalogue changed since planning; this SHA-1 may describe old bytes.
         if (_checksum_pair(catalogued) != _checksum_pair(item.checksum)
                 or (item.size_bytes is not None and size != item.size_bytes)
                 or (item.mtime is not None and modified != item.mtime)):
+            return None
+        return sha1
+
+    updates = 0
+    for name, frame in catalog_tables(state).items():
+        if "path" not in frame.columns:
             continue
-        data.at[index, "sha1"] = sha1
-        updates += 1
+        data = frame.copy()
+        if "sha1" not in data.columns:
+            data["sha1"] = ""
+        known = data["sha1"].fillna("").astype(str)
+        staged = 0
+        for index, path in data["path"].astype(str).items():
+            row = data.loc[index].to_dict()
+            sha1 = None if known[index] else stageable(path, _parse_checksum(
+                row.get("checksum"), row.get("checksum_algorithm")), row)
+            if sha1 is not None:
+                data.at[index, "sha1"] = sha1
+                staged += 1
+        if staged:
+            updates += staged
+            if name == "data.tsv":
+                state.data = data
+            else:
+                state.tables[name] = data
+    for _, entry in file_entries(state.config):
+        try:
+            path = validate_remote_path(entry["file"]).as_posix()
+        except ValueError:
+            continue
+        sha1 = None if entry.get("sha1") else stageable(
+            path, _checksum_from_config(entry), entry)
+        if sha1 is not None:
+            entry["sha1"] = sha1
+            updates += 1
     if not updates:
         return
-    state.data = data
     repo.dothm.save_state(state)
     repo.state = state
     results["staged"] = updates

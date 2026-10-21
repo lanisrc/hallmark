@@ -24,9 +24,12 @@ from click import ClickException
 from git.exc import GitError
 
 from . import Repo
+from .fmt_detection import detect_fmt
 from .remote.download import DownloadError
-from .remote.discovery import path_matches
+from .remote.discovery import discover_remote_files, path_matches
 from .remote.sources import SourceSpec
+from .repo.config import normalize_remotes
+from .transport import OperationContext, RemoteSpec
 from .error import CheckoutError, CloneError, HallmarkError
 from .utils import CHECKSUM_ALGORITHMS
 
@@ -350,8 +353,9 @@ def _ask_about_duplicates(duplicates):
 @click.option("--backend-options", type=click.Path(exists=True, dir_okay=False),
               help="YAML mapping of backend-specific options.")
 @click.option("--filter", "filters", multiple=True, help="Select remote paths by glob.")
-@click.option("--fmt", "remote_fmt",
-              help="Remote filename format; otherwise use a URL pattern.")
+@click.option("--fmt", "remote_fmts", multiple=True,
+              help="Remote filename format, as FMT or FMT=DB. May be repeated "
+                   "for multiple fmts; otherwise use a URL pattern.")
 @click.option("--remote", "remote_name",
               help="Data remote to catalog under; matched by URL by default.")
 @click.option("--source", help="Catalog source to update or create.")
@@ -365,18 +369,23 @@ def _ask_about_duplicates(duplicates):
                    "its rows.")
 @click.argument("inputs", nargs=-1, required=True)
 @click.pass_obj
-def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmt,
+def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmts,
         remote_name, source, prefix, server_checksum, skip_duplicates):
     """Add files to the hallmark index.
 
     A remote URL or URL pattern stages a catalog without downloading files
-    or committing. Use --fmt and --filter to select remote paths. A scan that
-    fails or matches no files keeps the previously staged catalog.
+    or committing. Use --filter to select remote paths. Filename formats,
+    from the URL pattern or --fmt FMT[=DB] (repeatable), sort the files: each
+    format's files are rows of its own TSV, and files no format matches are
+    listed as file entries in config.yml. A new format applies to the whole
+    catalog; when files are already sorted, add asks whether to sort them
+    again. A scan that fails or matches no files keeps the previously staged
+    catalog.
 
     Each remote selection is a source of the catalog. Adding the same URL and
-    pattern again updates its source: new files are added and files gone from
-    the server are removed. A different pattern adds another source; use
-    --source NAME to change an existing source's pattern instead. Files from
+    filters again updates its source: new files are added and files gone from
+    the server are removed. Different filters add another source; use
+    --source NAME to change an existing source's filters instead. Files from
     another server keep their paths beneath its URL; use --prefix DIR when
     those paths are already catalogued. When paths clash, add says whether
     each has the same content in both places; at a terminal it asks whether
@@ -390,9 +399,21 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     """
     with _translate_cli_errors(ValueError, OSError, yaml.YAMLError):
         options = _load_backend_options(backend_options)
+    fmt_entries = []
+    for entry in remote_fmts:
+        # split the fmt entry into its format and database name components
+        fmt, separator, db = entry.rpartition("=")
+        # without "=DB" the whole value is the fmt, and its db is chosen later
+        if not separator or any(char in db for char in "{}/"):
+            fmt, db = entry, None
+        fmt = fmt.strip()
+        # Validate that the fmt is not empty or whitespace-only
+        if not fmt:
+            raise ClickException("--fmt must define a non-empty format")
+        fmt_entries.append({"fmt": fmt, "db": db} if db else {"fmt": fmt})
     remote_options = dict(auth=auth, backend=backend,
                           backend_options=options,
-                          filter=filters or None, remote_fmt=remote_fmt,
+                          filter=filters or None, remote_fmt=fmt_entries or None,
                           remote=remote_name, source=source, prefix=prefix,
                           server_checksum=server_checksum,
                           on_duplicate="skip" if skip_duplicates else None)
@@ -406,7 +427,13 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
             if remote or any(value is not None for value in remote_options.values()):
                 if remote and not skip_duplicates and _interactive():
                     remote_options["on_duplicate"] = _ask_about_duplicates
-                pf = repo.add(inputs[0], encoding, progress=True, **remote_options)
+                pf = repo.add(
+                    inputs[0], encoding, progress=True, **remote_options,
+                    # with a new fmt, ask whether already sorted files are sorted again
+                    resort=lambda count: click.prompt(
+                        f"{count} files are already sorted. Sort them again with the "
+                        "new fmt, or only sort the unsorted files?",
+                        type=click.Choice(["resort", "unsorted"])) == "resort")
             else:
                 pf = repo.add(inputs[0], encoding)
         # oterhwise, use the add_paths method for multiple inputs
@@ -417,7 +444,8 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
         click.echo("No files matched the format string.")
     else:
         click.echo("Changes to be committed")
-        click.echo(pf.path.to_string(index=False, header=False))
+        for path in pf.path:
+            click.echo(path)
     case_clashes = pf.attrs.get("case_clashes", [])
     if case_clashes:
         click.echo("Warning: these paths differ only in letter case, so they "
@@ -452,6 +480,81 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
         # print each unmatched path
         for path in unmatched:
             click.echo(f"  {path}")
+
+
+@hallmark.command(short_help="Detect filename formats in a remote folder.")
+@click.argument("remote")
+@click.option("--filter", "filters", multiple=True, help="Select remote paths by glob.")
+@click.option("--add", "add_fmts", is_flag=True,
+              help="Catalog the files with the detected fmts, as hm add does.")
+@click.pass_context
+def detect(ctx, remote, filters, add_fmts):
+    """Detect the filename formats of a remote's files.
+
+    Requires a configured remote or a URL inside one.
+    Optionally, the detected filename formats can be immediately added to the catalog
+    with the --add flag.
+    Filters are used to select specific remote paths by glob patterns.
+
+    Raises:
+        ClickException: If the remote is not configured or the URL is not inside a
+        configured remote.
+    """
+    # get the list of configured remotes from this repository's configuration
+    remotes = normalize_remotes(ctx.obj.state.config.get("remote"))
+    # determine if the remote argument is a name or a URL
+    if "://" not in remote:
+        # check that the remote name exists in the configured remotes
+        entry = next((entry for entry in remotes
+                      if entry.get("name") == remote), None)
+        # if the remote name does not exist in the configured remotes, raise an error
+        if entry is None:
+            raise ClickException(f"No remote named {remote!r} in config.yml")
+        # otherwise, use the URL from the configured remote entry
+        url = entry["url"]
+    # otherwise, treat the remote argument as a URL
+    else:
+        # a URL can point at a subfolder of a configured remote
+        url = remote
+        # find the configured remote entry that matches the URL, if any
+        entry = next((entry for entry in remotes
+                      if entry.get("url") and url.startswith(entry["url"])), None)
+        # if no matching configured remote was found for the URL, raise an error
+        if entry is None:
+            raise ClickException(f"{url} is not inside a configured remote")
+    # use translated CLI errors for better user feedback
+    with _translate_cli_errors(RuntimeError, ValueError, OSError):
+        source = RemoteSpec.from_url(url, entry.get("auth"),
+                                     backend=entry.get("backend"),
+                                     backend_options=entry.get("backend_options"))
+        # use the operation context to discover remote files
+        with OperationContext(source) as context:
+            # discover remote files based on the operation context and filters
+            paths = [file.path for file in discover_remote_files(
+                context, filter=filters or None, progress=True)]
+        # detect the filename formats of the discovered remote files
+        fmts = detect_fmt(paths, include_drives=True)
+    if not fmts:
+        raise ClickException(
+            "No fmts could be automatically detected from this dataset.")
+    click.echo(f"Detected {len(fmts)} fmt(s) from {len(paths)} files:")
+    for fmt in fmts:
+        click.echo(f"  {fmt}")
+    # catalog from the remote's root, so a subfolder URL never changes the remote;
+    # the subfolder becomes part of each fmt and of the selection
+    remote_url = entry["url"]
+    prefix = url[len(remote_url):]
+    fmts = [prefix + fmt for fmt in fmts]
+    filters = tuple(prefix + pattern for pattern in filters) or (
+        (prefix + "**",) if prefix else ())
+    # call the add command if the --add flag is set, otherwise show instructions
+    if add_fmts:
+        ctx.invoke(add, inputs=(remote_url,), filters=filters, remote_fmts=tuple(fmts))
+    else:
+        click.echo("To catalog with them:")
+        click.echo(f"  hm add {remote_url} "
+                   + " ".join(f'--fmt "{fmt}"' for fmt in fmts)
+                   + "".join(f' --filter "{pattern}"' for pattern in filters))
 
 
 @hallmark.command(short_help="Unstage paths without changing files.")

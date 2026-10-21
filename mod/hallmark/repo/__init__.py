@@ -25,6 +25,7 @@ from .branches import (
     checkout, create_branch, current_branch, current_commit, add_worktree)
 from ..remote.add import add_remote
 from .dothm import Dothm
+from .catalog import catalog_rows
 from .state import State, is_remote_catalog
 from .worktree import Worktree
 from .objects import Objects
@@ -720,11 +721,9 @@ class Repo:
         A download is a hard link to its object, so an in-place edit changes
         both. Only recorded stats are compared; nothing is hashed.
         """
-        data = state.data
-        if not {"path", "sha1"} <= set(data.columns):
-            return []
         changed = []
-        for path, sha1 in zip(data["path"].astype(str), data["sha1"].astype(str)):
+        for row in catalog_rows(state):
+            path, sha1 = row["path"], row.get("sha1", "")
             if not sha1:
                 continue
             try:
@@ -739,7 +738,7 @@ class Repo:
     def add(self, fmt: str, encoding: bool = False, *, filter=None,
             remote_fmt=None, auth=None, backend=None, backend_options=None,
             remote=None, source=None, prefix=None, server_checksum=None,
-            on_duplicate=None, progress=False) -> ParaFrame:
+            on_duplicate=None, resort=None, progress=False) -> ParaFrame:
         '''
         Stage local file metadata or discover a remote catalog without downloading.
 
@@ -750,7 +749,8 @@ class Repo:
             fmt (string): Local filename format, "." to rescan, or remote URL.
             encoding (boolean): Apply local filename encoding rules.
             filter (string | list[string], optional): Remote path selection globs.
-            remote_fmt (string, optional): Remote filename format for parameters.
+            remote_fmt (string | list, optional): Remote filename format for
+                parameters, or a list of {"fmt", "db"} entries, one per --fmt.
             auth (string, optional): Local profile for remote authentication.
             backend (string, optional): Registered data backend name.
             backend_options (dict, optional): Backend configuration.
@@ -762,6 +762,10 @@ class Repo:
             on_duplicate (string | callable, optional): What to do with paths
                 another source already catalogs; see ``add_remote``.
             progress (boolean): Show remote discovery progress.
+            resort (bool | callable, optional): When a remote add brings a new
+                fmt, True sorts the already sorted files again and False only
+                sorts unsorted ones; a callable gets the number of sorted files
+                and returns the choice.
         Returns:
             ParaFrame: Local parameters without checksums, or remote catalog rows.
         '''
@@ -772,10 +776,11 @@ class Repo:
                               backend=backend, backend_options=backend_options,
                               remote=remote, source=source, prefix=prefix,
                               server_checksum=server_checksum,
-                              on_duplicate=on_duplicate, progress=progress)
+                              on_duplicate=on_duplicate, resort=resort,
+                              progress=progress)
         if any(value is not None for value in
                (filter, remote_fmt, auth, backend, backend_options, remote,
-                source, prefix, server_checksum, on_duplicate)):
+                source, prefix, server_checksum, on_duplicate, resort)):
             raise ValueError("Remote options require a remote URL")
         if is_remote_catalog(self.state):
             raise ValueError("Use a remote URL to update this catalog")
@@ -794,7 +799,7 @@ class Repo:
 
         # Compute checksums for all files in the ParaFrame in parallel
         self._calculate_file_checksums(pf)
-        # Build the file table (manifest) from the ParaFrame using the resolved format
+        # Build the file table (manifest) from the ParaFrame using resolved format
         manifest = build_file_table(pf, fmt)
 
         # Update the repository configuration with the new format
