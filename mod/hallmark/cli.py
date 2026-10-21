@@ -311,6 +311,34 @@ def status(repo):
             click.echo("nothing to commit, working tree clean")
 
 
+def _ask_about_resort(count, others=0):
+    """Ask whether files already sorted are sorted again with a new fmt."""
+    if not others:
+        choice = click.prompt(
+            f"{count} files are already sorted. Sort them again with the new fmt, "
+            "or only sort the unsorted files?",
+            type=click.Choice(["resort", "unsorted"]))
+    else:
+        choice = click.prompt(
+            f"{count} files of this source and {others} of other sources are "
+            "already sorted. Sort this source's files again (resort), every "
+            "source's files (all), or only the unsorted files (unsorted)?",
+            type=click.Choice(["resort", "all", "unsorted"]))
+    return {"resort": True, "all": "all", "unsorted": False}[choice]
+
+
+def _ask_about_missing(paths):
+    """Ask whether catalogued files gone from the server leave the catalog."""
+    click.echo(f"{len(paths)} catalogued file(s) are no longer on the server:")
+    for path in paths[:10]:
+        click.echo(f"  {path}")
+    if len(paths) > 10:
+        click.echo(f"  ... and {len(paths) - 10} more")
+    return click.prompt(
+        "Remove them from the catalog, or keep them?",
+        type=click.Choice(["remove", "keep"])) == "remove"
+
+
 def _interactive() -> bool:
     """Return whether someone at a terminal can answer prompts."""
     return sys.stdin.isatty() and sys.stdout.isatty()
@@ -367,10 +395,13 @@ def _ask_about_duplicates(duplicates):
 @click.option("--skip-duplicates", is_flag=True,
               help="Leave out paths another source already catalogs, keeping "
                    "its rows.")
+@click.option("--prune/--keep-missing", default=None,
+              help="Remove catalogued files gone from the server, or keep "
+                   "them. Without either, add asks.")
 @click.argument("inputs", nargs=-1, required=True)
 @click.pass_obj
 def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmts,
-        remote_name, source, prefix, server_checksum, skip_duplicates):
+        remote_name, source, prefix, server_checksum, skip_duplicates, prune):
     """Add files to the hallmark index.
 
     A remote URL or URL pattern stages a catalog without downloading files
@@ -383,8 +414,9 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     catalog.
 
     Each remote selection is a source of the catalog. Adding the same URL and
-    filters again updates its source: new files are added and files gone from
-    the server are removed. Different filters add another source; use
+    filters again updates its source: new files are added, and add asks
+    whether files gone from the server leave the catalog (--prune) or stay
+    (--keep-missing). Different filters add another source; use
     --source NAME to change an existing source's filters instead. Files from
     another server keep their paths beneath its URL; use --prefix DIR when
     those paths are already catalogued. When paths clash, add says whether
@@ -416,7 +448,8 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
                           filter=filters or None, remote_fmt=fmt_entries or None,
                           remote=remote_name, source=source, prefix=prefix,
                           server_checksum=server_checksum,
-                          on_duplicate="skip" if skip_duplicates else None)
+                          on_duplicate="skip" if skip_duplicates else None,
+                          prune=prune)
     if len(inputs) != 1 and any(value is not None for value in remote_options.values()):
         raise ClickException("Remote add accepts one URL at a time")
     # attempt to add the specified files to the hallmark index, handling any errors
@@ -427,13 +460,10 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
             if remote or any(value is not None for value in remote_options.values()):
                 if remote and not skip_duplicates and _interactive():
                     remote_options["on_duplicate"] = _ask_about_duplicates
-                pf = repo.add(
-                    inputs[0], encoding, progress=True, **remote_options,
-                    # with a new fmt, ask whether already sorted files are sorted again
-                    resort=lambda count: click.prompt(
-                        f"{count} files are already sorted. Sort them again with the "
-                        "new fmt, or only sort the unsorted files?",
-                        type=click.Choice(["resort", "unsorted"])) == "resort")
+                if remote and prune is None:
+                    remote_options["prune"] = _ask_about_missing
+                pf = repo.add(inputs[0], encoding, progress=True, **remote_options,
+                              resort=_ask_about_resort)
             else:
                 pf = repo.add(inputs[0], encoding)
         # oterhwise, use the add_paths method for multiple inputs
@@ -464,6 +494,10 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
         click.echo("Removed from the catalog (no longer on the server):")
         for path in removed:
             click.echo(f"  {path}")
+    kept = pf.attrs.get("kept_missing", [])
+    if kept:
+        click.echo(f"Kept in the catalog, though no longer on the server: "
+                   f"{len(kept)} file(s)")
     changed = pf.attrs.get("changed", [])
     if changed:
         click.echo(f"Changed upstream ({len(changed)}); run hm download to "

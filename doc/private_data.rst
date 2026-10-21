@@ -105,8 +105,11 @@ A format added to an existing catalog is kept next to the earlier ones. When the
 catalog had a single format in ``data.tsv``, that TSV is renamed after its format.
 If files are already sorted into TSVs, ``hm add`` asks whether to sort them
 again with the new format (``resort``), moving each file to the format that fits
-it best, or to sort only files that no format matched yet (``unsorted``).
-Python callers pass ``resort=True`` or ``resort=False`` to ``Repo.add``.
+it best, or to sort only files that no format matched yet (``unsorted``). When
+other sources have sorted files too, it also offers ``all``, which sorts every
+source's files again by their recorded paths, without listing their servers.
+Python callers pass ``resort=True``, ``resort="all"`` or ``resort=False`` to
+``Repo.add``.
 
 ``hm detect REMOTE`` suggests formats for a configured remote, named like
 ``origin`` or given as a URL inside it. A URL can point at a subfolder; only
@@ -185,15 +188,17 @@ name a new remote or pick an existing one, and ``--source NAME`` to name the
 source.
 
 Repeating an ``add`` with the same URL and filters updates its source: new
-files are added, files gone from the server are removed, and ``add`` lists the
-removals. It also lists, as changed upstream, files you downloaded whose size,
-modification time or checksum the server now reports differently; the next
-``download`` replaces them. A bare URL updates the single source of that
-folder. Different filters in the same folder add another source; to change an
-existing source's filters instead, run ``add`` with ``--source NAME``. New
-filters must still match every catalogued file of that source, so a narrower
-selection belongs on a new branch. ``set-config --fmt`` does not apply to
-remote catalogs; add a format with ``hm add URL --fmt``.
+files are added. Files gone from the server leave the catalog only when you say
+so: ``add`` lists them and asks whether to remove them or keep their rows, and
+``--prune`` or ``--keep-missing`` answers in advance (``prune=True`` or
+``prune=False`` in Python). It also lists, as changed upstream, files you
+downloaded whose size, modification time or checksum the server now reports
+differently; the next ``download`` replaces them. A bare URL updates the single
+source of that folder. Different filters in the same folder add another source;
+to change an existing source's filters instead, run ``add`` with ``--source
+NAME``. New filters must still match every catalogued file of that source, so a
+narrower selection belongs on a new branch. ``set-config --fmt`` does not apply
+to remote catalogs; add a format with ``hm add URL --fmt``.
 
 ``download`` fetches each file from the remote of the source that cataloged
 it, opening one connection per remote; the plan lists every remote and its file

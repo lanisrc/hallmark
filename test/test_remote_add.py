@@ -402,7 +402,7 @@ def test_add_cli_forwards_backend_and_selection(monkeypatch, tmp_path):
         "--backend-options", str(options), "--filter", "**/*.fits",
         "--filter", "README*", "--fmt", "{name}.fits", "--remote", "lab",
         "--source", "fits", "--prefix", "lab/", "--server-checksum", "sha256",
-        "--skip-duplicates"])
+        "--skip-duplicates", "--prune"])
     assert result.exit_code == 0, result.output
     assert callable(captured.pop("resort"))
     assert captured == {
@@ -410,7 +410,8 @@ def test_add_cli_forwards_backend_and_selection(monkeypatch, tmp_path):
         "auth": "lab", "backend": "ssh", "backend_options": {"collection": "latest"},
         "filter": ("**/*.fits", "README*"), "remote_fmt": [{"fmt": "{name}.fits"}],
         "remote": "lab", "source": "fits", "prefix": "lab/",
-        "server_checksum": "sha256", "on_duplicate": "skip", "progress": True}
+        "server_checksum": "sha256", "on_duplicate": "skip", "prune": True,
+        "progress": True}
 
 
 @pytest.mark.parametrize("arguments", [
@@ -900,14 +901,25 @@ def test_a_new_format_sorts_the_catalogue_not_one_source(tmp_path, remote_listin
         "M87_001.fits", "M87_002.fits"]
 
 
-def test_readding_a_source_prunes_files_gone_from_the_server(
+def test_readding_a_source_asks_about_files_gone_from_the_server(
         tmp_path, remote_listing, monkeypatch):
     pages, _ = remote_listing
     repo = Repo.init(tmp_path / "data")
     repo.add(ROOT, filter="*.fits")
     repo.commit("Catalogue")
     pages[""] = _listing("M87_002.fits", "M87_003.fits")
-    result = repo.add(ROOT, filter="*.fits")
+    with pytest.raises(ValueError, match=r"no longer on the server:\n  M87_001.fits"):
+        repo.add(ROOT, filter="*.fits")
+    assert repo.dothm.index.diff("HEAD") == []
+    result = repo.add(ROOT, filter="*.fits", prune=False)
+    assert (result.attrs["removed"], result.attrs["kept_missing"]) == (
+        [], ["M87_001.fits"])
+    assert repo.state.data.path.tolist() == [
+        "M87_001.fits", "M87_002.fits", "M87_003.fits"]
+    asked = []
+    result = repo.add(ROOT, filter="*.fits",
+                      prune=lambda paths: asked.append(paths) or True)
+    assert asked == [["M87_001.fits"]]
     assert result.attrs["removed"] == ["M87_001.fits"]
     assert repo.state.data.path.tolist() == ["M87_002.fits", "M87_003.fits"]
     status = repo.status()["staged"]
@@ -915,10 +927,20 @@ def test_readding_a_source_prunes_files_gone_from_the_server(
                                                    ["M87_001.fits"])
     monkeypatch.chdir(repo.worktree)
     pages[""] = _listing("M87_003.fits")
-    output = CliRunner().invoke(hallmark, ["add", ROOT, "--filter", "*.fits"])
+    output = CliRunner().invoke(hallmark, ["add", ROOT, "--filter", "*.fits"],
+                                input="remove\n")
     assert output.exit_code == 0, output.output
-    assert "no longer on the server" in output.output
-    assert "  M87_002.fits" in output.output
+    assert ("1 catalogued file(s) are no longer on the server:\n  M87_002.fits"
+            in output.output)
+    assert "Removed from the catalog (no longer on the server):" in output.output
+    pages[""] = _listing("M87_004.fits")
+    output = CliRunner().invoke(
+        hallmark, ["add", ROOT, "--filter", "*.fits", "--keep-missing"])
+    assert output.exit_code == 0, output.output
+    assert "Kept in the catalog, though no longer on the server: 1 file(s)" in (
+        output.output)
+    assert Repo(repo.worktree).state.data.path.tolist() == [
+        "M87_003.fits", "M87_004.fits"]
 
 
 def test_known_sha1_is_kept_only_for_unchanged_files(tmp_path, remote_listing):
@@ -1365,3 +1387,55 @@ def test_checkout_explains_how_to_clear_unstaged_hallmark_state(
 def test_split_remote_pattern_rejects_bad_input(value, fmt, message):
     with pytest.raises(ValueError, match=message):
         split_remote_pattern(value, fmt)
+
+
+def _two_sources(path):
+    repo = Repo.init(path)
+    repo.add(ROOT + "{src}_{day:03d}.fits", filter="M87_001*")
+    repo.add(ROOT, filter="M87_002*")
+    repo.commit("Two sources")
+    return repo
+
+
+def _sorted_into(repo, table):
+    return repo.dothm.read_tsv(table)["path"].tolist()
+
+
+def test_a_new_format_can_sort_every_source_again(tmp_path, remote_listing,
+                                                  monkeypatch):
+    repo = _two_sources(tmp_path / "source")
+    with pytest.raises(ValueError, match='resort="all"'):
+        repo.add(ROOT, filter="M87_002*", remote_fmt="M87_{day:03d}.fits")
+    with pytest.raises(ValueError, match="resort must be"):
+        repo.add(ROOT, filter="M87_002*", remote_fmt="M87_{day:03d}.fits",
+                 resort="everything")
+    asked = []
+    repo.add(ROOT, filter="M87_002*", remote_fmt="M87_{day:03d}.fits",
+             resort=lambda count, others: asked.append((count, others)) or True)
+    # Only this source's file moves to the more specific format.
+    assert asked == [(1, 1)]
+    assert _sorted_into(repo, "M87_{day:03d}.fits.tsv") == ["M87_002.fits"]
+    assert _sorted_into(repo, "{src}_{day:03d}.fits.tsv") == ["M87_001.fits"]
+    repo = _two_sources(tmp_path / "all")
+    repo.add(ROOT, filter="M87_002*", remote_fmt="M87_{day:03d}.fits", resort="all")
+    # Every source's file moves, the other sorted by its recorded path.
+    assert _sorted_into(repo, "M87_{day:03d}.fits.tsv") == [
+        "M87_001.fits", "M87_002.fits"]
+    assert _sorted_into(repo, "{src}_{day:03d}.fits.tsv") == []
+    moved = repo.state.tables["M87_{day:03d}.fits.tsv"].set_index("path")
+    assert moved.loc["M87_001.fits", "catalog_source"] == "origin"
+    assert moved.loc["M87_001.fits", "day"] == "001"
+
+
+def test_cli_offers_to_sort_every_source_again(tmp_path, remote_listing,
+                                               monkeypatch):
+    repo = _two_sources(tmp_path / "data")
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, [
+        "add", ROOT, "--filter", "M87_002*", "--fmt", "M87_{day:03d}.fits"],
+        input="all\n")
+    assert result.exit_code == 0, result.output
+    assert ("1 files of this source and 1 of other sources are already sorted"
+            in result.output)
+    assert _sorted_into(Repo(repo.worktree), "M87_{day:03d}.fits.tsv") == [
+        "M87_001.fits", "M87_002.fits"]

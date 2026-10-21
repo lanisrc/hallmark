@@ -559,6 +559,43 @@ def _sort_rows(rows, selected, fmt_entries, kept_tables):
                     if key not in {*CATALOG_COLUMNS, "sha1"}})
 
 
+_RESORT = {True: "source", "source": "source", "all": "all",
+           False: "unsorted", "unsorted": "unsorted"}
+
+
+def _resort_choice(value):
+    """Return ``"source"``, ``"all"`` or ``"unsorted"`` for a resort value."""
+    if value is None:
+        return None
+    try:
+        return _RESORT[value]
+    except (KeyError, TypeError):
+        raise ValueError(
+            'resort must be True, False, "source", "all", "unsorted" or a '
+            "callable") from None
+
+
+def _sort_again(rows, sources, fmt_entries):
+    """
+    Sort other sources' files again with every format, by their paths.
+
+    Their servers are not listed again, so each file keeps its recorded
+    metadata, and a ``file:`` entry that stays one is kept as it was.
+    """
+    by_name = {source.name: source for source in sources}
+    sorted_rows = []
+    for row in rows:
+        source = by_name.get(row.get(SOURCE))
+        if source is None:
+            sorted_rows.append(row)
+            continue
+        again = {key: value for key, value in row.items()
+                 if key in {*CATALOG_COLUMNS, "sha1"}}
+        _sort_rows([again], source, fmt_entries, {})
+        sorted_rows.append(row if SECTION in again and SECTION in row else again)
+    return sorted_rows
+
+
 def _write_catalogue(state, rows, fmt_entries, sources):
     """
     Store catalogue rows in their TSVs and ``file:`` entries in ``config.yml``.
@@ -624,15 +661,16 @@ def _with_owners(rows, sources):
 
 def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
                backend_options=None, remote=None, source=None, prefix=None,
-               server_checksum=None, on_duplicate=None, resort=None, progress=False):
+               server_checksum=None, on_duplicate=None, resort=None, prune=None,
+               progress=False):
     """
     Catalog files from a remote folder as one source of the catalogue.
 
     The URL is matched to a configured remote, or becomes a new one. The
     selection updates the source with the same folder and filters (or the
     one named by ``source``), or adds a new source. Re-adding a source
-    replaces its files: files gone from the server are dropped, and a known
-    ``sha1`` is kept while the server reports the file unchanged.
+    replaces its files, keeping a known ``sha1`` while the server reports the
+    file unchanged; ``prune`` decides about files gone from the server.
 
     The catalogue's filename formats, with any new ones, sort the files:
     each format's files are rows of its TSV, and files no format matches
@@ -661,22 +699,37 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
             and returns ``"skip"``, ``"abort"``, or ``("prefix", DIR)`` to
             place a new source's files under DIR instead. The choice is not
             saved, so adding the source again meets the same paths.
-        resort (bool | callable, optional): When a new format joins and this
-            source's files are already sorted, True sorts them again and
-            False keeps each in its TSV, sorting only the others. A callable
-            receives the number of sorted files and returns the choice.
+        resort (bool | str | callable, optional): When a new format joins
+            and files are already sorted, True (or ``"source"``) sorts this
+            source's files again, ``"all"`` sorts every source's files again,
+            and False (or ``"unsorted"``) keeps each in its TSV, sorting only
+            the others. Other sources' files are sorted by their recorded
+            paths, without listing their servers. A callable receives the
+            number of this source's sorted files, and the number of other
+            sources' when there are any, and returns the choice. Without a
+            choice, sorted files make the add fail.
+        prune (bool | callable, optional): When catalogued files of this
+            source are gone from the server, True removes them from the
+            catalogue and False keeps their rows. A callable receives their
+            paths and returns the choice. Without a choice the add fails, so
+            no file leaves the catalogue unnoticed.
         progress: Discovery progress callback or flag.
 
     Returns:
-        pandas.DataFrame: The files this source now catalogs.
+        pandas.DataFrame: The files the server listed for this source.
         ``attrs["removed"]`` lists catalogued paths that the server no longer
-        has, ``attrs["changed"]`` downloaded paths whose file it reports
+        has and that were removed, ``attrs["kept_missing"]`` those that were
+        kept, ``attrs["changed"]`` downloaded paths whose file it reports
         changed, ``attrs["skipped"]`` the :class:`PathClash` of each path
         left out, and ``attrs["case_clashes"]`` groups of catalogue paths
         that differ only in letter case.
     """
     if not (on_duplicate in (None, "error", "skip") or callable(on_duplicate)):
         raise ValueError('on_duplicate must be "error", "skip" or a callable')
+    if not callable(resort):
+        _resort_choice(resort)
+    if not (callable(prune) or prune in (None, True, False)):
+        raise ValueError("prune must be True, False or a callable")
     value, backend = _expand_webdav_scheme(value, backend)
     url, new_fmts = split_remote_pattern(value, fmt)
     path_matches("validation", filter=filter)
@@ -761,23 +814,46 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
             ["path", SOURCE, *(key for row in others for key in row)]))),
         selected, sources, on_duplicate, can_prefix=current is None)
     sorted_before = {row["path"]: row[TABLE] for row in mine if TABLE in row}
-    if added and sorted_before:
+    owners = {source.name for source in sources}
+    sorted_elsewhere = sum(TABLE in row and row.get(SOURCE) in owners
+                           for row in others)
+    choice = None
+    if added and (sorted_before or sorted_elsewhere):
         if callable(resort):
-            resort = resort(len(sorted_before))
-        if resort is None:
+            resort = (resort(len(sorted_before), sorted_elsewhere) if sorted_elsewhere
+                      else resort(len(sorted_before)))
+        choice = _resort_choice(resort)
+        if choice is None:
             raise ValueError(
-                f"{len(sorted_before)} files are already sorted; pass resort=True "
-                "to sort them again with the new fmt, or resort=False to only "
-                "sort unsorted files")
+                f"{len(sorted_before)} files are already sorted"
+                + (f", and {sorted_elsewhere} of other sources"
+                   if sorted_elsewhere else "")
+                + "; pass resort=True to sort them again with the new fmt, "
+                + ('resort="all" to sort every source\'s files again, '
+                   if sorted_elsewhere else "")
+                + "or resort=False to only sort unsorted files")
     rows = frame.to_dict(orient="records")
     _sort_rows(rows, selected, fmt_entries,
-               sorted_before if added and not resort else {})
+               sorted_before if choice == "unsorted" else {})
+    if choice == "all":
+        others = _sort_again(others, sources, fmt_entries)
+    missing = sorted({row["path"] for row in mine} - {row["path"] for row in rows})
+    if missing:
+        if callable(prune):
+            prune = prune(missing)
+        if prune not in (True, False):
+            raise ValueError(
+                f"{len(missing)} catalogued file(s) of source {selected.name!r} "
+                f"are no longer on the server:\n{_listed(missing)}\nPass "
+                "prune=True to remove them from the catalogue, or prune=False "
+                "to keep them; previous catalogue kept")
+    kept = [row for row in mine if row["path"] in missing] if not prune else []
     changed = _carry_sha1(rows, mine, getattr(repo, "worktree", None))
     if current is None:
         sources.append(selected)
     else:
         sources[sources.index(current)] = selected
-    _write_catalogue(state, [*others, *rows], fmt_entries, sources)
+    _write_catalogue(state, [*others, *rows, *kept], fmt_entries, sources)
     state.config["remote"] = remotes
     state.config["sources"] = [item.to_config() for item in sources]
     with repo.dothm.state_lock():
@@ -792,8 +868,8 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
                             if not key.startswith("_") and key != "sha1"}
                            for row in rows])
     result.attrs["skipped"] = skipped
-    result.attrs["removed"] = sorted({row["path"] for row in mine}
-                                     - {row["path"] for row in rows})
+    result.attrs["removed"] = missing if prune else []
+    result.attrs["kept_missing"] = missing if not prune else []
     result.attrs["changed"] = changed
     result.attrs["case_clashes"] = _case_clashes(
         [row["path"] for row in rows], [row["path"] for row in others])

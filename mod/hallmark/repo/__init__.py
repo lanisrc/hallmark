@@ -738,7 +738,8 @@ class Repo:
     def add(self, fmt: str, encoding: bool = False, *, filter=None,
             remote_fmt=None, auth=None, backend=None, backend_options=None,
             remote=None, source=None, prefix=None, server_checksum=None,
-            on_duplicate=None, resort=None, progress=False) -> ParaFrame:
+            on_duplicate=None, resort=None, prune=None,
+            progress=False) -> ParaFrame:
         '''
         Stage local file metadata or discover a remote catalog without downloading.
 
@@ -762,10 +763,13 @@ class Repo:
             on_duplicate (string | callable, optional): What to do with paths
                 another source already catalogs; see ``add_remote``.
             progress (boolean): Show remote discovery progress.
-            resort (bool | callable, optional): When a remote add brings a new
-                fmt, True sorts the already sorted files again and False only
-                sorts unsorted ones; a callable gets the number of sorted files
-                and returns the choice.
+            resort (bool | str | callable, optional): When a remote add brings
+                a new fmt, True sorts this source's sorted files again, "all"
+                every source's, and False only sorts unsorted ones; see
+                ``add_remote``.
+            prune (bool | callable, optional): When files of the source are
+                gone from the server, True removes them from the catalogue and
+                False keeps them; see ``add_remote``.
         Returns:
             ParaFrame: Local parameters without checksums, or remote catalog rows.
         '''
@@ -777,10 +781,10 @@ class Repo:
                               remote=remote, source=source, prefix=prefix,
                               server_checksum=server_checksum,
                               on_duplicate=on_duplicate, resort=resort,
-                              progress=progress)
+                              prune=prune, progress=progress)
         if any(value is not None for value in
                (filter, remote_fmt, auth, backend, backend_options, remote,
-                source, prefix, server_checksum, on_duplicate, resort)):
+                source, prefix, server_checksum, on_duplicate, resort, prune)):
             raise ValueError("Remote options require a remote URL")
         if is_remote_catalog(self.state):
             raise ValueError("Use a remote URL to update this catalog")
