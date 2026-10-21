@@ -409,8 +409,10 @@ remote:
         try:
             if "." in files:
                 if head is None:
-                    self.index.entries.clear()
-                    self.index.write()
+                    # Each access to self.index reads a new index object.
+                    index = self.index
+                    index.entries.clear()
+                    index.write()
                 else:
                     self.index.reset(head, working_tree=False)
                 return
