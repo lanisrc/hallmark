@@ -25,7 +25,8 @@ import pytest
 from hallmark import Repo
 
 STATE_FILES = ("config.yml", "meta.yml", "data.tsv")
-DEBRIS_PATTERNS = ("**/.*.part", "**/.*.tmp", "**/.hallmark-checkout-*")
+DEBRIS_PATTERNS = ("**/.*.part", "**/.*.tmp", "**/.hallmark-checkout-*",
+                   "**/objects/tmp/*")
 
 
 @dataclass
