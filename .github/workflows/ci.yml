@@ -145,6 +145,8 @@ jobs:
     - name: Check both installed commands
       run: |
         hm --help
+        hm add --help
+        hm --version
         hallmark --help
       working-directory: ${{ runner.temp }}
     - name: Build documentation with warnings as errors
