@@ -6,7 +6,7 @@ name: CI
 
 on:
   push:
-    branches: [ "main", "dev" ]
+    branches: [ "main", "codex/function-atomic-replay-20260928" ]
   # Pull requests into any branch, including stacked feature branches.
   pull_request:
   workflow_dispatch:
