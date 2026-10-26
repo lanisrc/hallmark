@@ -14,6 +14,8 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 from requests.auth import AuthBase
+from urllib3.exceptions import (HTTPError as Urllib3Error, ProtocolError,
+                                ReadTimeoutError)
 
 from ..utils import REMOTE_REQUEST_TIMEOUT
 from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
@@ -151,11 +153,18 @@ class HttpBackend(DataBackend):
         )
 
     def _download_error(self, exc):
-        # Requests exceptions can embed credentials in their URL or response body.
         """Describe an HTTP failure without exposing response contents."""
+        # Requests exceptions can embed credentials in their URL or response body.
         status = getattr(getattr(exc, "response", None), "status_code", None)
         cls = RemoteObjectMissing if status == 404 else DownloadError
-        detail = f"HTTP {status}" if isinstance(status, int) else type(exc).__name__
+        if isinstance(status, int):
+            detail = f"HTTP {status}"
+        elif isinstance(exc, ReadTimeoutError):
+            detail = "the connection stalled"
+        elif isinstance(exc, ProtocolError):
+            detail = "the connection was reset or the body was truncated"
+        else:
+            detail = type(exc).__name__
         if status in {401, 403}:
             detail += (f"; check auth profile {self.context.remote.auth!r}"
                        if self.auth is not None else
@@ -224,8 +233,11 @@ class HttpBackend(DataBackend):
                             handle.write(chunk)
                             if self.context.on_bytes is not None:
                                 self.context.on_bytes(len(chunk))
-        except requests.RequestException as exc:
+        # Reading response.raw directly bypasses Requests' error wrapping, so
+        # a reset, truncated or stalled transfer arrives as a urllib3 error.
+        except (requests.RequestException, Urllib3Error) as exc:
             raise self._download_error(exc) from None
+
     def read_text(self, relative_path, limit):
         """Read metadata within the source root and byte limit."""
         content = bytearray()

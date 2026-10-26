@@ -19,9 +19,11 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import click
+import requests
 import yaml
 from click import ClickException
 from git.exc import GitError
+from urllib3.exceptions import HTTPError as Urllib3Error
 
 from . import Repo
 from .fmt_detection import detect_fmt
@@ -175,7 +177,8 @@ def _run_download(repo, plan, *, max_workers):
 # Errors a user causes or can fix, such as a typo in config.yml, a missing
 # file, a full disk or a git failure. Every command reports them in one line;
 # anything else is a bug and keeps its traceback.
-_USER_ERRORS = (HallmarkError, GitError, OSError, yaml.YAMLError, ValueError)
+_USER_ERRORS = (HallmarkError, GitError, OSError, yaml.YAMLError, ValueError,
+                requests.RequestException, Urllib3Error)
 
 
 class _HallmarkGroup(click.Group):
