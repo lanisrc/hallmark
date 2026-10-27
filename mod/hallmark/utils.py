@@ -66,6 +66,8 @@ REMOTE_REQUEST_TIMEOUT = (10, 30)
 REPOSITORY_INTERNAL_NAMES = frozenset({".git", ".hm"})
 # Folders in which a checkout stages files and keeps the originals it moves.
 CHECKOUT_PREFIX = ".hallmark-checkout-"
+# add_worktree keeps this file in a new worktree until every file is placed.
+INCOMPLETE_WORKTREE_MARKER = ".hallmark-worktree-incomplete"
 # define a default chunk size for file I/O operations (1 MB).
 FILE_IO_CHUNK_SIZE = 1024 * 1024
 
@@ -409,7 +411,8 @@ def iter_repository_files(root: Path):
         current_path = Path(current)
         for file_name in file_names:
             # skip files that are internal to the repository (e.g., .git, .hm)
-            if file_name.lower() in REPOSITORY_INTERNAL_NAMES:
+            if (file_name.lower() in REPOSITORY_INTERNAL_NAMES
+                    or file_name == INCOMPLETE_WORKTREE_MARKER):
                 continue
             file_path = current_path / file_name
             # only yield file path if its a regular file or symlink (not a directory)

@@ -272,22 +272,36 @@ def test_killed_checkout_from_a_detached_head_detaches_it_again(two_branches):
     _branch_files(repo.worktree, files, "main")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Bug: add_worktree returns early when the destination already has .hm, "
-    "so a rerun after a crash leaves the worktree without its files (#57)"))
-def test_killed_add_worktree_is_completed_by_rerun(telescope):
+def _restore(nth, when):
+    return {"target": "hallmark.repo.objects:Objects.restore", "nth": nth,
+            "when": when}
+
+
+@pytest.mark.parametrize("existing_branch,kill", [
+    (False, _restore(1, "before")),
+    (True, _restore(2, "after")),
+    (True, _restore(5, "after")),
+    (False, _replace(3, ".fits", when="before")),
+    (True, {"target": "hallmark.repo.dothm:Dothm.link_worktree", "nth": 1,
+            "when": "before"}),
+], ids=["before-first-restore", "after-second-restore", "after-fifth-restore",
+        "mid-restore", "before-link-existing-branch"])
+def test_killed_add_worktree_is_completed_by_rerun(telescope, existing_branch, kill):
     repo, files = telescope
     repo.add(FMT)
     repo.commit("main data")
+    if existing_branch:
+        assert _run(repo.worktree, ["branch", "obs2"]).returncode == 0
     code = 'Repo(".").add_worktree("obs2")'
-    # Killed after Git created the linked worktree, before restoring files.
-    _killed(repo.worktree, ["--api", code], {
-        "target": "hallmark.repo.objects:Objects.restore", "nth": 1,
-        "when": "before"})
+    _killed(repo.worktree, ["--api", code], kill)
     _rerun(repo.worktree, ["--api", code])
     second = repo.worktree.parent / "obs2"
     for path, data in files.items():
         assert (second / path).read_bytes() == data
+    # The marker and any half-written copy are gone.
+    problems = check_invariants(second)
+    assert not problems, problems
+    assert Repo(second).branches()["current"] == "obs2"
 
 
 def test_killed_download_keeps_partial_data_separate(tmp_path, http_server):

@@ -25,6 +25,7 @@ from hallmark.repo.dothm import Dothm
 from hallmark.repo.history import (
     fetch_missing_objects_from_remote,
     load_branch_state)
+from hallmark.utils import INCOMPLETE_WORKTREE_MARKER
 
 
 FMT = "a{a}_i{i}.h5"
@@ -1055,6 +1056,122 @@ def test_add_worktree_for_an_existing_worktree_changes_nothing(tmp_path):
 
     assert linked_file.read_text(
         encoding="utf-8") == "edited in the linked worktree\n"
+
+
+def test_add_worktree_leaves_a_file_deleted_from_a_complete_worktree(tmp_path):
+    repo = _two_branch_repo(tmp_path)
+    repo.add_worktree("experiment")
+    deleted = tmp_path / "experiment" / "a1_i45.h5"
+    deleted.unlink()
+
+    assert repo.add_worktree("experiment") is True
+
+    assert not deleted.exists()
+
+
+def test_add_worktree_of_a_new_repository_needs_no_format(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+
+    assert repo.add_worktree("w") is True
+
+    assert Repo(tmp_path / "w").branches()["current"] == "w"
+    assert sorted(path.name for path in (tmp_path / "w").iterdir()) == [".hm"]
+
+
+@pytest.mark.parametrize("leftover", [[], [INCOMPLETE_WORKTREE_MARKER]],
+                         ids=["empty", "marker-only"])
+def test_add_worktree_uses_a_folder_an_interrupted_run_left(tmp_path, leftover):
+    repo = _two_branch_repo(tmp_path)
+    target = tmp_path / "experiment"
+    target.mkdir()
+    for name in leftover:
+        (target / name).touch()
+
+    assert repo.add_worktree("experiment") is True
+
+    assert sorted(path.name for path in target.iterdir()) == [
+        ".hm", "a1_i45.h5", "a1_i90.h5"]
+
+
+def _interrupted_worktree(tmp_path):
+    """Return a repository and its experiment worktree, marked unfinished."""
+    repo = _two_branch_repo(tmp_path)
+    repo.add_worktree("experiment")
+    target = tmp_path / "experiment"
+    (target / INCOMPLETE_WORKTREE_MARKER).touch()
+    (target / "a1_i45.h5").unlink()
+    return repo, target
+
+
+def test_add_worktree_finishes_only_the_missing_files_of_a_marked_worktree(
+        tmp_path):
+    repo, target = _interrupted_worktree(tmp_path)
+    (target / "a1_i90.h5").write_text("edited\n", encoding="utf-8")
+    stale = target / ".a1_i45.h5.k2v9x0qz.tmp"
+    stale.write_text("partial", encoding="utf-8")
+    # The marker is Hallmark's own, not a file to track.
+    assert Repo(target).status()["untracked"] == [stale.name]
+
+    assert repo.add_worktree("experiment") is True
+
+    assert (target / "a1_i45.h5").read_text(
+        encoding="utf-8") == "contents of a1_i45.h5\n"
+    assert (target / "a1_i90.h5").read_text(encoding="utf-8") == "edited\n"
+    assert sorted(path.name for path in target.iterdir()) == [
+        ".hm", "a1_i45.h5", "a1_i90.h5"]
+
+
+def test_add_worktree_leaves_a_marked_worktree_on_another_branch(tmp_path):
+    repo, target = _interrupted_worktree(tmp_path)
+    Repo(target).dothm.git.checkout("-b", "elsewhere")
+
+    assert repo.add_worktree("experiment") is True
+
+    assert not (target / "a1_i45.h5").exists()
+    assert (target / INCOMPLETE_WORKTREE_MARKER).exists()
+
+
+def test_add_worktree_checks_objects_before_finishing_a_worktree(tmp_path):
+    repo, target = _interrupted_worktree(tmp_path)
+    for sha1 in Repo(target).state.data["sha1"]:
+        repo.objects.object_path(sha1).unlink()
+
+    with pytest.raises(FileNotFoundError, match="missing object"):
+        repo.add_worktree("experiment")
+    assert not (target / "a1_i45.h5").exists()
+    assert (target / INCOMPLETE_WORKTREE_MARKER).exists()
+
+
+def test_add_worktree_says_how_to_remove_a_worktree_it_cannot_open(tmp_path):
+    repo = _committed_repo(tmp_path)
+    target = tmp_path / "broken"
+    (target / ".hm").mkdir(parents=True)
+    (target / INCOMPLETE_WORKTREE_MARKER).touch()
+
+    with pytest.raises(RuntimeError, match=(
+            "cannot finish the interrupted worktree.*worktree remove --force"
+            ".*worktree prune")):
+        repo.add_worktree("broken")
+
+
+def test_add_worktree_refuses_a_worktree_git_did_not_check_out(tmp_path):
+    repo = _two_branch_repo(tmp_path)
+    target = tmp_path / "experiment"
+    target.mkdir()
+    (target / INCOMPLETE_WORKTREE_MARKER).touch()
+    # What a kill during git's own checkout leaves: locked, with no index.
+    repo.dothm.git.worktree("add", "--no-checkout", "--lock",
+                            str(target / ".hm"), "experiment")
+
+    with pytest.raises(RuntimeError, match=(
+            "git did not finish checking out.*worktree remove --force --force")):
+        repo.add_worktree("experiment")
+    assert (target / INCOMPLETE_WORKTREE_MARKER).exists()
+
+    repo.dothm.git.worktree("remove", "--force", "--force", str(target / ".hm"))
+    assert repo.add_worktree("experiment") is True
+    assert sorted(path.name for path in target.iterdir()) == [
+        ".hm", "a1_i45.h5", "a1_i90.h5"]
 
 
 def test_add_worktree_reports_an_invalid_checksum_as_a_missing_file(tmp_path):

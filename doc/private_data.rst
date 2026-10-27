@@ -354,7 +354,11 @@ modification time and notices: ``hm status`` lists the file, the next download
 refuses to touch it and drops the changed object, and deleting the file lets a
 fresh copy be downloaded. To change a downloaded file, copy it to a new name.
 Never delete ``.hm/objects`` by hand: it also holds committed local files that
-may exist nowhere else. Linked worktrees share it. After an interruption, run
+may exist nowhere else. Linked worktrees share it: ``add_worktree`` links the
+files whose committed SHA-1 is already in ``.hm/objects`` into the new worktree,
+read-only, and the rest wait for ``hm download`` there, which fills the same
+store. A file linked into two worktrees is one copy on disk, so editing it in
+place changes it in both. After an interruption, run
 the same download again: files whose SHA-1 was recorded, or whose catalog
 checksum matches, are recognised as complete and only the rest are transferred.
 Files with neither are fetched again to compare.

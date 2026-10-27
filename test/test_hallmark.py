@@ -2329,6 +2329,7 @@ def test_add_worktree_preserves_unrelated_existing_destination(tmp_path):
 def test_add_worktree_rejects_invalid_data_config_before_creation(tmp_path):
     """
     Test that adding a worktree fails if the repo has an invalid data configuration.
+    A catalogue without rows has nothing to restore, so the test commits one.
     Args:
         tmp_path: pytest fixture that provides a temporary directory for the test.
     Raises:
@@ -2336,6 +2337,9 @@ def test_add_worktree_rejects_invalid_data_config_before_creation(tmp_path):
         (not exactly one entry).
     """
     repo = Repo.init(tmp_path / "repo")
+    _write_files(repo.worktree, ["data_1.txt"])
+    repo.add("data_{number}.txt")
+    repo.commit("main data")
     repo.state.config["data"] = []
     repo.dothm.save_state(repo.state)
     repo.dothm.index.commit("invalid data configuration")

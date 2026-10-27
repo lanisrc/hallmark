@@ -1123,6 +1123,11 @@ class Repo:
         is invalid.
         Raises RuntimeError if called in a bare repository or worktree creation fails.
 
+        Local files are restored as writable copies. A remote catalogue's files
+        whose content is in ``.hm/objects`` are linked read-only, as downloads
+        are; the rest wait for ``hm download`` in the new worktree. Running it
+        again finishes a worktree an interrupted call left incomplete.
+
         Args:
             target_branch (string): Name of the branch to attach.
         Returns:

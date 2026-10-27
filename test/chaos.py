@@ -26,7 +26,7 @@ from hallmark import Repo
 
 STATE_FILES = ("config.yml", "meta.yml", "*.tsv")
 DEBRIS_PATTERNS = ("**/.*.part", "**/.*.tmp", "**/.hallmark-checkout-*",
-                   "**/objects/tmp/*")
+                   "**/.hallmark-worktree-incomplete", "**/objects/tmp/*")
 
 
 @dataclass

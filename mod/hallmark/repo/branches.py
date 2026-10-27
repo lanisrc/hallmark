@@ -18,10 +18,12 @@ from tempfile import mkdtemp
 from git.exc import GitCommandError
 
 from ..error import CheckoutError, DestinationExistsError, DothmError
+from ..transport.base import validate_remote_path
 from ..utils import (
-    CHECKOUT_PREFIX, calculate_file_checksum, replace_file_on_success,
-    resolve_path_in_root)
-from .state import is_remote_catalog
+    CHECKOUT_PREFIX, INCOMPLETE_WORKTREE_MARKER, calculate_file_checksum,
+    is_valid_checksum, replace_file_on_success, resolve_path_in_root)
+from .catalog import catalog_rows
+from .state import cell_text, is_remote_catalog
 from .config import row_to_path, single_data_format, tracked_filename_format
 from .manifest import iter_manifest_entries
 from .history import (
@@ -604,6 +606,131 @@ def _checkout(repo, target_branch):
     return True
 
 
+def _paths_known(state) -> bool:
+    """
+    Return whether add_worktree can tell where each file of a state goes.
+
+    Remote catalogues list paths. A local catalogue needs exactly one
+    filename format, unless it has no rows, as in a new repository.
+    """
+    return (is_remote_catalog(state) or state.data.empty
+            or single_data_format(state.config) is not None)
+
+
+def _check_stored_objects(repo, state):
+    """
+    Raise FileNotFoundError naming the objects a local catalogue lacks.
+
+    A remote catalogue needs none: its files not yet downloaded wait for
+    ``hm download`` in the new worktree.
+    """
+    if is_remote_catalog(state):
+        return
+    try:
+        missing_objects = repo.objects.missing_checksums(
+            row["sha1"] for _, row in state.data.iterrows())
+    # an invalid checksum names no object, so report it as missing
+    except ValueError as exc:
+        raise FileNotFoundError(str(exc)) from exc
+    if missing_objects:
+        raise FileNotFoundError(
+            "cannot create worktree; missing object(s): "
+            + ", ".join(missing_objects))
+
+
+def _remove_stale_temps(destinations):
+    """Remove the ``.NAME.RANDOM.tmp`` files left beside ``destinations``."""
+    names = {}
+    for destination in destinations:
+        names.setdefault(destination.parent, set()).add(destination.name)
+    # one listing per folder, however many of its files are missing
+    for folder, wanted in names.items():
+        for stale in folder.glob(".*.tmp"):
+            parts = stale.name[1:].rsplit(".", 2)
+            if len(parts) == 3 and parts[0] in wanted:
+                stale.unlink(missing_ok=True)
+
+
+def _place_stored_objects(repo, state, root, *, skip_existing):
+    """
+    Place the files of a state that ``.hm/objects`` holds beneath ``root``.
+
+    A local catalogue's files are restored as writable copies. A remote
+    catalogue's are linked read-only, or copied across filesystems, as
+    downloads are, and only those already downloaded are placed. With
+    ``skip_existing``, files already there are kept: a placement is atomic,
+    so a file under its final name is complete.
+    """
+    remote = is_remote_catalog(state)
+    if remote:
+        # every TSV and file: entry; a path listed twice is placed once
+        files = {}
+        for row in catalog_rows(state):
+            sha1 = cell_text(row.get("sha1")).lower()
+            if is_valid_checksum("sha1", sha1) and repo.objects.contains(sha1):
+                files[validate_remote_path(row["path"])] = sha1
+    else:
+        files = dict(iter_manifest_entries(state))
+    pending = []
+    for rel_path, sha1 in files.items():
+        destination = resolve_path_in_root(
+            root, rel_path, label="worktree data path")
+        if not (skip_existing and os.path.lexists(destination)):
+            pending.append((destination, sha1))
+    if skip_existing:
+        _remove_stale_temps(destination for destination, _ in pending)
+    for destination, sha1 in pending:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if remote:
+            repo.objects.materialize(sha1, destination)
+        else:
+            repo.objects.restore(sha1, destination)
+
+
+def _unfinished_worktree_error(repo, target, reason):
+    """Say why a marked worktree cannot be finished, and how to remove it."""
+    main = shlex.quote(str(repo.dothm.path))
+    # git locks a worktree until its checkout ends; a second --force unlocks it
+    return RuntimeError(
+        f'cannot finish the interrupted worktree "{target}": {reason}. '
+        f"Remove it with: git -C {main} worktree remove --force --force "
+        f"{shlex.quote(str(target / '.hm'))} (or delete the folder and run: "
+        f"git -C {main} worktree prune), then add it again")
+
+
+def _finish_worktree(repo, target, target_branch):
+    """
+    Place the files an interrupted add_worktree left out, then drop its marker.
+
+    Only missing files are placed, so files already there stay as they are.
+    A worktree on another branch is left alone.
+    """
+    try:
+        linked = type(repo)(target)
+    except Exception as exc:
+        raise _unfinished_worktree_error(
+            repo, target, f"its .hm does not open ({type(exc).__name__}: {exc})"
+            ) from exc
+    # git writes the index last, so a checkout it did not finish has none
+    if not os.path.isfile(linked.dothm.index.path):
+        raise _unfinished_worktree_error(
+            repo, target, "git did not finish checking out its .hm")
+    if current_branch(linked) != target_branch:
+        return
+    if not _paths_known(linked.state):
+        raise _unfinished_worktree_error(
+            repo, target, "its catalogue has no single data format")
+    _check_stored_objects(repo, linked.state)
+    # the marker stays on failure, so the next run tries again
+    try:
+        _place_stored_objects(repo, linked.state, target, skip_existing=True)
+    except Exception as exc:
+        raise RuntimeError(
+            f'failed to populate worktree for branch "{target_branch}": {exc}'
+            ) from exc
+    (target / INCOMPLETE_WORKTREE_MARKER).unlink(missing_ok=True)
+
+
 def add_worktree(repo, target_branch):
     """
     Add a worktree for a branch, in a folder named after it next to the
@@ -644,8 +771,16 @@ def add_worktree(repo, target_branch):
         raise ValueError("worktree destination cannot be the current worktree")
     # the dothm path for the target worktree is the ".hm" directory
     target_dothm = target / ".hm"
-    # if the target path exists and is not a hallmark worktree, raise an error
-    if target.exists() and not target_dothm.exists():
+    # the marker stays until every file is placed, so a rerun can finish
+    marker = target / INCOMPLETE_WORKTREE_MARKER
+    # an existing worktree is left as it is, unless a run was interrupted
+    if target_dothm.exists():
+        if marker.exists():
+            _finish_worktree(repo, target, target_branch)
+        return True
+    # a folder that is empty, or holds only the marker, is used as it is
+    if target.exists() and (not target.is_dir() or any(
+            entry.name != INCOMPLETE_WORKTREE_MARKER for entry in target.iterdir())):
         raise DestinationExistsError(
             f'worktree destination "{target}" already exists '
             "and is not a Hallmark worktree")
@@ -661,91 +796,63 @@ def add_worktree(repo, target_branch):
     else:
         target_state = load_head_state(repo)
 
-    # get the target fmt from the target branch configuration
-    target_fmt = single_data_format(target_state.config)
-    # if target branch does not have exactly one data format, raise a RuntimeError
-    if target_fmt is None:
+    if not _paths_known(target_state):
         raise RuntimeError(
             "add_worktree requires exactly one data entry "
             "with a non-empty fmt")
+    _check_stored_objects(repo, target_state)
 
-    # if the target worktree does not exist
-    if not target_dothm.exists():
-        # check for missing objects in the target state that are not present in
-        # the object store
-        try:
-            missing_objects = repo.objects.missing_checksums(
-                row["sha1"] for _, row in target_state.data.iterrows())
-        # if a ValueError occurs during object existence check, raise cleanly
-        except ValueError as exc:
-            raise FileNotFoundError(str(exc)) from exc
-        # if there are missing objects, raise a FileNotFoundError with details
-        if missing_objects:
-            raise FileNotFoundError(
-                "cannot create worktree; missing object(s): "
-                + ", ".join(missing_objects))
+    # create the target directory and its parents if they do not exist
+    target.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    try:
+        # if the target branch already exists, link the new worktree to it
+        if not created_branch:
+            repo.dothm.link_worktree(target_dothm, target_branch)
+        # if the target branch does not exist, create a new worktree and branch
+        else:
+            repo.dothm.git.worktree("add", "-b", target_branch,
+                                    str(target_dothm))
+    # if the worktree creation fails, raise a RuntimeError with details
+    except (GitCommandError, DothmError) as exc:
+        # rmtree the target directory to clean up any partial worktree creation
+        rmtree(target, ignore_errors=True)
+        raise RuntimeError(f'failed to create worktree for branch '
+                           f'"{target_branch}": {exc}') from exc
 
-        # create the target directory and its parents if they do not exist
-        target.mkdir(parents=True, exist_ok=True)
+    try:
+        _place_stored_objects(repo, target_state, target, skip_existing=False)
+        marker.unlink()
+
+    # if any exception occurs during file restoration, attempt a clean up
+    except Exception as exc:
+        # Attempt to remove the worktree from Git and clean up the directory
         try:
-            # if the target branch already exists, link the new worktree to it
-            if not created_branch:
-                repo.dothm.link_worktree(target_dothm, target_branch)
-            # if the target branch does not exist, create a new worktree and branch
-            else:
-                repo.dothm.git.worktree("add", "-b", target_branch,
-                                        str(target_dothm))
-        # if the worktree creation fails, raise a RuntimeError with details
-        except (GitCommandError, DothmError) as exc:
-            # rmtree the target directory to clean up any partial worktree creation
+            repo.dothm.git.worktree("remove", "--force", str(target_dothm))
+        # if the worktree removal fails, attempt to prune the worktree list
+        except GitCommandError:
+            # remove the target directory before pruning
             rmtree(target, ignore_errors=True)
-            raise RuntimeError(f'failed to create worktree for branch '
-                               f'"{target_branch}": {exc}') from exc
-
-        # iterate over the target state data and restore files from the object store
-        try:
-            for _, row in target_state.data.iterrows():
-                rel_path = row_to_path(row, target_fmt)
-                # resolve relative path to an absolute path in the target worktree
-                destination = resolve_path_in_root(
-                    target,
-                    rel_path,
-                    label="worktree data path")
-                # ensure the parent directory exists before restoring the file
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                # restore the file from the object store using its SHA-1 checksum
-                repo.objects.restore(row["sha1"], destination)
-
-        # if any exception occurs during file restoration, attempt a clean up
-        except Exception as exc:
-            # Attempt to remove the worktree from Git and clean up the directory
             try:
-                repo.dothm.git.worktree("remove", "--force", str(target_dothm))
-            # if the worktree removal fails, attempt to prune the worktree list
+                repo.dothm.git.worktree("prune")
             except GitCommandError:
-                # remove the target directory before pruning
-                rmtree(target, ignore_errors=True)
-                try:
-                    repo.dothm.git.worktree("prune")
-                except GitCommandError:
-                    # pass if pruning fails, already handling a restoration error
-                    pass
-            # If the target directory still exists after cleanup attempts, remove it
-            else:
-                rmtree(target, ignore_errors=True)
+                # pass if pruning fails, already handling a restoration error
+                pass
+        # If the target directory still exists after cleanup attempts, remove it
+        else:
+            rmtree(target, ignore_errors=True)
 
-            # If a new branch was created and the restoration failed
-            if created_branch:
-                # try to delete the newly created branch
-                try:
-                    repo.dothm.git.branch("-D", target_branch)
-                # if the branch deletion fails, pass since already handling an error
-                except GitCommandError:
-                    pass
-            # raise RuntimeError with details about failure to populate the worktree
-            raise RuntimeError(
-                f'failed to populate worktree for branch '
-                f'"{target_branch}": {exc}') from exc
+        # If a new branch was created and the restoration failed
+        if created_branch:
+            # try to delete the newly created branch
+            try:
+                repo.dothm.git.branch("-D", target_branch)
+            # if the branch deletion fails, pass since already handling an error
+            except GitCommandError:
+                pass
+        # raise RuntimeError with details about failure to populate the worktree
+        raise RuntimeError(
+            f'failed to populate worktree for branch '
+            f'"{target_branch}": {exc}') from exc
 
     return True
-

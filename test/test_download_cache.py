@@ -733,3 +733,107 @@ def test_cli_lists_and_reports_replaced_files(repo, server, monkeypatch):
     assert "Outdated: 1 file(s) will be replaced" in result.output
     assert ("Replaced 1 outdated file(s); old versions stay in .hm/objects"
             in result.output)
+
+
+def add_worktree(repo, name="linked"):
+    assert repo.add_worktree(name) is True
+    assert name in repo.branches()["names"]
+    return Repo(repo.worktree.parent / name)
+
+
+def payload(repo):
+    return sorted(path.relative_to(repo.worktree).as_posix()
+                  for path in repo.worktree.rglob("*")
+                  if ".hm" not in path.parts and path.is_file())
+
+
+def catalogue(tmp_path, pattern):
+    repo = Repo.init(tmp_path / "data")
+    repo.add(pattern)
+    repo.commit("Catalogue")
+    return repo
+
+
+@pytest.mark.parametrize("pattern", [ROOT, ROOT + "{name}.fits"],
+                         ids=["plain-url", "fmt"])
+def test_a_worktree_of_a_catalogue_never_downloaded_waits_for_download(
+        tmp_path, server, pattern):
+    repo = catalogue(tmp_path, pattern)
+    linked = add_worktree(repo)
+    assert linked.state.config == repo.state.config
+    assert (linked.state.data.to_dict(orient="records")
+            == repo.state.data.to_dict(orient="records"))
+    assert payload(linked) == []
+    assert linked.plan_download(all_files=True).file_count == 3
+
+
+@pytest.mark.parametrize("pattern, data_entries", [
+    (ROOT, [None]),
+    (ROOT + "{name}.fits", ["notes.txt", "{name}.fits"]),
+], ids=["plain-url", "fmt-and-file-entry"])
+def test_a_worktree_links_downloaded_files_read_only(tmp_path, server, pattern,
+                                                     data_entries):
+    files, fetched = server
+    files["notes.txt"] = b"notes"
+    repo = catalogue(tmp_path, pattern)
+    download(repo)
+    repo.commit("Record downloaded content")
+    assert [entry.get("file") or entry.get("fmt")
+            for entry in repo.state.config["data"]] == data_entries
+    fetched.clear()
+
+    linked = add_worktree(repo)
+    assert payload(linked) == sorted(files)
+    for name, data in files.items():
+        path = linked.worktree / name
+        assert path.read_bytes() == data
+        assert linked.objects.is_linked(sha1(data), path)
+        assert not os.stat(path).st_mode & stat.S_IWUSR
+    assert fetched == []
+    assert linked.plan_download(all_files=True).file_count == 0
+    status = linked.status()
+    assert status["worktree"] == {"modified": [], "deleted": []}
+    assert status["untracked"] == []
+
+
+def test_a_worktree_of_a_partly_downloaded_catalogue_links_what_is_stored(
+        repo, server):
+    download(repo, file_paths=["b.fits"])
+    repo.commit("Record b.fits")
+    linked = add_worktree(repo)
+    assert payload(linked) == ["b.fits"]
+    assert linked.objects.is_linked(sha1(b"bravo"), linked.worktree / "b.fits")
+    assert linked.plan_download(all_files=True).file_count == 2
+
+
+def test_a_worktree_copies_downloads_where_links_are_unavailable(repo, server,
+                                                                 monkeypatch):
+    download(repo)
+    repo.commit("Record downloaded content")
+    links_fail(monkeypatch)
+    linked = add_worktree(repo)
+    path = linked.worktree / "b.fits"
+    assert path.read_bytes() == b"bravo"
+    assert not linked.objects.is_linked(sha1(b"bravo"), path)
+    assert linked.plan_download(all_files=True).file_count == 0
+
+
+def test_a_download_in_a_linked_worktree_fills_the_shared_store(repo, server):
+    files, fetched = server
+    # SHA-1s committed without their objects, as in a fresh clone.
+    repo.state.data["sha1"] = [sha1(files[path]) for path in repo.state.data.path]
+    repo.dothm.save_state(repo.state)
+    repo.commit("Record SHA-1s")
+    linked = add_worktree(repo)
+    assert payload(linked) == []
+    download(linked)
+    assert fetched
+    fetched.clear()
+
+    plan, result = download(repo)
+    assert fetched == []
+    assert sorted(result["from_store"]) == ["a.fits", "b.fits", "c.fits"]
+    for name in FILES:
+        # Both worktrees link the one stored copy.
+        assert os.stat(repo.worktree / name).st_ino == \
+            os.stat(linked.worktree / name).st_ino
