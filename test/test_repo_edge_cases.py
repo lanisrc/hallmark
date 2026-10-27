@@ -1,8 +1,12 @@
 """Edge cases of checkout, worktrees, status, unstaging and history in a Repo."""
 
+from contextlib import contextmanager
+import errno
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 
 import pandas as pd
 import pytest
@@ -11,6 +15,8 @@ from git.exc import GitCommandError
 
 from hallmark import Repo
 from hallmark.error import CheckoutError, CloneError, DothmError
+from hallmark.repo import branches
+from hallmark.repo.branches import checkout_folders
 from hallmark.repo.changes import (
     ensure_clean_tracked_files,
     find_changed_and_missing_files,
@@ -526,8 +532,10 @@ def test_failed_checkout_reports_rollback_steps_that_also_fail(
             repo.checkout("experiment")
 
     message = str(caught.value)
+    folder, = checkout_folders(repo.worktree)
     assert message.startswith(
         'checkout of branch "experiment" failed: state unreadable; '
+        f"the next open finishes the rollback from {folder}; "
         "rollback incomplete: could not restore branch:")
     assert message.endswith("could not reload repository state: state unreadable")
 
@@ -560,11 +568,279 @@ def test_failed_checkout_reports_files_it_could_not_put_back(tmp_path, monkeypat
             repo.checkout("experiment")
 
     message = str(caught.value)
-    assert "simulated install failure; rollback incomplete:" in message
+    folder, = checkout_folders(repo.worktree)
+    assert (f"simulated install failure; originals kept in {folder}; "
+            "rollback incomplete:") in message
     assert 'a1_i45.h5": file busy' in message
     assert 'could not restore "' in message
     assert message.count("backup unreadable") == 2
     assert repo.branches()["current"] == "main"
+    # The next open removes the file left installed and puts the originals back.
+    assert _h5_names(Repo(repo.worktree)) == ["a0_i0.h5", "a0_i30.h5"]
+    assert not checkout_folders(repo.worktree)
+
+
+def _contents(repo):
+    return {name: (repo.worktree / name).read_text(encoding="utf-8")
+            for name in _h5_names(repo)}
+
+
+def _refuse_branch_restore(git, *args, **kwargs):
+    if args == ("main",):
+        raise _git_failure("checkout", *args)
+    return git._call_process("checkout", *args, **kwargs)
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+@pytest.mark.parametrize("step, nth", [
+    ("stage", 1), ("move", 1), ("move", 2), ("move", 3),
+], ids=["staging", "first-backup", "second-backup", "first-install"])
+def test_interrupted_checkout_puts_everything_back(tmp_path, monkeypatch, step,
+                                                   nth, when):
+    repo = _two_branch_repo(tmp_path)
+    before = _contents(repo)
+    original_replace = Path.replace
+    calls = 0
+
+    def replace(path, target):
+        nonlocal calls
+        # Files are staged first; then two originals move to "backup" and
+        # two files leave "staged".
+        if step == "stage":
+            counted = Path(target).parent.name == "staged"
+        else:
+            counted = (Path(target).parent.name == "backup"
+                       or path.parent.name == "staged" and path.name.isdigit())
+        if not counted:
+            return original_replace(path, target)
+        calls += 1
+        if calls == nth and when == "before":
+            raise KeyboardInterrupt
+        original_replace(path, target)
+        if calls == nth:
+            raise KeyboardInterrupt
+        return target
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", replace)
+        with pytest.raises(KeyboardInterrupt):
+            repo.checkout("experiment")
+
+    assert repo.branches()["current"] == "main"
+    assert _contents(repo) == before
+    assert not checkout_folders(repo.worktree)
+    assert repo.checkout("experiment") is True
+    assert _h5_names(repo) == ["a1_i45.h5", "a1_i90.h5"]
+
+
+def _interrupt_second_reload(patch, repo):
+    """Interrupt the reload after a rollback, which leaves the journal as written."""
+    original_load_state = repo.dothm.load_state
+    loads = 0
+
+    def load_state(*args, **kwargs):
+        nonlocal loads
+        loads += not args and not kwargs
+        if loads == 2:
+            raise KeyboardInterrupt
+        return original_load_state(*args, **kwargs)
+
+    patch.setattr(repo.dothm, "load_state", load_state)
+
+
+@pytest.mark.parametrize("stop", ["branch", "interrupt"])
+def test_next_open_finishes_a_rollback_and_keeps_the_originals(
+        tmp_path, monkeypatch, stop):
+    repo = _committed_repo(tmp_path, names=("a0_i0.h5", "a0_i30.h5"))
+    repo.create_branch("experiment")
+    repo.checkout("experiment")
+    for name in ("a0_i0.h5", "a0_i30.h5"):
+        (repo.worktree / name).write_text("recalibrated\n", encoding="utf-8")
+    repo.add(".")
+    repo.commit("Recalibrated")
+    repo.checkout("main")
+    before = _contents(repo)
+
+    with monkeypatch.context() as patch:
+        _fail_staged_install(patch, failing_call=2)
+        if stop == "branch":
+            patch.setattr(Git, "checkout", _refuse_branch_restore,
+                          raising=False)
+            expected = pytest.raises(
+                CheckoutError, match="the next open finishes the rollback")
+        else:
+            _interrupt_second_reload(patch, repo)
+            expected = pytest.raises(KeyboardInterrupt)
+        with expected:
+            repo.checkout("experiment")
+
+    # The originals are back and the folder is kept for the next open, which
+    # must not take them for the files the checkout installed.
+    assert _contents(repo) == before
+    assert checkout_folders(repo.worktree)
+    reopened = Repo(repo.worktree)
+    assert reopened.branches()["current"] == "main"
+    assert _contents(reopened) == before
+    assert not checkout_folders(repo.worktree)
+    assert reopened.status()["worktree"]["modified"] == []
+
+
+def test_next_open_keeps_an_untracked_copy_of_an_installed_file(tmp_path,
+                                                                 monkeypatch):
+    repo = _two_branch_repo(tmp_path)
+    copy = repo.worktree / "a1_i45.h5"
+    copy.write_text("contents of a1_i45.h5\n", encoding="utf-8")
+
+    with monkeypatch.context() as patch:
+        _fail_staged_install(patch, failing_call=2)
+        _interrupt_second_reload(patch, repo)
+        with pytest.raises(KeyboardInterrupt):
+            repo.checkout("experiment")
+
+    # The copy moved back has the content of the file installed there.
+    assert checkout_folders(repo.worktree)
+    assert _h5_names(Repo(repo.worktree)) == ["a0_i0.h5", "a0_i30.h5", "a1_i45.h5"]
+    assert copy.read_text(encoding="utf-8") == "contents of a1_i45.h5\n"
+    assert not checkout_folders(repo.worktree)
+
+
+def test_next_open_keeps_a_file_in_the_way_of_an_original(tmp_path, monkeypatch):
+    repo = _two_branch_repo(tmp_path)
+    original_replace = Path.replace
+    installs = 0
+
+    def replace(path, target):
+        nonlocal installs
+        if path.parent.name == "staged" and path.name.isdigit():
+            installs += 1
+            if installs == 2:
+                raise OSError("simulated install failure")
+        if path.parent.name == "backup":
+            raise OSError("backup unreadable")
+        return original_replace(path, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", replace)
+        with pytest.raises(CheckoutError, match="originals kept in"):
+            repo.checkout("experiment")
+    (repo.worktree / "a0_i0.h5").write_text("written since\n", encoding="utf-8")
+
+    with pytest.raises(CheckoutError, match='"a0_i0.h5" is in the way'):
+        Repo(repo.worktree)
+    assert (repo.worktree / "a0_i0.h5").read_text(
+        encoding="utf-8") == "written since\n"
+
+    (repo.worktree / "a0_i0.h5").unlink()
+    reopened = Repo(repo.worktree)
+    assert reopened.branches()["current"] == "main"
+    assert _contents(reopened) == {
+        name: f"contents of {name}\n" for name in ("a0_i0.h5", "a0_i30.h5")}
+
+
+def test_rollback_never_takes_a_folder_for_an_installed_file(tmp_path):
+    folder = tmp_path / "a0_i0.h5"
+    folder.mkdir()
+    found = folder.stat()
+    assert not branches._is_installed(
+        folder, "0" * 40, [found.st_dev, found.st_ino])
+
+
+def test_rollback_tells_an_install_by_content_only_when_asked(tmp_path):
+    # As where a rename does not keep the inode.
+    _write(tmp_path, "a0_i0.h5")
+    path = tmp_path / "a0_i0.h5"
+    sha1 = hashlib.sha1(path.read_bytes()).hexdigest()
+    assert branches._is_installed(path, sha1, [0, 0])
+    assert not branches._is_installed(path, None, [0, 0])
+    assert not branches._is_installed(path, "0" * 40, [0, 0])
+
+
+def test_interrupted_checkout_names_the_folder_left_to_finish(tmp_path,
+                                                              monkeypatch):
+    repo = _two_branch_repo(tmp_path)
+    original_replace = Path.replace
+
+    def replace(path, target):
+        if path.parent.name == "staged" and path.name.isdigit():
+            raise KeyboardInterrupt
+        return original_replace(path, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", replace)
+        patch.setattr(Git, "checkout", _refuse_branch_restore, raising=False)
+        with pytest.raises(KeyboardInterrupt) as caught:
+            repo.checkout("experiment")
+
+    folder, = checkout_folders(repo.worktree)
+    if hasattr(caught.value, "add_note"):
+        note, = caught.value.__notes__
+        assert note.startswith(
+            'checkout of branch "experiment" interrupted; the next open '
+            f"finishes the rollback from {folder}; rollback incomplete: "
+            "could not restore branch:")
+    assert Repo(repo.worktree).branches()["current"] == "main"
+
+
+def test_failed_checkout_reports_a_journal_it_could_not_update(tmp_path,
+                                                               monkeypatch):
+    repo = _two_branch_repo(tmp_path)
+    original_write_journal = branches._write_journal
+    writes = 0
+
+    def write_journal(path, journal):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("disk full")
+        original_write_journal(path, journal)
+
+    with monkeypatch.context() as patch:
+        _fail_staged_install(patch)
+        patch.setattr(Git, "checkout", _refuse_branch_restore, raising=False)
+        patch.setattr(branches, "_write_journal", write_journal)
+        with pytest.raises(CheckoutError) as caught:
+            repo.checkout("experiment")
+
+    folder, = checkout_folders(repo.worktree)
+    assert str(caught.value).endswith(
+        f"could not update {folder / 'journal.json'}: disk full")
+    # The journal written first still describes the checkout.
+    assert _h5_names(Repo(repo.worktree)) == ["a0_i0.h5", "a0_i30.h5"]
+    assert not checkout_folders(repo.worktree)
+
+
+@pytest.mark.parametrize("code", [errno.EDEADLK, errno.EACCES])
+def test_open_takes_the_lock_only_to_roll_back_a_checkout(tmp_path, monkeypatch,
+                                                          code):
+    repo = _committed_repo(tmp_path)
+
+    @contextmanager
+    def fail(self):
+        # EDEADLK is what msvcrt.locking raises once it gives up.
+        raise OSError(code, os.strerror(code))
+        yield
+
+    monkeypatch.setattr(Dothm, "state_lock", fail)
+    assert Repo(repo.worktree).branches()["current"] == "main"
+    (repo.worktree / ".hallmark-checkout-running").mkdir()
+    if code == errno.EDEADLK:
+        expected = pytest.raises(CheckoutError, match=re.escape(
+            f"another hm checkout is running in {repo.worktree}"))
+    else:
+        expected = pytest.raises(PermissionError)
+    with expected:
+        Repo(repo.worktree)
+
+
+def test_add_and_status_skip_a_checkout_folder(tmp_path):
+    repo = _committed_repo(tmp_path)
+    _write(repo.worktree, ".hallmark-checkout-kept/a0_i5.h5",
+           ".hallmark-checkout-kept/backup/0")
+
+    repo.add(".")
+
+    assert repo.state.data["path"].tolist() == ["a0_i0.h5"]
+    assert repo.status()["untracked"] == []
 
 
 def test_failed_checkout_of_a_remote_branch_removes_the_new_local_branch(

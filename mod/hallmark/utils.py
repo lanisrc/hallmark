@@ -64,6 +64,8 @@ def infer_checksum_algorithm(digest) -> str | None:
 REMOTE_REQUEST_TIMEOUT = (10, 30)
 # define a frozenset of internal repo names that should be ignored during processing.
 REPOSITORY_INTERNAL_NAMES = frozenset({".git", ".hm"})
+# Folders in which a checkout stages files and keeps the originals it moves.
+CHECKOUT_PREFIX = ".hallmark-checkout-"
 # define a default chunk size for file I/O operations (1 MB).
 FILE_IO_CHUNK_SIZE = 1024 * 1024
 
@@ -385,7 +387,8 @@ def require_nonempty_string(
 def iter_repository_files(root: Path):
     """
     Used in repo by status.
-    Iterate over all files in a repository, excluding internal directories.
+    Iterate over all files in a repository, excluding internal directories
+    and the folders of a checkout.
 
     Args:
         root: Path to the root of the repository.
@@ -400,7 +403,8 @@ def iter_repository_files(root: Path):
         directory_names[:] = [
             name
             for name in directory_names
-            if name.lower() not in REPOSITORY_INTERNAL_NAMES]
+            if name.lower() not in REPOSITORY_INTERNAL_NAMES
+            and not name.startswith(CHECKOUT_PREFIX)]
         # get the current path as a Path object for easier file path manipulation
         current_path = Path(current)
         for file_name in file_names:

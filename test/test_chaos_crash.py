@@ -17,6 +17,7 @@ import pytest
 
 from chaos import check_invariants, snapshot_hm
 from hallmark import Repo
+from hallmark.repo.dothm import Dothm
 from http_server import SlowDrip, write_file
 from survey import make_telescope_tree
 
@@ -30,9 +31,17 @@ CHILD = str(Path(__file__).with_name("chaos_child.py"))
 FMT = "{site}/{year:d}/{day:d}.fits"
 
 
-def _run(cwd, args, kill=None, input=None):
+def _child_env():
     env = dict(os.environ)
     env.pop("HALLMARK_CHAOS_KILL", None)
+    # The child runs in the repository, where a relative PYTHONPATH misses.
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [
+        str(Path(__file__).parents[1] / "mod"), env.get("PYTHONPATH")]))
+    return env
+
+
+def _run(cwd, args, kill=None, input=None):
+    env = _child_env()
     if kill is not None:
         env["HALLMARK_CHAOS_KILL"] = json.dumps(kill)
     return subprocess.run([sys.executable, CHILD, *args], cwd=cwd, env=env,
@@ -116,20 +125,151 @@ def two_branches(telescope):
     return repo, files
 
 
-@pytest.mark.parametrize("nth", [
-    pytest.param(1, marks=pytest.mark.xfail(strict=True, reason=(
-        "Bug: a checkout killed after moving a file to its backup folder "
-        "cannot be rerun; the file is reported missing (#56)"))),
-    pytest.param(3, marks=pytest.mark.xfail(strict=True, reason=(
-        "Bug: a checkout killed after moving a file to its backup folder "
-        "cannot be rerun; the file is reported missing (#56)"))),
-])
+@pytest.mark.parametrize("nth", [1, 3])
 def test_killed_checkout_can_be_completed(two_branches, nth):
     repo, _ = two_branches
     _killed(repo.worktree, ["checkout", "exp"], _replace(nth, ".fits"))
     _rerun(repo.worktree, ["checkout", "exp"])
     assert (repo.worktree / "SMA/2025/96.fits").read_bytes() == \
         b"exp version of SMA/2025/96.fits"
+
+
+def _branch_files(root, files, branch):
+    """Assert that the two files exp changes hold ``branch``'s version."""
+    for path in ("ALMA/2024/95.fits", "SMA/2025/96.fits"):
+        expected = (b"exp version of " + path.encode() if branch == "exp"
+                    else files[path])
+        assert (Path(root) / path).read_bytes() == expected, path
+
+
+def _kill_only(cwd, args, kill):
+    """Kill ``hm args`` at ``kill`` without opening the repository after."""
+    result = _run(cwd, args, kill)
+    assert result.returncode == -signal.SIGKILL, result.stdout + result.stderr
+
+
+# Path.replace calls that match ".fits": two backups, then two installs.
+@pytest.mark.parametrize("kill, head", [
+    (_replace(2, ".fits"), "exp"),
+    (_replace(4, ".fits"), "exp"),
+    ({"target": "hallmark.repo.objects:Objects.restore", "nth": 2,
+      "when": "before"}, "main"),
+    ({"target": "git.cmd:Git.execute", "nth": 1, "when": "after",
+      "match": "checkout"}, "exp"),
+], ids=["both-backed-up", "all-installed", "while-staging", "after-git"])
+@pytest.mark.parametrize("then", ["exp", "main"])
+def test_killed_checkout_is_rolled_back_on_open(two_branches, kill, head, then):
+    repo, files = two_branches
+    _kill_only(repo.worktree, ["checkout", "exp"], kill)
+    assert snapshot_hm(repo.worktree)["head"] == f"refs/heads/{head}"
+    assert list(repo.worktree.glob(".hallmark-checkout-*"))
+    _rerun(repo.worktree, ["status"])
+    assert snapshot_hm(repo.worktree)["head"] == "refs/heads/main"
+    _branch_files(repo.worktree, files, "main")
+    _rerun(repo.worktree, ["checkout", then])
+    _branch_files(repo.worktree, files, then)
+
+
+# After the journal is gone: before or while the folder is removed.
+@pytest.mark.parametrize("kill", [
+    {"target": "shutil:rmtree", "nth": 1, "when": "before",
+     "match": ".hallmark-checkout-"},
+    {"target": "os:rmdir", "nth": 1, "when": "after", "match": "backup"},
+    {"target": "os:rmdir", "nth": 1, "when": "after", "match": "staged"},
+], ids=["before", "backup-removed", "staged-removed"])
+def test_checkout_killed_removing_its_folder_stands(two_branches, kill):
+    repo, files = two_branches
+    _kill_only(repo.worktree, ["checkout", "exp"], kill)
+    assert list(repo.worktree.glob(".hallmark-checkout-*"))
+    _rerun(repo.worktree, ["status"])
+    assert snapshot_hm(repo.worktree)["head"] == "refs/heads/exp"
+    _branch_files(repo.worktree, files, "exp")
+    _rerun(repo.worktree, ["checkout", "exp"])
+
+
+@pytest.mark.parametrize("first", [3, 4])
+@pytest.mark.parametrize("second", [1, 2])
+def test_killed_recovery_is_finished_by_the_next_open(two_branches, first, second):
+    repo, files = two_branches
+    _kill_only(repo.worktree, ["checkout", "exp"], _replace(first, ".fits"))
+    # The open rolls the checkout back; kill it after moving originals back.
+    _kill_only(repo.worktree, ["status"], {
+        "target": "os:replace", "nth": second, "when": "after",
+        "match": "backup"})
+    _rerun(repo.worktree, ["status"])
+    assert snapshot_hm(repo.worktree)["head"] == "refs/heads/main"
+    _branch_files(repo.worktree, files, "main")
+    _rerun(repo.worktree, ["checkout", "exp"])
+    _branch_files(repo.worktree, files, "exp")
+
+
+def test_add_after_a_killed_checkout_keeps_the_original_rows(two_branches):
+    repo, _ = two_branches
+    before = snapshot_hm(repo.worktree)
+    _kill_only(repo.worktree, ["checkout", "exp"], _replace(3, ".fits"))
+    _rerun(repo.worktree, ["add", "."])
+    after = snapshot_hm(repo.worktree)
+    assert after["head"] == "refs/heads/main"
+    assert after["index"] == before["index"]
+    assert after["files"]["data.tsv"] == before["files"]["data.tsv"]
+
+
+# exp adds a file of which main has an untracked copy; it is backed up first.
+@pytest.mark.parametrize("kill, recovery_kill", [
+    ({"target": "git.cmd:Git.execute", "nth": 1, "when": "after",
+      "match": "checkout"}, None),
+    (_replace(6, ".fits"), {"target": "os:replace", "nth": 3, "when": "after",
+                            "match": "backup"}),
+], ids=["before-backups", "after-moving-it-back"])
+def test_killed_checkout_keeps_an_untracked_copy_of_a_new_file(
+        two_branches, kill, recovery_kill):
+    repo, files = two_branches
+    repo = Repo(repo.worktree)
+    repo.checkout("exp")
+    copy = write_file(repo.worktree, "VLA/2024/1.fits", b"new in exp")
+    repo.add(FMT)
+    repo.commit("Add VLA")
+    repo.checkout("main")
+    write_file(repo.worktree, "VLA/2024/1.fits", b"new in exp")
+
+    _kill_only(repo.worktree, ["checkout", "exp"], kill)
+    if recovery_kill:
+        _kill_only(repo.worktree, ["status"], recovery_kill)
+    _rerun(repo.worktree, ["status"])
+    assert snapshot_hm(repo.worktree)["head"] == "refs/heads/main"
+    _branch_files(repo.worktree, files, "main")
+    assert copy.read_bytes() == b"new in exp"
+
+
+def test_killed_checkout_of_a_remote_branch_deletes_the_branch_it_made(
+        two_branches, tmp_path):
+    source, files = two_branches
+    clone = tmp_path / "clone"
+    Dothm.clone(str(source.dothm.path), clone / ".hm")
+    make_telescope_tree(clone)
+    objects = Repo(clone).objects
+    for path, data in files.items():
+        objects.store(clone / path, hashlib.sha1(data).hexdigest())
+
+    _kill_only(clone, ["checkout", "exp"], _replace(3, ".fits"))
+    assert "refs/heads/exp " in snapshot_hm(clone)["refs"]
+    _rerun(clone, ["status"])
+    after = snapshot_hm(clone)
+    assert after["head"] == "refs/heads/main"
+    assert "refs/heads/exp " not in after["refs"]
+    _branch_files(clone, files, "main")
+    _rerun(clone, ["checkout", "exp"])
+    _branch_files(clone, files, "exp")
+
+
+def test_killed_checkout_from_a_detached_head_detaches_it_again(two_branches):
+    repo, files = two_branches
+    commit = repo.dothm.head.commit.hexsha
+    Repo(repo.worktree).checkout(commit)
+    _kill_only(repo.worktree, ["checkout", "exp"], _replace(3, ".fits"))
+    _rerun(repo.worktree, ["status"])
+    assert snapshot_hm(repo.worktree)["head"] == commit
+    _branch_files(repo.worktree, files, "main")
 
 
 @pytest.mark.xfail(strict=True, reason=(
@@ -162,10 +302,8 @@ def test_killed_download_keeps_partial_data_separate(tmp_path, http_server):
     repo.commit("Catalog")
     server.faults.add("rel/big.bin", SlowDrip(chunk=4096, delay=0.02), times=1)
 
-    env = dict(os.environ)
-    env.pop("HALLMARK_CHAOS_KILL", None)
     child = subprocess.Popen([sys.executable, CHILD, "download", "--all"],
-                             cwd=repo.worktree, env=env, stdin=subprocess.PIPE,
+                             cwd=repo.worktree, env=_child_env(), stdin=subprocess.PIPE,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     child.stdin.write(b"y\n")
     child.stdin.close()

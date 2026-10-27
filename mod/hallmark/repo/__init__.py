@@ -21,16 +21,19 @@ in an object store (see ``hallmark.repo.objects``).
 """
 
 from __future__ import annotations
+import errno
 import os
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from git.exc import GitCommandError
 
 from .branches import (
-    checkout, create_branch, current_branch, current_commit, add_worktree)
+    checkout, checkout_folders, create_branch, current_branch, current_commit,
+    add_worktree, recover_interrupted_checkout)
 from ..remote.add import add_remote
 from .dothm import Dothm
 from .catalog import catalog_rows
@@ -41,7 +44,7 @@ from ..paraframe import ParaFrame
 from .manifest import build_file_table, file_versions_by_path, iter_manifest_entries
 from .history import (
     load_head_state)
-from ..error import DestinationExistsError
+from ..error import CheckoutError, DestinationExistsError
 from ..utils import (
     FILE_IO_CHUNK_SIZE,
     iter_repository_files,
@@ -105,6 +108,19 @@ class Repo:
         dothm_path, worktree_path = self.resolve_repo_paths(path)
         self.dothm = Dothm(dothm_path)
         self.worktree = worktree_path and Worktree(worktree_path)
+        # A checkout killed partway is rolled back before the state is read.
+        if self.worktree is not None and checkout_folders(self.worktree):
+            with ExitStack() as stack:
+                try:
+                    stack.enter_context(self.dothm.state_lock())
+                # msvcrt gives up after about 10 s; flock waits.
+                except OSError as exc:
+                    if exc.errno != errno.EDEADLK:
+                        raise
+                    raise CheckoutError(
+                        f"another hm checkout is running in {self.worktree}"
+                    ) from exc
+                recover_interrupted_checkout(self)
         self.state = self.dothm.load_state()
         self.download_result = None
 
