@@ -59,7 +59,7 @@ Python 3.9 or newer and Git are required. Install a released version from PyPI::
 The examples below describe the development version. Install this checkout
 to use its current API::
 
-    git clone https://github.com/l6a/hallmark.git
+    git clone https://github.com/lanisrc/hallmark.git
     cd hallmark
     pip install -e .
 
@@ -67,10 +67,10 @@ to use its current API::
 ..  |yukon|    replace:: ``yukon``
 ..  |banyan|   replace:: ``banyan``
 
-..  _l6a:      https://github.com/l6a
-..  _hallmark: https://github.com/l6a/hallmark
-..  _yukon:    https://github.com/l6a/yukon
-..  _banyan:   https://github.com/l6a/banyan
+..  _l6a:      https://github.com/lanisrc
+..  _hallmark: https://github.com/lanisrc/hallmark
+..  _yukon:    https://github.com/lanisrc/yukon
+..  _banyan:   https://github.com/lanisrc/banyan
 ..  _eht:      https://eventhorizontelescope.org
 
 Private data remotes
@@ -153,7 +153,7 @@ Development and support
 
 See the `contribution guidelines <doc/CONTRIBUTING.md>`_ for development and
 review practices. Report bugs and request help through the
-`issue tracker <https://github.com/l6a/hallmark/issues>`_. Include your Hallmark
+`issue tracker <https://github.com/lanisrc/hallmark/issues>`_. Include your Hallmark
 version, operating system, and a minimal example without credentials or private data.
 
 From a development checkout, install the validation tools and run::

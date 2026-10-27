@@ -225,7 +225,7 @@ class Dothm(Repo):
 
     This is a dot-hallmark repository.
     It is a git-version-controlled dataset index used by `hallmark`.
-    See https://l6a.github.io/hallmark/ for `hallmark` usage.
+    See https://lanisrc.github.io/hallmark/ for `hallmark` usage.
     """,
                 encoding="utf-8")
             # add the README.md file to the git index and commit it

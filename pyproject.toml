@@ -42,9 +42,9 @@ hallmark = "hallmark.cli:hallmark"
 hm = "hallmark.cli:hallmark"
 
 [project.urls]
-Homepage = "https://l6a.github.io/hallmark"
-Repository = "https://github.com/l6a/hallmark"
-Issues = "https://github.com/l6a/hallmark/issues"
+Homepage = "https://lanisrc.github.io/hallmark"
+Repository = "https://github.com/lanisrc/hallmark"
+Issues = "https://github.com/lanisrc/hallmark/issues"
 
 [dependency-groups]
 s3-test = ["boto3>=1.28", "moto[s3]>=5"]

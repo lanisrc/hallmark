@@ -756,4 +756,4 @@ and disposable transport tests, and :doc:`api` for function signatures.
 
 ..  |hallmark| replace:: ``hallmark``
 
-..  _hallmark: https://github.com/l6a/hallmark
+..  _hallmark: https://github.com/lanisrc/hallmark

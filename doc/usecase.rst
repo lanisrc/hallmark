@@ -127,7 +127,7 @@ her analysis tools; filtering the index does not modify the data files.
 
 ..  |hallmark| replace:: ``hallmark``
 
-..  _hallmark: https://github.com/l6a/hallmark
+..  _hallmark: https://github.com/lanisrc/hallmark
 
 
 .. _private-transport-reference:
