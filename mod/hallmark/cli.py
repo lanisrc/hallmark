@@ -600,9 +600,10 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     unmatched = pf.attrs.get("unmatched", [])
     if unmatched:
         click.echo("Skipped files that do not match the branch pattern:")
-        # print each unmatched path
-        for path in unmatched:
+        for path in unmatched[:10]:
             click.echo(f"  {path}")
+        if len(unmatched) > 10:
+            click.echo(f"  ... and {len(unmatched) - 10} more")
 
 
 @hallmark.command(short_help="Detect filename formats in a remote folder.")

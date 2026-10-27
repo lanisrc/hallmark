@@ -23,6 +23,8 @@ from ..fmt_detection import KNOWN_PROCESSING_STAGES, KNOWN_STATIC_FILE_STEMS
 from ..utils import (
     CHECKSUM_ALGORITHMS, as_list_of_dicts, convert_format_value,
     require_nonempty_string, validate_path_name, validate_relative_path)
+# Re-exported; they live in utils beside the format field check.
+from ..utils import literal_fields, literal_format  # noqa: F401
 
 from ..transport.base import (
     RemoteSpec,
@@ -659,48 +661,6 @@ def check_pattern_fields(fmt: str, reserved=LOCAL_RESERVED_FIELDS) -> None:
         raise ValueError(
             "Rename the pattern field(s) " + ", ".join(clashes)
             + ": the catalogue uses these names for its own columns")
-
-
-def literal_format(fmt: str) -> str:
-    """
-    Return a filename format without its format specs.
-
-    Field values are stored as the text the filename holds, so ``005`` in
-    ``x_{doy:03d}.h5`` stays ``005``, as ``hm add PATTERN`` records it.
-    Parse with the full format to validate a name and with this one to read
-    its values.
-
-    Args:
-        fmt (str): Format string, possibly with specs such as ``{doy:03d}``.
-
-    Returns:
-        str: The same format with every ``{name:spec}`` reduced to ``{name}``.
-    """
-    parts = []
-    for literal, field_name, _, _ in Formatter().parse(fmt):
-        parts.append(literal.replace("{", "{{").replace("}", "}}"))
-        if field_name is not None:
-            parts.append("{" + field_name + "}")
-    return "".join(parts)
-
-
-def literal_fields(fmt: str, target: str):
-    """
-    Return the field text of a name that matches ``fmt``, or None.
-
-    Args:
-        fmt (str): Format string with optional specs, used to validate.
-        target (str): Name or relative path to parse.
-
-    Returns:
-        dict[str, str] | None: Each field's text as it appears in ``target``,
-        unconverted; None if ``target`` does not match. Matching is
-        case-sensitive.
-    """
-    if parse.parse(fmt, target, case_sensitive=True) is None:
-        return None
-    match = parse.parse(literal_format(fmt), target, case_sensitive=True)
-    return None if match is None else match.named
 
 
 def validate_tsv_filename(value) -> str:

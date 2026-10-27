@@ -53,6 +53,7 @@ from ..utils import (
     resolve_path_in_root,
     apply_regex_replacement,
     try_numeric_conversion,
+    validate_format_fields,
     validate_relative_path)
 from .changes import find_changed_and_missing_files, working_directory_for_repo
 from .config import (
@@ -220,6 +221,7 @@ class Repo:
             paths = (path.relative_to(root) for path in iter_repository_files(root))
 
         rows = []
+        unmatched = []
         for parent in sorted({path.parent for path in paths}):
             found = ParaFrame.parse(
                 fmt, base_path=root / parent,
@@ -228,8 +230,12 @@ class Repo:
             for row in found.to_dict(orient="records"):
                 row["path"] = (parent / row["path"]).as_posix()
                 rows.append(row)
+            unmatched.extend((parent / path).as_posix()
+                             for path in found.attrs["unmatched"])
 
-        return ParaFrame(rows, base_path=root, encodings=encodings)
+        result = ParaFrame(rows, base_path=root, encodings=encodings)
+        result.attrs["unmatched"] = sorted(unmatched)
+        return result
 
 
     @classmethod
@@ -963,6 +969,7 @@ class Repo:
         # Normalize the format string to ensure it is a non-empty string
         fmt = require_nonempty_string(fmt, label="format")
         check_pattern_fields(fmt)
+        validate_format_fields(fmt)
         # if the format string has no filename fields, treat it as a literal path
         if not filename_fields(fmt):
             # return early since there are no filename fields to parse

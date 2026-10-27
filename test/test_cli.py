@@ -1316,3 +1316,63 @@ def test_commands_report_a_missing_repository_when_they_run(tmp_path, monkeypatc
     result = CliRunner().invoke(hallmark, ["status"])
     assert result.exit_code == 1
     assert result.output.startswith("Error: Failed to open hallmark repository:")
+
+
+@pytest.mark.parametrize("fmt", ["data/a_{}/b.txt", "data/a_{}/b_{b:d}.txt"])
+def test_cli_add_unnamed_field_is_one_error_line(tmp_path, monkeypatch, fmt):
+    repo = Repo.init(tmp_path / "repo")
+    monkeypatch.chdir(repo.worktree)
+    Path("data/a_1").mkdir(parents=True)
+    Path("data/a_1/b_10.txt").write_text("b_10\n", encoding="utf-8")
+
+    result = CliRunner().invoke(hallmark, ["add", fmt])
+
+    assert result.exit_code == 1
+    assert result.output == (
+        f"Error: Format fields need names, as in {{run}}; {fmt!r} has an "
+        "empty field\n")
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("fmt,matched,untracked", [
+    ("a_{a:d}.txt", ["a_1.txt"], ["a_x.txt"]),
+    ("run{run}/run{run}_{run_id}.h5", ["run1/run1_a.h5", "run2/run2_b.h5"], []),
+])
+def test_cli_add_pattern_then_dot_changes_nothing(
+        tmp_path, monkeypatch, fmt, matched, untracked):
+    repo = Repo.init(tmp_path / "repo")
+    monkeypatch.chdir(repo.worktree)
+    for name in [*matched, *untracked]:
+        Path(name).parent.mkdir(parents=True, exist_ok=True)
+        Path(name).write_text(f"{name}\n", encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(hallmark, ["add", fmt])
+    skipped = "".join(f"  {name}\n" for name in untracked)
+    assert result.output == (
+        "Changes to be committed\n" + "".join(f"{name}\n" for name in matched)
+        + (f"Skipped files that do not match the branch pattern:\n{skipped}"
+           if untracked else ""))
+    assert runner.invoke(hallmark, ["commit", "-m", "First"]).exit_code == 0
+    assert runner.invoke(hallmark, ["add", "."]).exit_code == 0
+
+    status = runner.invoke(hallmark, ["status"]).output
+    # A file that does not fit the pattern stays untracked, as hm add . leaves it
+    assert status == "On branch main\n\n" + (
+        f"Untracked files:\n{skipped}" if untracked
+        else "nothing to commit, working tree clean\n")
+
+
+def test_cli_add_lists_ten_unmatched_files(tmp_path, monkeypatch):
+    repo = Repo.init(tmp_path / "repo")
+    monkeypatch.chdir(repo.worktree)
+    names = ["a_1.txt", *(f"a_x{index:02d}.txt" for index in range(12))]
+    for name in names:
+        Path(name).write_text(f"{name}\n", encoding="utf-8")
+
+    result = CliRunner().invoke(hallmark, ["add", "a_{a:d}.txt"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.split(
+        "Skipped files that do not match the branch pattern:\n")[1] == (
+        "".join(f"  {name}\n" for name in names[1:11]) + "  ... and 2 more\n")
