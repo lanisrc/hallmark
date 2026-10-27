@@ -14,7 +14,7 @@ from tqdm import tqdm
 import pandas as pd
 
 from ..transport import OperationContext, RemoteSpec
-from ..transport.base import DownloadError, validate_remote_path
+from ..transport.base import AccessRefused, DownloadError, validate_remote_path
 from .plan import DownloadItem, DownloadPlan
 from .sources import effective_sources, materialize_sources
 from ..repo.catalog import SOURCE, catalog_rows, catalog_tables, file_entries
@@ -491,7 +491,7 @@ def _resolve_remote_path(
 
 
 def _fetch_verified(context, relative_path, temp_path, *, checksum, size, sha1,
-                    chunk_size, name):
+                    chunk_size):
     """
     Fetch a file and check it against everything the catalogue records.
 
@@ -507,7 +507,6 @@ def _fetch_verified(context, relative_path, temp_path, *, checksum, size, sha1,
         size (int, optional): Catalogued size in bytes.
         sha1 (str, optional): Known SHA-1 of the content.
         chunk_size (int): Transfer read size.
-        name (str): File name for messages.
 
     Returns:
         tuple[int, str]: Bytes received and the content's SHA-1.
@@ -519,13 +518,13 @@ def _fetch_verified(context, relative_path, temp_path, *, checksum, size, sha1,
     received = temp_path.stat().st_size
     if size is not None and received != size:
         raise DownloadError(
-            f"Size mismatch for {name}: expected {size} bytes, received {received}")
+            f"Size mismatch: expected {size} bytes, received {received}")
     algorithms = {"sha1"} | ({checksum[0]} if checksum else set())
     digests = calculate_file_checksums(temp_path, algorithms, FILE_IO_CHUNK_SIZE)
     if checksum is not None and digests[checksum[0]] != checksum[1]:
-        raise DownloadError(f"Checksum mismatch for {name} ({checksum[0]})")
+        raise DownloadError(f"Checksum mismatch ({checksum[0]})")
     if sha1 is not None and digests["sha1"] != sha1:
-        raise DownloadError(f"Checksum mismatch for {name} (sha1)")
+        raise DownloadError("Checksum mismatch (sha1)")
     return received, digests["sha1"]
 
 
@@ -1079,7 +1078,8 @@ def execute_download_plan(
 
     Returns:
         dict: Results with ``succeeded``, ``failed``, ``total_bytes``, and
-        ``errors`` keys. Individual transfer failures are recorded here.
+        ``errors`` keys. Individual transfer failures are recorded here,
+        each naming its file.
         When they apply, ``skipped``, ``from_store``, ``copied``,
         ``replaced`` and ``unchanged`` list the paths already in place,
         placed from ``.hm/objects``, copied rather than hard-linked, replacing
@@ -1087,7 +1087,8 @@ def execute_download_plan(
         ``staged`` counts the SHA-1s staged in the catalogue, and
         ``catalog_upgraded`` is True when an older catalogue was given its
         sources first. ``staging_note`` or ``staging_error`` says why SHA-1s
-        were not recorded.
+        were not recorded. ``access_refused`` maps the name of each remote
+        that refused access to the auth profile it used, or None.
 
     Raises:
         TypeError: If ``plan`` is not a DownloadPlan.
@@ -1293,6 +1294,7 @@ def _transfer_by_remote(plan, items, results, store, *, max_workers,
                           []).append(item)
     for name, group in groups.items():
         if name is None:
+            name = plan.remote_name
             remote = RemoteSpec.from_url(
                 plan.remote_url, plan.remote_auth, backend=plan.remote_backend,
                 backend_options=plan.backend_options)
@@ -1307,7 +1309,7 @@ def _transfer_by_remote(plan, items, results, store, *, max_workers,
         _download_selected_into_store(
             remote, plan.output_path, group, store, results,
             max_workers=max_workers, show_progress=show_progress,
-            total_bytes=total_bytes)
+            total_bytes=total_bytes, remote_name=name)
 
 
 def _run_transfers(remote_spec, output_root, jobs, run_job, record, *, max_workers,
@@ -1321,7 +1323,7 @@ def _run_transfers(remote_spec, output_root, jobs, run_job, record, *, max_worke
         jobs (list): Work items passed to ``run_job``.
         run_job (callable): ``run_job(context, job)``, run in a worker thread.
         record (callable): ``record(job, result, error)`` in the calling thread
-            as each job finishes; ``error`` is the DownloadError message.
+            as each job finishes; ``error`` is its DownloadError, or None.
         max_workers (int): Maximum concurrent workers.
         show_progress (bool): Show byte progress.
         total_bytes (int, optional): Expected bytes for the progress bar.
@@ -1373,7 +1375,7 @@ def _run_transfers(remote_spec, output_root, jobs, run_job, record, *, max_worke
                             outcome = future.result()
                         except DownloadError as exc:
                             failed += 1
-                            record(job, None, str(exc))
+                            record(job, None, exc)
                         except BaseException as exc:
                             stop = stop or exc
                         else:
@@ -1422,19 +1424,21 @@ def _download_into_store(context, store, item, chunk_size):
 
     Returns:
         tuple[int, list]: Bytes received, and ``(item, sha1, how, error)``.
+
+    Raises:
+        DownloadError: Without the file's path, which the caller adds.
     """
-    name = item.relative_path.name
+    # The temporary file is named after the file alone: a prefix cannot hold "/".
     try:
-        with store.temp_file(name) as temp:
+        with store.temp_file(item.relative_path.name) as temp:
             received, sha1 = _fetch_verified(
                 context, validate_remote_path(item.source_path), temp,
                 checksum=_validate_expected_checksum(item.checksum),
-                size=item.size_bytes, sha1=item.sha1, chunk_size=chunk_size,
-                name=name)
+                size=item.size_bytes, sha1=item.sha1, chunk_size=chunk_size)
             context.check_cancelled()
             store.publish(temp, sha1)
     except (OSError, ValueError) as exc:
-        raise DownloadError(f"Failed to download {name}: {exc}") from None
+        raise DownloadError(f"Download failed: {exc}") from None
     return received, _place_from_store(context.output_root, store, [item], sha1)
 
 
@@ -1478,12 +1482,15 @@ def _place_from_store(output_root, store, items, sha1):
 
 
 def _download_selected_into_store(remote_spec, worktree_path, items, store, results,
-                                  *, max_workers, show_progress, total_bytes=None):
+                                  *, max_workers, show_progress, total_bytes=None,
+                                  remote_name=None):
     """
     Download plan items from one remote through the object store.
 
     Each placed file is recorded in ``results``: counts, ``copied`` paths and
-    the ``sha1`` of every file now at its destination.
+    the ``sha1`` of every file now at its destination. Each error names its
+    file, and a refusal maps ``remote_name`` to the remote's auth profile in
+    ``access_refused``.
     """
     output_root = _output_root(worktree_path)
 
@@ -1492,8 +1499,11 @@ def _download_selected_into_store(remote_spec, worktree_path, items, store, resu
 
     def record(item, outcome, error):
         if error is not None:
+            label = item.relative_path.as_posix()
             results["failed"] += 1
-            results["errors"].append(error)
+            results["errors"].append(f"{label}: {error}")
+            if isinstance(error, AccessRefused):
+                results.setdefault("access_refused", {})[remote_name] = remote_spec.auth
             return
         received, placed = outcome
         results["total_bytes"] += received

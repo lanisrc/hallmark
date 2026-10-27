@@ -268,7 +268,12 @@ class Repo:
 
     def _download_cloned_files(self, *, approve, approved, max_workers, progress,
                                  filter=None, fmt=None):
-        """Run an approved transfer after catalog creation has completed."""
+        """
+        Run an approved transfer after catalog creation has completed.
+
+        Raises:
+            DownloadError: If files failed; its ``result`` holds the results.
+        """
         from ..remote.download import DownloadError
 
         plan = self.plan_download(filter=filter, fmt=fmt)
@@ -280,11 +285,13 @@ class Repo:
             plan, approved=True, max_workers=max_workers, progress=progress)
         if self.download_result["failed"]:
             details = "\n".join(self.download_result["errors"][:5])
-            raise DownloadError(
+            error = DownloadError(
                 f"Failed to download {self.download_result['failed']} "
                 f"file(s):\n{details}\n"
                 f'Catalog kept at "{self.dothm.path}". '
                 "Successfully downloaded files were kept.")
+            error.result = self.download_result
+            raise error
 
     @classmethod
     def clone(
@@ -340,10 +347,11 @@ class Repo:
 
         Raises:
             DestinationExistsError: If the destination already exists.
-            CloneError: If a requested catalog is missing or invalid.
+            CloneError: If a requested catalog is missing, invalid or unreadable.
             ValueError: If source options are invalid or conflict.
-            DownloadError: If metadata access or downloading fails, or a download
-                is requested for a bare destination.
+            DownloadError: If downloading fails, or a download is requested for
+                a bare destination. After failed transfers, its ``result`` holds
+                the download results, as ``download_result`` does.
         """
         from ..remote.clone import clone_catalog
         from ..remote.discovery import path_matches

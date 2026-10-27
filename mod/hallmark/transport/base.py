@@ -26,6 +26,19 @@ class RemoteObjectMissing(DownloadError):
     """Raised when the server reports that a remote file is missing."""
 
 
+class AccessRefused(DownloadError):
+    """
+    Raised when the server refuses access, so credentials are needed.
+
+    Attributes:
+        profile (str, optional): Auth profile the refused request used.
+    """
+
+    def __init__(self, message="", profile=None):
+        super().__init__(message)
+        self.profile = profile
+
+
 class CapabilityError(DownloadError):
     """Raised when the source or client does not support an operation."""
 
@@ -237,6 +250,17 @@ _DEFAULT_BACKENDS = {"ssh": "ssh", "sftp": "ssh", "s3": "s3"}
 _S3_BUCKET = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
 
 
+def _valid_http_host(host):
+    """Accept a DNS name, including an internationalized one, or an IP address."""
+    if ":" in host:
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError:
+            return False
+        return True
+    return re.fullmatch(r"[\w-]+(\.[\w-]+)*\.?", host) is not None
+
+
 def _s3_root(url, parsed, port):
     """Validate an ``s3://BUCKET/PREFIX/`` URL and return its literal prefix."""
     if parsed.username is not None or parsed.password is not None or port:
@@ -378,6 +402,8 @@ class RemoteSpec:
         else:
             # Catalogues are shared, so their URLs must hold no secret.
             reject_url_secrets(url)
+            if not _valid_http_host(host):
+                raise RemoteConfigurationError("Invalid host in URL")
             # Whether a backend accepts the profile is checked when it is used.
             root, user = parsed.path, None
         return cls(url, scheme, host, root, user, port, auth,
@@ -423,9 +449,12 @@ class RemoteSpec:
 
     @property
     def display(self) -> str:
-        """Source scheme and host, with credentials and paths omitted."""
-        host = self.host if re.fullmatch(r"[A-Za-z0-9_.:-]+", self.host) else "remote"
-        return f"{self.scheme}://{host}"
+        """Source scheme, host and port, with credentials and paths omitted."""
+        host = self.host if re.fullmatch(r"[\w.:-]+", self.host) else "remote"
+        if ":" in host:
+            host = f"[{host}]"
+        port = f":{self.port}" if self.port else ""
+        return f"{self.scheme}://{host}{port}"
 
 
 class DataBackend:

@@ -746,10 +746,10 @@ destination symlinks; server permissions remain the access-control boundary.
 Discovered catalogs can use path rows, one TSV per filename format and
 ``file:`` entries for files no format matches; published catalogs can contain
 multiple TSVs. Local ``add``/``commit``/``checkout`` workflows still use a
-single format in ``data.tsv``; downloading does not
-populate the local object store. For local experiments, initialize a separate
-repository, copy in the downloaded files, configure their filename format,
-then add and commit them.
+single format in ``data.tsv``; downloaded files are kept in the object store
+in ``.hm/objects``, as committed local files are. For local experiments,
+initialize a separate repository, copy in the downloaded files, configure
+their filename format, then add and commit them.
 
 See :ref:`private-transport-reference` for profile settings, HTTP compatibility
 and disposable transport tests, and :doc:`api` for function signatures.

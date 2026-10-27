@@ -17,6 +17,7 @@ from threading import Lock
 
 from ..utils import CHECKSUM_ALGORITHMS_BY_STRENGTH, names_repository_metadata
 from .base import (
+    AccessRefused,
     CapabilityError,
     DataBackend,
     DownloadError,
@@ -138,22 +139,26 @@ class S3Backend(DataBackend):
                 "s3", endpoint_url=self.options.get("endpoint_url"),
                 region_name=self.options.get("region"), config=config)
 
-    def _error(self, exc, key=None):
-        """Describe an S3 failure by its error code, never its response body."""
+    def _error(self, exc, key):
+        """
+        Describe an S3 failure by its error code, never its response body.
+
+        Args:
+            exc (Exception): A botocore error.
+            key (str): The object's key, or the prefix of a listing.
+        """
         from botocore.exceptions import ClientError
 
+        where = f"s3://{self.bucket}/{key}"
         if isinstance(exc, ClientError):
             code = str(exc.response.get("Error", {}).get("Code", "unknown"))
-            where = f"s3://{self.bucket}"
             if code in _MISSING:
-                return RemoteObjectMissing(f"Not found in {where}: {code}")
+                return RemoteObjectMissing(f"Not found: {where} ({code})")
             if code in _DENIED:
-                hint = (f"check auth profile {self.context.remote.auth!r}"
-                        if self.context.remote.auth else
-                        "name an s3 auth profile with --auth")
-                return DownloadError(f"Access to {where} was refused ({code}); {hint}")
-            return DownloadError(f"S3 request to {where} failed: {code}")
-        return DownloadError(f"S3 request failed: {type(exc).__name__}")
+                return AccessRefused(f"Access to {where} was refused ({code})",
+                                     profile=self.context.remote.auth)
+            return DownloadError(f"S3 request for {where} failed: {code}")
+        return DownloadError(f"S3 request for {where} failed: {type(exc).__name__}")
 
     def _key(self, relative_path):
         return self.prefix + validate_remote_path(relative_path).as_posix()
@@ -180,7 +185,7 @@ class S3Backend(DataBackend):
                         on_directory(folder + "/" if folder else "")
                     yield entry
         except (BotoCoreError, ClientError) as exc:
-            raise self._error(exc) from None
+            raise self._error(exc, self.prefix) from None
 
     def _entry(self, item):
         key = item["Key"]
@@ -230,8 +235,11 @@ class S3Backend(DataBackend):
         def head(job):
             entry, key, wanted = job
             self.context.check_cancelled()
-            response = self._client.head_object(
-                Bucket=self.bucket, Key=key, ChecksumMode="ENABLED")
+            try:
+                response = self._client.head_object(
+                    Bucket=self.bucket, Key=key, ChecksumMode="ENABLED")
+            except (BotoCoreError, ClientError) as exc:
+                raise self._error(exc, key) from None
             # Multipart uploads report a checksum of part checksums instead.
             if response.get("ChecksumType", "FULL_OBJECT") != "FULL_OBJECT":
                 return entry
@@ -242,12 +250,9 @@ class S3Backend(DataBackend):
                                    checksum=digest, checksum_source="server")
             return entry
 
-        try:
-            workers = min(len(needed), _HEAD_WORKERS)
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                done = {result.path: result for result in pool.map(head, needed)}
-        except (BotoCoreError, ClientError) as exc:
-            raise self._error(exc) from None
+        workers = min(len(needed), _HEAD_WORKERS)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            done = {result.path: result for result in pool.map(head, needed)}
         return [done.get(entry.path, entry) for entry in entries]
 
     def _etag_checksum(self, item):
@@ -265,9 +270,9 @@ class S3Backend(DataBackend):
         from botocore.exceptions import BotoCoreError, ClientError
 
         self.prepare()
+        key = self._key(relative_path)
         try:
-            response = self._client.get_object(
-                Bucket=self.bucket, Key=self._key(relative_path))
+            response = self._client.get_object(Bucket=self.bucket, Key=key)
             body = response["Body"]
             try:
                 with destination.open("wb") as handle:
@@ -279,7 +284,7 @@ class S3Backend(DataBackend):
             finally:
                 body.close()
         except (BotoCoreError, ClientError) as exc:
-            raise self._error(exc) from None
+            raise self._error(exc, key) from None
 
     def read_text(self, relative_path, limit):
         """
@@ -289,19 +294,19 @@ class S3Backend(DataBackend):
         from botocore.exceptions import BotoCoreError, ClientError
 
         self.prepare()
+        key = self._key(relative_path)
         try:
             response = self._client.get_object(
-                Bucket=self.bucket, Key=self._key(relative_path),
-                Range=f"bytes=0-{limit}")
+                Bucket=self.bucket, Key=key, Range=f"bytes=0-{limit}")
             with response["Body"] as body:
                 content = body.read(limit + 1)
         except ClientError as exc:
             # A ranged read of an empty object has no bytes to return.
             if exc.response.get("Error", {}).get("Code") == "InvalidRange":
                 return ""
-            raise self._error(exc) from None
+            raise self._error(exc, key) from None
         except BotoCoreError as exc:
-            raise self._error(exc) from None
+            raise self._error(exc, key) from None
         if len(content) > limit:
             raise DownloadError("Remote text exceeds the configured limit")
         return decode_metadata(content)

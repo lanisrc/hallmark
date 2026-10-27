@@ -491,8 +491,8 @@ def test_download_aggregates_successes_and_failures(monkeypatch, tmp_path):
         "succeeded": 1,
         "failed": 1,
         "total_bytes": 7,
-        "errors": ["bad download"]}, f"Expected result {{'succeeded': 1, 'failed': 1, \
-            'total_bytes': 7, 'errors': ['bad download']}}, but got {result}"
+        "errors": ["bad.bin: bad download"]}, \
+        f"Expected one success and a failure named bad.bin, but got {result}"
     assert set(calls) == {
         (
             "https://mirror.test/base/nested/good.bin",

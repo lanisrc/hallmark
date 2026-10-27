@@ -15,7 +15,7 @@ from botocore.exceptions import (  # noqa: E402
 
 from hallmark.transport import OperationContext, RemoteSpec  # noqa: E402
 from hallmark.transport.base import (  # noqa: E402
-    DownloadError, RemoteConfigurationError, RemoteObjectMissing)
+    AccessRefused, DownloadError, RemoteConfigurationError, RemoteObjectMissing)
 from hallmark.transport.s3 import S3Backend, _hex_digest  # noqa: E402
 
 BUCKET = "ehtc-sims"
@@ -186,9 +186,10 @@ def test_metadata_objects_are_read_within_their_limit(s3):
 
 @pytest.mark.parametrize("error, kind, message", [
     (client_error("SlowDown"), DownloadError, "failed: SlowDown"),
-    (client_error("AccessDenied"), DownloadError, r"refused \(AccessDenied\)"),
+    (client_error("AccessDenied"), AccessRefused,
+     r"m87/a.h5 was refused \(AccessDenied\)"),
     (EndpointConnectionError(endpoint_url="https://osn.test"), DownloadError,
-     "S3 request failed: EndpointConnectionError"),
+     "S3 request for s3://.*/m87/a.h5 failed: EndpointConnectionError"),
 ])
 def test_request_failures_are_described_by_code_only(s3, tmp_path, error, kind,
                                                      message):
@@ -205,3 +206,13 @@ def test_request_failures_are_described_by_code_only(s3, tmp_path, error, kind,
                 call()
             assert "body detail" not in str(raised.value)
             assert not isinstance(raised.value, RemoteObjectMissing)
+
+
+def test_a_refusal_names_the_profile_it_used(s3, monkeypatch, tmp_path):
+    # Commands then advise checking this profile rather than naming one.
+    write_auth(monkeypatch, tmp_path, {
+        "type": "s3", "buckets": [BUCKET], "access_key_id": {"env": "HM_KEY"},
+        "secret_access_key": {"env": "HM_SECRET"}})
+    with OperationContext(RemoteSpec.from_url(URL, "lab")) as context:
+        error = context.transport._error(client_error("AccessDenied"), "m87/a.h5")
+    assert isinstance(error, AccessRefused) and error.profile == "lab"

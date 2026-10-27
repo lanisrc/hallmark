@@ -191,7 +191,13 @@ def test_clone_download_failure_keeps_catalog_and_valid_files(
     assert 'Checksum mismatch' in message
     assert 'item1.txt' in message
     assert f'Catalog kept at "{target / ".hm"}"' in message
-    assert 'Successfully downloaded files were kept.' in message
+    if cli:
+        assert f'run hm download --all from "{target}" to retry.' in message
+        assert 'Download completed with errors: 1 succeeded, 1 failed' in message
+        assert '  - item1.txt: Checksum mismatch (sha1)' in message
+    else:
+        assert 'Successfully downloaded files were kept.' in message
+        assert error.value.result['failed'] == 1
     assert Repo(target).dothm.head.commit.hexsha == source.dothm.head.commit.hexsha
     assert not (target / 'item1.txt').exists()
     assert (target / 'item2.txt').read_bytes() == b'science'

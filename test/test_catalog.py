@@ -374,7 +374,9 @@ def test_snapshot_access_failure_never_falls_back_to_git(tmp_path, monkeypatch):
 
     monkeypatch.setattr(OperationContext, "read_text", inaccessible)
     monkeypatch.setattr("hallmark.remote.clone.Dothm.clone", fail)
-    with pytest.raises(DownloadError, match="requires authentication"):
+    # Reading a published catalog fails as a clone, never as a download.
+    with pytest.raises(CloneError, match="Could not read the published catalog at "
+                                         ".*: Metadata server requires authentication"):
         Repo.clone(
             "https://catalog.example.test/data/", tmp_path / "clone", download=False,
         )

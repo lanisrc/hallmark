@@ -8,7 +8,8 @@ import pytest
 import yaml
 
 from hallmark import Repo
-from hallmark.transport.base import DownloadError, RemoteConfigurationError
+from hallmark.transport.base import (
+    AccessRefused, DownloadError, RemoteConfigurationError)
 from http_server import LocalServer
 
 
@@ -65,10 +66,11 @@ def test_bearer_token_from_a_helper_command(server, monkeypatch, tmp_path):
     assert repo.state.data.path.tolist() == ["a.fits"]
 
 
-def test_unauthenticated_requests_explain_how_to_authenticate(server, tmp_path):
+def test_unauthenticated_requests_are_refused_access(server, tmp_path):
+    # Commands print how to authenticate; test_error_messages covers them.
     server.authorization = basic("alice", "pw")
     repo = Repo.init(tmp_path / "repo")
-    with pytest.raises(DownloadError, match="HTTP 401.*--auth"):
+    with pytest.raises(AccessRefused, match="access refused \\(HTTP 401\\)"):
         repo.add(server.url)
 
 
