@@ -1012,6 +1012,7 @@ class Repo:
             raise RuntimeError(
                 'Set your name and email first: hm config user.name "..." '
                 'and hm config user.email "..."')
+        author, committer = self.dothm.commit_actors()
         changes = (
             self.dothm.index.diff("HEAD")
             if self.dothm.head.is_valid() else self.dothm.index.entries
@@ -1021,7 +1022,7 @@ class Repo:
 
         staged_state = self.dothm.load_state(staged=True)
         if is_remote_catalog(staged_state) or staged_state.data.empty:
-            self.dothm.index.commit(msg)
+            self.dothm.index.commit(msg, author=author, committer=committer)
             return True
 
         current_fmt = single_data_format(staged_state.config)
@@ -1059,7 +1060,7 @@ class Repo:
                 actual_sha1=actual_checksum_by_path[path],
             )
 
-        self.dothm.index.commit(msg)
+        self.dothm.index.commit(msg, author=author, committer=committer)
         return True
 
     def restore_staged(self, paths: list[str]) -> None:
@@ -1179,8 +1180,9 @@ class Repo:
         '''
         Return the commit author name and email git will actually sign with.
 
-        Values stored for this repository take precedence, falling back to the
-        user's global and system git configuration.
+        GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL take precedence, as in git, then
+        values stored for this repository, then the user's global and system
+        git configuration.
 
         Returns:
             tuple[string | None, string | None]: The resolved name and email,

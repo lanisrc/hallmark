@@ -489,6 +489,67 @@ def test_cli_config_sets_the_commit_author(without_configured_identity):
                 f"Expected the commit to be signed with the identity, got {author}"
 
 
+def test_cli_commit_takes_the_author_from_the_environment(
+        without_configured_identity, monkeypatch):
+    """
+    Test that 'commit' accepts an author given by GIT_AUTHOR_NAME and
+    GIT_AUTHOR_EMAIL, as git does, when none is configured, and signs the
+    commit as that author rather than a committer guessed from the host.
+    """
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Env Author")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "env@example.edu")
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            with GitRepo(".hm").config_writer() as writer:
+                writer.remove_section("user")
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+
+            shown = runner.invoke(hallmark, ["config", "user.name"])
+            committed = runner.invoke(hallmark, ["commit", "-m", "First dataset"])
+
+            assert shown.output.strip() == "Env Author", \
+                f"Expected the author from the environment, got: {shown.output!r}"
+            assert committed.exit_code == 0, \
+                f"Expected the commit to succeed, got: {committed.output}"
+            commit = GitRepo(".hm").head.commit
+            for actor in (commit.author, commit.committer):
+                assert (actor.name, actor.email) \
+                    == ("Env Author", "env@example.edu"), \
+                    f"Expected the environment identity, got {actor}"
+
+
+def test_cli_commit_takes_the_committer_from_the_environment(monkeypatch):
+    """
+    Test that GIT_COMMITTER_NAME and GIT_COMMITTER_EMAIL set only the committer,
+    and that a blank GIT_AUTHOR_NAME leaves the configured author in place.
+    """
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "  ")
+    monkeypatch.delenv("GIT_AUTHOR_EMAIL", raising=False)
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Env Committer")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "committer@example.edu")
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+
+            committed = runner.invoke(hallmark, ["commit", "-m", "First dataset"])
+
+            assert committed.exit_code == 0, \
+                f"Expected the commit to succeed, got: {committed.output}"
+            commit = GitRepo(".hm").head.commit
+            assert (commit.author.name, commit.author.email) \
+                == ("Hallmark Tests", "tests@example.invalid"), \
+                f"Expected the configured author, got {commit.author}"
+            assert (commit.committer.name, commit.committer.email) \
+                == ("Env Committer", "committer@example.edu"), \
+                f"Expected the environment committer, got {commit.committer}"
+
+
 @pytest.mark.parametrize(
     "arguments", [
         ["config"],

@@ -40,7 +40,7 @@ except ImportError:  # Windows
     fcntl = None
     import msvcrt
 
-from git import Repo
+from git import Actor, Repo
 from git.exc import GitCommandError
 from shutil import rmtree
 from tempfile import TemporaryFile
@@ -123,6 +123,12 @@ def _read_tsv_blob(blob, empty: pd.DataFrame) -> pd.DataFrame:
     if not content.strip():
         return empty
     return pd.read_csv(BytesIO(content), sep="\t", dtype=str, keep_default_na=False)
+
+
+def _identity_from_environ(role: str, default) -> tuple[Optional[str], Optional[str]]:
+    """Let GIT_<role>_NAME and GIT_<role>_EMAIL override each default, as git does."""
+    return tuple(os.environ.get(f"GIT_{role}_{key}", "").strip() or value
+                 for key, value in zip(("NAME", "EMAIL"), default))
 
 
 # One mutex and depth per lock file, shared by every Dothm open on it in this
@@ -376,7 +382,8 @@ remote:
         values = []
         for key in ("name", "email"):
             try:
-                value = str(reader.get_value("user", key)).strip()
+                # get_value would read a name such as 007 as the number 7.
+                value = reader.get("user", key).strip()
             except (NoSectionError, NoOptionError):
                 value = ""
             values.append(value or None)
@@ -398,14 +405,33 @@ remote:
         """
         Return the commit author name and email git will commit with.
 
-        Values set for this repository take precedence over the user's global
-        and system git configuration.
+        GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL take precedence, as in git; then
+        values set for this repository; then the user's global and system git
+        configuration.
 
         Returns:
             tuple[str | None, str | None]: The name and email, each None when
-            it is not configured at any level, or is blank.
+            it is not set at any level, or is blank.
         """
-        return self._read_identity(self.config_reader())
+        return _identity_from_environ(
+            "AUTHOR", self._read_identity(self.config_reader()))
+
+    def commit_actors(self) -> tuple[Actor, Actor]:
+        """
+        Return the author and committer a commit is signed with.
+
+        GIT_COMMITTER_NAME and GIT_COMMITTER_EMAIL override the configuration
+        for the committer, as in git. A committer set neither way is the
+        author, not a name GitPython would guess from the user and host.
+
+        Returns:
+            tuple[Actor, Actor]: The author and the committer.
+        """
+        author = self.effective_identity()
+        configured = self._read_identity(self.config_reader())
+        committer = _identity_from_environ(
+            "COMMITTER", [own or other for own, other in zip(configured, author)])
+        return Actor(*author), Actor(*committer)
 
     def load_state(self, revision=None, *, staged=False) -> State:
         """

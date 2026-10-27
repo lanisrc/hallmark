@@ -938,12 +938,14 @@ def _repo_without_identity(tmp_path):
     return Repo(tmp_path / "repo")
 
 
-def test_set_identity_stores_the_author_for_this_repository_only(tmp_path):
+def test_set_identity_stores_the_author_for_this_repository_only(
+        tmp_path, without_configured_identity):
     """
     Test that set_identity records the author in the repository's own git config, so
     that commits made there are attributed to it.
     Args:
         tmp_path: pytest fixture that provides a temporary directory for the test.
+        without_configured_identity: fixture that clears GIT_AUTHOR_NAME and the like.
     """
     repo = _repo_without_identity(tmp_path)
 
@@ -1029,6 +1031,28 @@ def test_repository_identity_overrides_a_global_one(
     author = repo.dothm.head.commit.author
     assert (author.name, author.email) == ("Ram Adithya", "ram@example.edu"), \
         f"Expected the repository identity to win, got {author}"
+
+
+@pytest.mark.parametrize("name", ["007", "1e3", "TRUE"])
+def test_commit_signs_a_name_as_written(
+        tmp_path, without_configured_identity, name):
+    """
+    Test that a configured name that reads as a number or a boolean is reported
+    and signed as written, not as the value GitPython would convert it to.
+    Args:
+        tmp_path: pytest fixture that provides a temporary directory for the test.
+        without_configured_identity: fixture providing an empty home directory.
+        name: the configured author name.
+    """
+    repo = _repo_without_identity(tmp_path)
+    repo.set_identity(name, "agent@example.edu")
+
+    assert repo.effective_identity() == (name, "agent@example.edu"), \
+        f"Expected the name as written, got {repo.effective_identity()}"
+    repo.commit("First dataset")
+    commit = repo.dothm.head.commit
+    assert (commit.author.name, commit.committer.name) == (name, name), \
+        f"Expected the commit to be signed as {name}, got {commit.author}"
 
 
 def test_clone_does_not_copy_the_authors_identity(
