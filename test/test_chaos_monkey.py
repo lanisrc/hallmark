@@ -38,10 +38,6 @@ SEEDS = [int(seed) for seed in
 STEPS = int(os.environ.get("HALLMARK_CHAOS_STEPS", "40"))
 FAULT_RATE = float(os.environ.get("HALLMARK_CHAOS_FAULT_RATE", "0.2"))
 FMT = "{site}/{year:d}/{day:d}.fits"
-# Known bug the monkey must not trip over until it is fixed:
-# * Dothm.save_state is not atomic when a pattern change rewrites
-#   config.yml (#55, test_chaos_storage.py), so the pattern never changes
-#   here and the add that first sets it runs without faults.
 EXPECTED_ERRORS = (CheckoutError, DownloadError, FileNotFoundError, OSError,
                    RuntimeError, ValueError)
 
@@ -102,8 +98,6 @@ def test_local_monkey_keeps_repository_consistent(tmp_path, monkeypatch, request
         fault = None
         if name in {"add", "commit", "checkout"} and rng.random() < FAULT_RATE:
             fault = (rng.randrange(1, 4), rng.choice([errno.ENOSPC, errno.EIO]))
-            if name == "add" and not patterned:
-                fault = None
         monkey.log.append(f"{step}: {name} path={path} target={target} "
                           f"fault={fault}")
 
