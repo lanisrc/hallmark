@@ -32,6 +32,7 @@ from .remote.download import DownloadError
 from .remote.discovery import discover_remote_files, path_matches
 from .remote.sources import SourceSpec
 from .repo.config import normalize_remotes
+from .repo.state import is_remote_catalog
 from .transport import OperationContext, RemoteSpec
 from .error import CheckoutError, CloneError, HallmarkError
 from .utils import CHECKSUM_ALGORITHMS
@@ -268,6 +269,11 @@ def info(repo):
     click.echo(f'hallmark worktree: "{repo.worktree}"')
 
 
+def _outdated_hint(stored: int) -> str:
+    """Say how to bring outdated downloads in line, and how many need no transfer."""
+    return f"run hm download; {stored} in .hm/objects"
+
+
 @hallmark.command(short_help="Show worktree and staged hallmark state.")
 @_pass_repo
 def status(repo):
@@ -318,9 +324,16 @@ def status(repo):
         click.secho("Untracked files:", fg="red")
         for path in untracked:
             click.echo("  " + click.style(path, fg="red"))
+    outdated = snapshot["outdated"]
+    if outdated:
+        click.echo("")
+        hint = _outdated_hint(snapshot["outdated_stored"])
+        click.secho(f"Outdated downloads ({hint}):", fg="red")
+        for path in outdated:
+            click.echo("  " + click.style(path, fg="red"))
 
     if not any((staged["state"], staged["added"], staged["modified"], staged["deleted"],
-                worktree["modified"], worktree["deleted"], untracked)):
+                worktree["modified"], worktree["deleted"], untracked, outdated)):
         click.echo("")
         if snapshot.get("remote_catalog"):
             click.echo("nothing to commit, remote catalog unchanged")
@@ -783,13 +796,18 @@ def branch(repo, name):
 @click.argument("target_branch")
 @_pass_repo
 def checkout(repo, target_branch):
-    """Switch to TARGET and rewrite tracked files from its state.
+    """Switch to TARGET.
 
     TARGET may be an existing branch or a commit id. A commit id leaves you on
     no branch, so use `hm branch NAME` to create one before committing again.
     An unrecognized TARGET is an error and changes nothing.
-    Only hallmark-tracked files are rewritten; unrelated files are left
-    alone unless they block restoration of a tracked path.
+
+    Local files tracked by hallmark are rewritten from TARGET's state;
+    unrelated files are left alone unless they block restoration of a
+    tracked path. A remote catalog's checkout switches only the catalog:
+    downloads that now hold another version are reported as outdated, and
+    `hm download` brings them in line, from .hm/objects without a transfer
+    where they are stored.
     """
     # use the _translate_cli_errors context manager to handle specific exceptions
     with _translate_cli_errors(*_REPO_READ_ERRORS):
@@ -799,11 +817,18 @@ def checkout(repo, target_branch):
     snapshot = repo.branches()
     if not switched:
         click.echo(f'Already on branch "{snapshot["current"]}".')
-    elif snapshot["current"] is None:
+        return
+    if snapshot["current"] is None:
         click.echo(
             f'Now at commit {snapshot["detached_at"]}; not on a branch.')
     else:
         click.echo(f'Switched to branch "{snapshot["current"]}".')
+    if is_remote_catalog(repo.state):
+        with _translate_cli_errors(*_REPO_READ_ERRORS):
+            outdated, stored = repo.outdated_downloads()
+        if outdated:
+            click.echo(f"Outdated downloads: {len(outdated)} file(s) "
+                       f"({_outdated_hint(stored)})")
 
 
 @hallmark.command(short_help="Download files from the configured data remote.")

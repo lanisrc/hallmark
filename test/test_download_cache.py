@@ -583,6 +583,152 @@ def test_switching_branches_replaces_downloads_from_the_store(repo, server):
     assert repo.objects.is_linked(sha1(b"bravo"), repo.worktree / "b.fits")
 
 
+def two_versions_on_two_branches(repo, server, monkeypatch, version_two, *,
+                                 linked=True):
+    """Download b.fits on main, then another version of it on branch v2."""
+    files, _ = server
+    # Modification times let hm add notice a change that keeps the size.
+    serve_index(monkeypatch, files, mtimes=dict.fromkeys(files, 1750000000))
+    repo.add(ROOT)
+    download(repo)
+    repo.commit("Version 1")
+    repo.create_branch("v2")
+    repo.checkout("v2")
+    files["b.fits"] = version_two
+    serve_index(monkeypatch, files,
+                mtimes={**dict.fromkeys(files, 1750000000), "b.fits": 1760000000})
+    repo.add(ROOT)
+    if not linked:
+        links_fail(monkeypatch)
+    download(repo)
+    repo.commit("Version 2")
+    assert (repo.worktree / "b.fits").read_bytes() == version_two
+
+
+@pytest.mark.parametrize("version_two, linked", [
+    (b"BRAVO", True),  # same size: the link to v2's object tells
+    (b"bravo, revised", False),  # copies: the size tells
+])
+def test_a_checkout_reports_downloads_left_from_the_other_branch(
+        repo, server, monkeypatch, version_two, linked):
+    from click.testing import CliRunner
+
+    from hallmark.cli import hallmark
+
+    _, fetched = server
+    two_versions_on_two_branches(repo, server, monkeypatch, version_two,
+                                 linked=linked)
+    monkeypatch.chdir(repo.worktree)
+    result = CliRunner().invoke(hallmark, ["checkout", "main"])
+    assert result.exit_code == 0, result.output
+    assert result.output == (
+        'Switched to branch "main".\n'
+        "Outdated downloads: 1 file(s) (run hm download; 1 in .hm/objects)\n")
+    path = repo.worktree / "b.fits"
+    assert path.read_bytes() == version_two
+    status = Repo(repo.worktree).status()
+    assert (status["outdated"], status["outdated_stored"]) == (["b.fits"], 1)
+    assert status["worktree"] == {"modified": [], "deleted": []}
+    result = CliRunner().invoke(hallmark, ["status"])
+    assert result.output == ("On branch main\n\n"
+                             "Outdated downloads (run hm download; "
+                             "1 in .hm/objects):\n  b.fits\n")
+
+    fetched.clear()
+    result = CliRunner().invoke(hallmark, ["download", "--all"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert fetched == [] and path.read_bytes() == b"bravo"
+    assert Repo(repo.worktree).status()["outdated"] == []
+    result = CliRunner().invoke(hallmark, ["status"])
+    assert result.output == (
+        "On branch main\n\nnothing to commit, remote catalog unchanged\n")
+
+
+def test_outdated_downloads_count_the_versions_in_the_store(repo, server,
+                                                            monkeypatch):
+    two_versions_on_two_branches(repo, server, monkeypatch, b"bravo, revised")
+    repo.objects.discard(sha1(b"bravo"))
+    repo.checkout("main")
+    status = repo.status()
+    assert (status["outdated"], status["outdated_stored"]) == (["b.fits"], 0)
+    # As the count says, the download must transfer it.
+    plan = repo.plan_download(all_files=True)
+    assert [item.relative_path.name for item in plan.outdated_items] == ["b.fits"]
+    assert plan.stored_items == ()
+
+
+def test_files_written_by_the_user_are_not_outdated(repo, server, monkeypatch):
+    two_versions_on_two_branches(repo, server, monkeypatch, b"BRAVO")
+    repo.checkout("main")
+    (repo.worktree / "notes.txt").write_text("my notes")
+    # A catalogued file replaced at the same size, with a link of its own:
+    # it links no stored object, so nothing says it is an earlier download.
+    path = repo.worktree / "a.fits"
+    path.unlink()
+    path.write_bytes(b"ALPHA")
+    os.link(path, repo.worktree / "a-backup.fits")
+    status = repo.status()
+    assert status["outdated"] == ["b.fits"]
+    assert status["untracked"] == ["a-backup.fits", "notes.txt"]
+
+
+def test_status_resolves_each_download_once(repo, server, monkeypatch):
+    import hallmark.repo as repo_module
+
+    download(repo)
+    resolved = []
+    real_resolve = repo_module.resolve_path_in_root
+
+    def resolve(root, value, **kwargs):
+        resolved.append(value)
+        return real_resolve(root, value, **kwargs)
+
+    monkeypatch.setattr(repo_module, "resolve_path_in_root", resolve)
+    repo.status()
+    assert sorted(resolved) == sorted(FILES)
+
+
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="root reads folders whatever their permissions")
+def test_a_checkout_reports_outdated_downloads_beside_an_unreadable_folder(
+        repo, server, monkeypatch):
+    from click.testing import CliRunner
+
+    from hallmark.cli import hallmark
+
+    two_versions_on_two_branches(repo, server, monkeypatch, b"BRAVO")
+    # Its files cannot be stat'ed, so a walk for untracked files fails.
+    locked = repo.worktree / "locked"
+    locked.mkdir()
+    (locked / "notes.txt").write_text("my notes")
+    locked.chmod(0o444)
+    monkeypatch.chdir(repo.worktree)
+    try:
+        result = CliRunner().invoke(hallmark, ["checkout", "main"])
+    finally:
+        locked.chmod(0o755)
+    assert result.exit_code == 0, result.output
+    assert result.output == (
+        'Switched to branch "main".\n'
+        "Outdated downloads: 1 file(s) (run hm download; 1 in .hm/objects)\n")
+
+
+def test_unusable_rows_do_not_stop_the_outdated_report(repo, server, monkeypatch):
+    two_versions_on_two_branches(repo, server, monkeypatch, b"bravo, revised",
+                                 linked=False)
+    repo.checkout("main")
+    data = repo.state.data
+    data.loc[data.path == "a.fits", "sha1"] = "not-a-sha1"
+    # A digit that int() refuses.
+    data.loc[data.path == "c.fits", "size_bytes"] = "\N{SUPERSCRIPT TWO}"
+    repo.dothm.save_state(repo.state)
+    repo.dothm.git.commit("-qam", "Unusable rows")
+    path = repo.worktree / "c.fits"
+    path.unlink()
+    path.write_bytes(b"alpha")
+    assert Repo(repo.worktree).outdated_downloads() == (["b.fits"], 1)
+
+
 def published_sums_repo(tmp_path, monkeypatch, files):
     """Catalogue the files with checksums from a published SHA256SUMS."""
     serve_index(monkeypatch, files, sums=True)

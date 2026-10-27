@@ -320,14 +320,19 @@ are listed as already downloaded and skipped. An earlier download that no
 longer matches its catalog row, because the file changed on the server and the
 source was added again or because another branch is checked out, is listed as
 outdated: approving the download replaces it, and the old version stays in
-``.hm/objects``, so checking out the earlier commit restores it without a
-transfer. A downloaded file whose row has no catalog checksum cannot prove it is
-current; it is fetched again to compare and kept if unchanged. Files you
-created or edited, directories blocking file paths, and existing files without a
-usable catalog checksum stop the whole selection before transfer, as does a
-file that two catalog paths differing only in letter case would share. Delete
-conflicting paths yourself before retrying. ``--dry-run`` performs the same
-local checks without downloading or creating files.
+``.hm/objects``. Checking out a branch or commit of a remote catalog switches
+only the catalog and leaves downloaded files as they are; ``hm checkout`` and
+``hm status`` report the downloads that now hold another version (a copy, made
+where links are unavailable, only when its size differs), and ``hm download``
+brings them in line, from ``.hm/objects`` without a transfer where that version
+is stored. A downloaded file whose row has no catalog
+checksum cannot prove it is current; it is fetched again to compare and kept if
+unchanged. Files you created or edited, directories blocking file paths, and
+existing files without a usable catalog checksum stop the whole selection
+before transfer, as does a file that two catalog paths differing only in letter
+case would share. Delete conflicting paths yourself before retrying.
+``--dry-run`` performs the same local checks without downloading or creating
+files.
 
 Downloads pass through the object store in ``.hm/objects``, where
 ``hm commit`` also keeps your local files:

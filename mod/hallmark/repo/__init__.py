@@ -23,6 +23,7 @@ in an object store (see ``hallmark.repo.objects``).
 from __future__ import annotations
 import errno
 import os
+import stat
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -709,6 +710,11 @@ class Repo:
             - ``untracked`` (list[str]): Worktree files the catalogue does not
               list.
             - ``remote_catalog`` (bool): Whether the catalogue is remote.
+            - ``outdated`` (list[str]): Downloads of a remote catalogue that
+              hold another version than their row, as after a checkout.
+            - ``outdated_stored`` (int): How many of those rows' files are in
+              ``.hm/objects``, so ``hm download`` places them without a
+              transfer.
         """
         staged_state = self.dothm.load_state(staged=True)
         head_state = load_head_state(self)
@@ -741,6 +747,8 @@ class Repo:
         remote_catalog = is_remote_catalog(staged_state)
         worktree_modified: list[str] = []
         worktree_deleted: list[str] = []
+        outdated: list[str] = []
+        outdated_stored = 0
         staged_paths = set(staged_map)
 
         # If the repository has a worktree, check for modified and missing tracked files
@@ -750,7 +758,9 @@ class Repo:
                     self, staged_map
                 )
             else:
-                worktree_modified = self._downloads_changed_in_place(staged_state)
+                downloads = self._downloaded_rows(staged_state)
+                worktree_modified = self._downloads_changed_in_place(downloads)
+                outdated, outdated_stored = self._outdated_downloads(downloads)
             worktree_root = Path(self.worktree)
             # generator that yields relative paths of all files in the worktree
             worktree_files = (full_path.relative_to(worktree_root).as_posix()
@@ -786,10 +796,48 @@ class Repo:
                 "deleted": sorted(worktree_deleted),
             },
             "untracked": sorted(untracked),
+            "outdated": outdated,
+            "outdated_stored": outdated_stored,
             "remote_catalog": remote_catalog,
         }
 
-    def _downloads_changed_in_place(self, state) -> list[str]:
+    def outdated_downloads(self) -> tuple[list[str], int]:
+        """
+        Return ``status``'s outdated downloads without its other checks.
+
+        hm checkout reports them after switching a remote catalog, without
+        walking the worktree for untracked files.
+
+        Returns:
+            tuple[list[str], int]: ``status()["outdated"]`` and
+            ``status()["outdated_stored"]``; empty for a local catalog.
+        """
+        state = self.dothm.load_state(staged=True)
+        if self.worktree is None or not is_remote_catalog(state):
+            return [], 0
+        return self._outdated_downloads(self._downloaded_rows(state))
+
+    def _downloaded_rows(self, state) -> list[tuple[dict, Path]]:
+        """
+        Used by status and outdated_downloads.
+        Return each catalog row with a SHA-1, and its path in the worktree.
+
+        Resolving the path is the costly part of checking a download, so the
+        checks share it.
+        """
+        found = []
+        for row in catalog_rows(state):
+            if not row.get("sha1", ""):
+                continue
+            try:
+                destination = resolve_path_in_root(
+                    self.worktree, row["path"], label="downloaded path")
+            except (ValueError, OSError):
+                continue
+            found.append((row, destination))
+        return found
+
+    def _downloads_changed_in_place(self, downloads) -> list[str]:
         """
         Used by status.
         List downloaded files whose object changed since it was stored.
@@ -798,18 +846,51 @@ class Repo:
         both. Only recorded stats are compared; nothing is hashed.
         """
         changed = []
-        for row in catalog_rows(state):
-            path, sha1 = row["path"], row.get("sha1", "")
-            if not sha1:
-                continue
-            try:
-                destination = resolve_path_in_root(
-                    self.worktree, path, label="downloaded path")
-            except ValueError:
-                continue
+        for row, destination in downloads:
+            path, sha1 = row["path"], row["sha1"]
             if self.objects.is_linked(sha1, destination) and self.objects.changed(sha1):
                 changed.append(path)
         return changed
+
+    def _outdated_downloads(self, downloads) -> tuple[list[str], int]:
+        """
+        Used by status and outdated_downloads.
+        List downloads that hold another version than their catalog row.
+
+        A checkout of a remote catalog switches only the catalog, so files
+        keep the other branch's content until hm download replaces them. A
+        file other than the row's object is outdated when its size differs
+        from the row's, or when it is a hard link to another stored object.
+        Only stats are compared; nothing is hashed.
+
+        Returns:
+            tuple[list[str], int]: The outdated paths, and how many of their
+            rows' objects are in .hm/objects, to be placed without a transfer.
+        """
+        outdated, stored, stored_inodes = [], 0, None
+        for row, destination in downloads:
+            path, sha1 = row["path"], row["sha1"]
+            try:
+                info = os.lstat(destination)
+                linked = self.objects.is_linked(sha1, destination)
+            except (ValueError, OSError):
+                # No file, or a malformed SHA-1: nothing to compare.
+                continue
+            if not stat.S_ISREG(info.st_mode) or linked:
+                continue
+            size = row.get("size_bytes", "")
+            if not size.isdecimal() or int(size) == info.st_size:
+                # At the same size, only a link to another object tells.
+                if info.st_nlink < 2:
+                    continue
+                if stored_inodes is None:
+                    stored_inodes = self.objects.by_inode()
+                if (info.st_dev, info.st_ino) not in stored_inodes:
+                    continue
+            outdated.append(path)
+            if self.objects.contains(sha1) and not self.objects.changed(sha1):
+                stored += 1
+        return sorted(outdated), stored
 
     def add(self, fmt: str, encoding: bool = False, *, filter=None,
             remote_fmt=None, auth=None, backend=None, backend_options=None,
@@ -1108,9 +1189,14 @@ class Repo:
 
     def checkout(self, target_branch: str) -> bool:
         '''
-        Switch to a different branch and update the worktree. Raises ValueError if
-        branch name is invalid. Raises CheckoutError if the workign directoary
+        Switch to a different branch or commit. Raises ValueError if the
+        branch name is invalid. Raises CheckoutError if the working directory
         is not clean or checkout can't be completed safely.
+
+        Tracked local files are rewritten from the target's state. A remote
+        catalog's checkout switches only the catalog: downloads that now hold
+        another version are listed in ``status()["outdated"]`` until
+        ``download`` replaces them, from .hm/objects where they are stored.
 
         Args:
             target_branch (string): Branch to switch to.

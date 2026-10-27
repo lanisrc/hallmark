@@ -506,6 +506,22 @@ class Objects:
         return (stat.S_ISREG(found.st_mode)
                 and (found.st_dev, found.st_ino) == (target.st_dev, target.st_ino))
 
+    def by_inode(self) -> dict:
+        """
+        Return the SHA-1 of every stored object by its device and inode.
+
+        A hard link in the worktree has its object's inode, so this names the
+        object behind a link without hashing anything.
+        """
+        found = {}
+        for sha1 in self.checksums():
+            try:
+                info = self.object_path(sha1).stat()
+            except FileNotFoundError:
+                continue
+            found[(info.st_dev, info.st_ino)] = sha1
+        return found
+
     def materialize(self, sha1: str, destination: Path, *,
                     replace: bool = False) -> str:
         """

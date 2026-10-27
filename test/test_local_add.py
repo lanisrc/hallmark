@@ -64,7 +64,8 @@ def _assert_status(repo, *, state=(), added=(), modified=(), deleted=(),
         "commit": (repo.dothm.head.commit.hexsha[:7]
                    if repo.dothm.head.is_valid() else None),
         "staged": staged, "worktree": worktree,
-        "untracked": sorted(untracked), "remote_catalog": False,
+        "untracked": sorted(untracked), "outdated": [], "outdated_stored": 0,
+        "remote_catalog": False,
     }
     lines = [f"On branch {branch}"]
     for title, entries in (
@@ -370,6 +371,22 @@ def test_new_branch_can_stage_removals_then_use_its_own_pattern(local_repo):
     assert all((repo.worktree / path).is_file() for path in removed)
     assert not (repo.worktree / "b0_i90.h5").exists()
     _assert_status(repo)
+
+
+def test_local_checkout_reports_no_outdated_downloads(local_repo):
+    repo = local_repo
+    _seed(repo)
+    _invoke("branch", "experiment")
+    _invoke("checkout", "experiment")
+    (repo.worktree / "a0_i0.h5").write_text("another version, longer\n")
+    _invoke("add", ".")
+    _invoke("commit", "-m", "Another version")
+    # A local checkout rewrites the file, so nothing is left outdated.
+    assert _invoke("checkout", "main") == 'Switched to branch "main".\n'
+    assert (repo.worktree / "a0_i0.h5").read_text() == "contents of a0_i0.h5\n"
+    _assert_status(repo)
+    (repo.worktree / "a0_i0.h5").write_text("edited\n")
+    _assert_status(repo, worktree_modified=["a0_i0.h5"])
 
 
 def test_compatible_pattern_change_preserves_files_and_reparses_fields(local_repo):
