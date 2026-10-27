@@ -3,12 +3,15 @@
 import errno
 import hashlib
 import os
+import shutil
 import stat
+from pathlib import Path
 
 import pytest
 
 from hallmark import Repo
 from hallmark.repo import objects as objects_module
+from hallmark.repo.dothm import Dothm
 from hallmark.repo.objects import Objects
 
 
@@ -214,6 +217,67 @@ def test_linked_worktrees_share_one_store(tmp_path):
     repo.add_worktree("experiment")
     linked = Repo(tmp_path / "experiment")
     assert linked.objects.root.resolve() == repo.objects.root.resolve()
+
+
+def exclude_file(dothm):
+    return Path(dothm.common_dir) / "info" / "exclude"
+
+
+def test_git_neither_tracks_nor_cleans_the_store(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    (repo.worktree / "data_1.txt").write_text("one\n")
+    repo.add("data_{number}.txt")
+    repo.commit("main data")
+    assert repo.objects.checksums()
+    repo.create_branch("experiment")
+    repo.add_worktree("experiment")
+    linked = Repo(tmp_path / "experiment")
+    # A trailing slash in the pattern would not match this symlink.
+    assert (linked.dothm.path / "objects").is_symlink()
+    for dothm in (repo.dothm, linked.dothm):
+        assert dothm.git.status("--porcelain") == ""
+        assert dothm.git.clean("-nd") == ""
+
+
+def test_new_and_cloned_hm_repositories_exclude_the_store(tmp_path):
+    source = Dothm.init(tmp_path / "source" / ".hm")
+    clone = Dothm.clone(str(source.path), tmp_path / "clone" / ".hm")
+    for dothm in (source, clone):
+        assert "/objects" in exclude_file(dothm).read_text().splitlines()
+
+
+def test_the_store_is_excluded_once_however_often_it_opens(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    exclude = exclude_file(repo.dothm)
+    Repo(tmp_path / "repo")
+    Repo(tmp_path / "repo")
+    assert exclude.read_text().splitlines().count("/objects") == 1
+    exclude.write_text("*.swp")
+    Repo(tmp_path / "repo")
+    assert exclude.read_text() == "*.swp\n/objects\n"
+    # Git ignores a pattern's trailing spaces, but not a trailing tab.
+    exclude.write_text("/objects  \n")
+    Repo(tmp_path / "repo")
+    assert exclude.read_text() == "/objects  \n"
+    exclude.write_text("/objects\t\n")
+    Repo(tmp_path / "repo")
+    assert exclude.read_text() == "/objects\t\n/objects\n"
+    shutil.rmtree(exclude.parent)
+    Repo(tmp_path / "repo")
+    assert exclude.read_text() == "/objects\n"
+
+
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="root writes files whatever their permissions")
+def test_a_read_only_exclude_file_does_not_stop_a_repository_opening(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    exclude = exclude_file(repo.dothm)
+    exclude.write_text("# written before the store was excluded\n")
+    exclude.chmod(0o444)
+    reopened = Repo(tmp_path / "repo")
+    assert reopened.status()["branch"] == "main"
+    assert reopened.log()
+    assert exclude.read_text() == "# written before the store was excluded\n"
 
 
 def test_stored_objects_are_read_only_and_restore_writable(tmp_path):

@@ -209,6 +209,7 @@ class Dothm(Repo):
             'repository')
         kwargs.setdefault("initial_branch", "main")
         dothm = super().init(*args, **kwargs)
+        dothm.exclude_objects()
 
         # if no commits exist, create a README.md file to initialize the repository
         if not dothm.heads:
@@ -276,6 +277,7 @@ remote:
         try:
             super().clone_from(url, str(to_path))
             dothm = cls(str(to_path))
+            dothm.exclude_objects()
 
             commit = dothm.head.commit
             initial_message = "Initial commit: local `.hm` repository"
@@ -302,6 +304,27 @@ remote:
                 fallback=f'Failed to clone from "{url}"',
                 clone_path=to_path,
                 display_path=display_path) from exc
+
+    def exclude_objects(self) -> None:
+        """
+        Exclude the object store from Git, which must never commit or clean it.
+
+        Linked worktrees share the exclude file, and there ``objects`` is a
+        symlink, so the pattern has no trailing slash. A tracked
+        ``.gitignore`` would change the initial commit ``clone`` recognises.
+        """
+        exclude = Path(self.common_dir) / "info" / "exclude"
+        try:
+            text = exclude.read_bytes()
+        except FileNotFoundError:
+            text = b""
+        # Git trims trailing spaces from a pattern, but not tabs.
+        if any(line.rstrip(b" ") == b"/objects" for line in text.splitlines()):
+            return
+        exclude.parent.mkdir(exist_ok=True)
+        with exclude.open("ab") as handle:
+            handle.write(b"/objects\n" if not text or text.endswith(b"\n")
+                         else b"\n/objects\n")
 
     def link_worktree(self, path: Union[Path, str], branch: Optional[str] = None):
         """

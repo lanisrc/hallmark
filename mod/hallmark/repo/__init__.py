@@ -132,6 +132,11 @@ class Repo:
         if dothm_objects.resolve() != main_objects.resolve() \
         and not dothm_objects.exists():
             dothm_objects.symlink_to(main_objects)
+        try:
+            self.dothm.exclude_objects()
+        except OSError:
+            # A read-only repository must still open for hm status and hm log.
+            pass
 
     def _resolve_worktree_path(self, value, *, label: str = "tracked path") -> Path:
         """
