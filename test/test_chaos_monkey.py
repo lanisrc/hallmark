@@ -24,7 +24,7 @@ import pytest
 
 from chaos import check_invariants, fail_nth_replace, snapshot_hm
 from hallmark import Repo
-from hallmark.error import CheckoutError
+from hallmark.error import CheckoutError, HallmarkError
 import hallmark.transport.http as http_transport
 from hallmark.transport.base import DownloadError
 from hallmark.repo.config import row_to_path
@@ -66,6 +66,8 @@ def _worktree_files(root):
 
 def _tracked_files_match_catalog(repo):
     """Return paths whose bytes differ from the current branch's catalog."""
+    if repo.state.data.empty:
+        return []
     fmt = repo.state.config["data"][0]["fmt"]
     wrong = []
     for _, row in repo.state.data.iterrows():
@@ -109,6 +111,9 @@ def test_local_monkey_keeps_repository_consistent(tmp_path, monkeypatch, request
             if files:
                 (root / rng.choice(files)).unlink()
             continue
+        if name == "checkout" and target not in branches:
+            repo.create_branch(target)
+            branches.add(target)
 
         before, before_files = snapshot_hm(root), _worktree_files(root)
         if fault is not None:
@@ -120,7 +125,7 @@ def test_local_monkey_keeps_repository_consistent(tmp_path, monkeypatch, request
             elif name == "commit":
                 committed = repo.commit(f"step {step}") or committed
             else:
-                repo.checkout(target)
+                switched = repo.checkout(target)
         except EXPECTED_ERRORS as exc:
             monkeypatch.undo()
             monkey.log[-1] += f" -> {type(exc).__name__}: {exc}"
@@ -144,8 +149,8 @@ def test_local_monkey_keeps_repository_consistent(tmp_path, monkeypatch, request
             monkey.fail(step, f"undocumented {type(exc).__name__}: {exc}")
         monkeypatch.undo()
         monkey.log[-1] += " -> ok"
-        if name == "checkout":
-            branches.add(target)
+        # Checking out the current branch keeps any edited files, as in git.
+        if name == "checkout" and switched:
             wrong = _tracked_files_match_catalog(Repo(root))
             if wrong:
                 monkey.fail(step, f"checkout left wrong tracked files: {wrong}")
@@ -158,12 +163,18 @@ def test_local_monkey_keeps_repository_consistent(tmp_path, monkeypatch, request
 
 
 def test_checkout_before_first_commit_reports_a_documented_error(tmp_path):
-    # Issue #58: this used to surface a raw GitCommandError.
+    # Issue #58: this used to surface a raw GitCommandError, then a plain
+    # RuntimeError about data[0].fmt.
     repo = Repo.init(tmp_path / "obs")
-    try:
-        repo.checkout("main")
-    except EXPECTED_ERRORS:
-        pass
+    assert repo.checkout("main") is False
+    repo.create_branch("other")
+    with pytest.raises(HallmarkError) as caught:
+        repo.checkout("other")
+    assert "fmt" not in str(caught.value)
+    assert repo.status()["staged"]["state"] == ["config.yml", "data.tsv", "meta.yml"]
+    repo.commit("Empty catalogue")
+    assert repo.checkout("other") is True
+    assert repo.checkout("main") is True
 
 
 @pytest.mark.parametrize("seed", SEEDS)

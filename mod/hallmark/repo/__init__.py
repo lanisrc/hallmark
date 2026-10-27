@@ -1110,7 +1110,8 @@ class Repo:
         Args:
             target_branch (string): Branch to switch to.
         Returns:
-            boolean: True if checkout succeeds.
+            boolean: True if checkout succeeds; False if ``target_branch`` is
+            the current branch, which changes nothing.
         Raises:
             CheckoutError: If the checkout cannot be completed safely.
         '''

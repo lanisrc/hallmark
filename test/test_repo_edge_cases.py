@@ -425,7 +425,16 @@ def test_checkout_refuses_a_target_with_an_invalid_checksum(tmp_path):
     assert _h5_names(repo) == ["a0_i0.h5"]
 
 
-def test_checkout_refuses_a_target_without_one_filename_format(tmp_path):
+def _is_clean(repo):
+    status = repo.status()
+    return (status["staged"] == {"state": [], "added": [], "modified": [],
+                                 "deleted": []}
+            and status["worktree"] == {"modified": [], "deleted": []}
+            and status["untracked"] == [])
+
+
+def test_checkout_of_an_empty_catalogue_and_back_removes_and_restores_files(
+        tmp_path):
     repo = Repo.init(tmp_path / "repo")
     repo.commit("Empty catalogue")
     repo.create_branch("empty")
@@ -433,10 +442,118 @@ def test_checkout_refuses_a_target_without_one_filename_format(tmp_path):
     repo.add(FMT)
     repo.commit("First dataset")
 
-    with pytest.raises(CheckoutError, match="only repositories with one data format"):
-        repo.checkout("empty")
+    assert repo.checkout("empty") is True
+    assert repo.branches()["current"] == "empty"
+    assert _h5_names(repo) == []
+    assert _is_clean(repo)
+
+    assert repo.checkout("main") is True
+    assert _h5_names(repo) == ["a0_i0.h5"]
+    assert (repo.worktree / "a0_i0.h5").read_text(
+        encoding="utf-8") == "contents of a0_i0.h5\n"
+    assert _is_clean(repo)
+
+
+def test_checkout_of_a_branch_made_right_after_init(tmp_path):
+    repo = Repo.init(tmp_path / "repo")
+    repo.create_branch("exp")
+    _write(repo.worktree, "a0_i0.h5", "a0_i30.h5")
+    repo.add(FMT)
+    repo.commit("First dataset")
+
+    assert repo.checkout("exp") is True
+    assert repo.branches()["current"] == "exp"
+    assert _h5_names(repo) == []
+    assert repo.state.data.empty
+    assert _is_clean(repo)
+    assert checkout_folders(repo.worktree) == []
+
+    assert repo.checkout("main") is True
+    assert _h5_names(repo) == ["a0_i0.h5", "a0_i30.h5"]
+    assert _is_clean(repo)
+
+
+def test_checkout_of_a_branch_without_state_files_made_from_the_first_commit(
+        tmp_path):
+    repo = _committed_repo(tmp_path)
+    first_commit = repo.dothm.head.commit.parents[0]
+    assert [item.path for item in first_commit.tree] == ["README.md"]
+    assert repo.checkout(first_commit.hexsha) is True
+    assert _h5_names(repo) == []
+    repo.create_branch("stranded")
+    repo.checkout("main")
+
+    assert repo.checkout("stranded") is True
+    assert _h5_names(repo) == []
+    assert _is_clean(repo)
+    _write(repo.worktree, "a1_i45.h5")
+    repo.add(FMT)
+    repo.commit("Second dataset")
+
+    assert repo.checkout("main") is True
+    assert _h5_names(repo) == ["a0_i0.h5"]
+    assert repo.checkout("stranded") is True
+    assert _h5_names(repo) == ["a1_i45.h5"]
+
+
+@pytest.mark.parametrize("broken,message", [
+    ("main", r"branch data\[0\]\.fmt must be a non-empty string"),
+    ("other", "only repositories with one data format"),
+], ids=["current", "target"])
+def test_checkout_refuses_a_catalogue_with_files_but_no_filename_format(
+        tmp_path, broken, message):
+    repo = _committed_repo(tmp_path)
+    repo.create_branch("other")
+    # As if config.yml were edited by hand and its pattern removed.
+    repo.dothm.git.checkout(broken)
+    repo.dothm.write_yaml({"data": [{}]}, "config")
+    repo.dothm.index.add(["config.yml"])
+    repo.dothm.index.commit("Remove the pattern")
+    repo.dothm.git.checkout("main")
+    repo = Repo(repo.worktree)
+
+    with pytest.raises(CheckoutError, match=message):
+        repo.checkout("other")
     assert repo.branches()["current"] == "main"
     assert _h5_names(repo) == ["a0_i0.h5"]
+
+
+@pytest.mark.parametrize("make_repo,branch,staged", [
+    (lambda path: Repo.init(path / "repo"), "main", INITIAL_STATE),
+    (_repo_on_unborn_branch, "fresh", ["README.md", *INITIAL_STATE]),
+], ids=["after-init", "unborn"])
+def test_checkout_of_the_current_branch_keeps_the_staged_state(
+        tmp_path, make_repo, branch, staged):
+    repo = make_repo(tmp_path)
+    head = repo.dothm.head.reference.path
+
+    assert repo.checkout(branch) is False
+
+    assert repo.dothm.head.reference.path == head
+    assert repo.status()["staged"]["state"] == staged
+
+
+def test_checkout_from_a_branch_without_commits_is_refused(tmp_path):
+    repo = _repo_on_unborn_branch(tmp_path)
+
+    with pytest.raises(CheckoutError, match='"fresh" has no commits yet'):
+        repo.checkout("main")
+
+    assert repo.dothm.head.reference.path == "refs/heads/fresh"
+    assert repo.status()["staged"]["state"] == ["README.md", *INITIAL_STATE]
+
+
+def test_checkout_of_the_current_branch_keeps_edited_files(tmp_path):
+    repo = _committed_repo(tmp_path)
+    (repo.worktree / "a0_i0.h5").write_text("edited\n", encoding="utf-8")
+    repo.set_config(remote_url="https://example.com/data/")
+
+    assert repo.checkout("main") is False
+
+    assert (repo.worktree / "a0_i0.h5").read_text(encoding="utf-8") == "edited\n"
+    status = repo.status()
+    assert status["staged"]["state"] == ["config.yml"]
+    assert status["worktree"]["modified"] == ["a0_i0.h5"]
 
 
 def test_checkout_refuses_while_hallmark_state_changes_are_staged(tmp_path):

@@ -376,6 +376,28 @@ def require_data_config(repo) -> dict:
     return spec
 
 
+def tracked_filename_format(state) -> Optional[str]:
+    """
+    Return the filename format of the files a state tracks, or None if it
+    tracks none: no TSV has rows and no single format is set, as in a new
+    repository or a branch made from its first commit.
+
+    Args:
+        state: Repository state.
+
+    Raises:
+        ValueError: If the catalogue has rows but no single format.
+    """
+    fmt = single_data_format(state.config)
+    tables = [state.data, *getattr(state, "tables", {}).values()]
+    if fmt is None and not all(frame.empty for frame in tables):
+        if _single_data_config(state.config) is None:
+            raise ValueError('branch config must define exactly one entry '
+                             'under "data" in config.yml')
+        raise ValueError("branch data[0].fmt must be a non-empty string")
+    return fmt
+
+
 def branch_filename_format(repo) -> str:
     """
     Return the configured filename format. Raises RuntimeError if

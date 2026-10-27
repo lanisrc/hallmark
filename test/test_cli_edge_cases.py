@@ -325,6 +325,20 @@ def test_commit_with_nothing_staged_says_so(tmp_path, monkeypatch):
     assert Repo(tmp_path / "data").dothm.head.commit.hexsha == head
 
 
+def test_checkout_of_the_current_branch_after_init_says_so(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(hallmark, ["init", "data"]).exit_code == 0
+    monkeypatch.chdir(tmp_path / "data")
+
+    result = runner.invoke(hallmark, ["checkout", "main"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == 'Already on branch "main".\n'
+    assert Repo(tmp_path / "data").status()["staged"]["state"] == [
+        "config.yml", "data.tsv", "meta.yml"]
+
+
 def test_log_prints_nothing_on_a_branch_without_commits(tmp_path, monkeypatch):
     repo = Repo.init(tmp_path / "data")
     repo.dothm.git.checkout("--orphan", "fresh")

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from hallmark import ParaFrame, Repo
@@ -10,7 +11,9 @@ from hallmark.repo.config import (
     fmt_entries_from_config,
     match_file,
     normalize_remotes,
+    tracked_filename_format,
     validate_tsv_filename)
+from hallmark.repo.state import State
 
 
 FMT = "a{a}_i{i}.h5"
@@ -99,6 +102,41 @@ def test_several_data_entries_leave_no_single_pattern_to_add_files_with(tmp_path
     with pytest.raises(ValueError, match="No file pattern set"):
         repo.add_paths(["a0_i0.h5"])
     assert repo.state.data.empty
+
+
+# One catalogued file of FMT.
+ROWS = pd.DataFrame({"a": ["0"], "i": ["0"], "sha1": ["0" * 40]})
+
+
+@pytest.mark.parametrize("data,rows,expected", [
+    ([{}], False, None),
+    ([{"fmt": FMT}, {"fmt": "b{b}.h5"}], False, None),
+    ([{"fmt": f" {FMT} "}], False, FMT),
+    ([{"fmt": FMT}], True, FMT),
+], ids=["new-repository", "several-formats", "format-without-files", "files"])
+def test_tracked_filename_format_is_none_only_without_files(data, rows, expected):
+    state = State(config={"data": data})
+    if rows:
+        state.data = ROWS
+
+    assert tracked_filename_format(state) == expected
+
+
+@pytest.mark.parametrize("data,table,message", [
+    ([{}], "data.tsv", r"data\[0\]\.fmt must be a non-empty string"),
+    ([{"fmt": FMT}, {"fmt": "b{b}.h5"}], "data.tsv",
+     'exactly one entry under "data"'),
+    ([{"db": "a.tsv"}, {"db": "b.tsv"}], "b.tsv", 'exactly one entry under "data"'),
+], ids=["no-format", "several-formats", "rows-in-another-tsv"])
+def test_tracked_filename_format_requires_one_format_for_files(data, table, message):
+    state = State(config={"data": data})
+    if table == "data.tsv":
+        state.data = ROWS
+    else:
+        state.tables = {table: ROWS}
+
+    with pytest.raises(ValueError, match=message):
+        tracked_filename_format(state)
 
 
 def test_set_config_cannot_change_the_pattern_of_a_catalogue_without_one(

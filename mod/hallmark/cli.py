@@ -796,13 +796,14 @@ def checkout(repo, target_branch):
         # attempt to switch to the target branch, handling any errors
         switched = repo.checkout(target_branch)
 
-    if switched:
-        snapshot = repo.branches()
-        if snapshot["current"] is None:
-            click.echo(
-                f'Now at commit {snapshot["detached_at"]}; not on a branch.')
-        else:
-            click.echo(f'Switched to branch "{snapshot["current"]}".')
+    snapshot = repo.branches()
+    if not switched:
+        click.echo(f'Already on branch "{snapshot["current"]}".')
+    elif snapshot["current"] is None:
+        click.echo(
+            f'Now at commit {snapshot["detached_at"]}; not on a branch.')
+    else:
+        click.echo(f'Switched to branch "{snapshot["current"]}".')
 
 
 @hallmark.command(short_help="Download files from the configured data remote.")

@@ -22,7 +22,7 @@ from ..utils import (
     CHECKOUT_PREFIX, calculate_file_checksum, replace_file_on_success,
     resolve_path_in_root)
 from .state import is_remote_catalog
-from .config import branch_filename_format, row_to_path, single_data_format
+from .config import row_to_path, single_data_format, tracked_filename_format
 from .manifest import iter_manifest_entries
 from .history import (
     load_branch_state, load_head_state, find_remote_branch,
@@ -271,14 +271,16 @@ def checkout(repo, target_branch):
         target_branch (str): Branch name, remote branch name or commit id.
 
     Returns:
-        bool: True when the checkout succeeds.
+        bool: True when the checkout succeeds; False, having changed
+        nothing, if the target is the current branch.
 
     Raises:
         ValueError: If the target name is invalid.
         CheckoutError: If there is no worktree, the target is unknown, the
             worktree or ``.hm`` has changes, files or objects are missing,
-            the switch is between local files and a remote catalogue, the
-            target has no single filename format, or a step fails.
+            the switch is between local files and a remote catalogue, a
+            catalogue with files has no single filename format, or a step
+            fails.
     """
     with repo.dothm.state_lock():
         recover_interrupted_checkout(repo)
@@ -291,6 +293,15 @@ def _checkout(repo, target_branch):
 
     if repo.worktree is None:
         raise CheckoutError("cannot checkout without a worktree")
+    # As in git, checking out the current branch, even one without commits,
+    # changes nothing and keeps the staged state.
+    if target_branch == current_branch(repo):
+        return False
+    # Nothing in .hm is committed yet, and there is no commit to come back to.
+    if not repo.dothm.head.is_valid():
+        raise CheckoutError(
+            f'branch "{current_branch(repo)}" has no commits yet; '
+            "commit before checkout")
     # Resolve the target once and load the state of exactly that revision.
     target_kind, resolved_target = resolve_checkout_target(repo, target_branch)
     target_state = _load_revision_state(repo, resolved_target)
@@ -313,13 +324,15 @@ def _checkout(repo, target_branch):
     remote_revision = resolved_target if has_remote else None
 
     current_tracked = tracked_paths(repo)
-    # Get the data format string for the target branch configuration
-    target_fmt = single_data_format(target_state.config)
-    if target_fmt is None:
+    # Get the data format string for the target branch configuration; a
+    # target that tracks no files, such as a new repository's, needs none
+    try:
+        target_fmt = tracked_filename_format(target_state)
+    except ValueError as exc:
         # Raise an error if the target branch does not meet the expected criteria
         raise CheckoutError(
             "checkout currently supports only repositories with "
-            "one data format and data.tsv")
+            "one data format and data.tsv") from exc
 
     # list of (relative path, sha1) tuples for all entries in the target branch
     target_entries_raw = list(iter_manifest_entries(target_state, fmt=target_fmt))
@@ -387,8 +400,8 @@ def _checkout(repo, target_branch):
 
     # Store the name of the currently active branch before switching
     original_branch = current_branch(repo)
-    # Get the current format string from the branch configuration
-    current_fmt = branch_filename_format(repo)
+    # Get the current format string; None only if no rows are tracked
+    current_fmt = tracked_filename_format(repo.state)
     # Create a mapping of current tracked paths to their SHA1 checksums
     current_sha_by_path = {
         row_to_path(row, current_fmt): str(row["sha1"]).lower()

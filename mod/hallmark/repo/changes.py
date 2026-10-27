@@ -7,7 +7,7 @@ from pathlib import Path
 from ..error import CheckoutError
 from ..utils import (
     SymlinkPathError, resolve_path_in_root)
-from .config import branch_filename_format
+from .config import tracked_filename_format
 from .manifest import file_versions_by_path, iter_manifest_entries
 
 
@@ -49,9 +49,10 @@ def tracked_paths(repo) -> set[Path]:
         set[Path]: Paths of all files tracked in the current
         repository state.
     '''
-    # call branch_filename_format to get the filename format from the repository
-    # configuration
-    fmt = branch_filename_format(repo)
+    # get the filename format of the tracked files; None if there are none
+    fmt = tracked_filename_format(repo.state)
+    if fmt is None:
+        return set()
     # use iter_manifest_entries to iterate over the manifest entries and collect paths
     return {path for path, _ in iter_manifest_entries(repo.state, fmt=fmt)}
 
@@ -130,15 +131,16 @@ def ensure_clean_tracked_files(repo) -> None:
     if repo.worktree is None:
         raise CheckoutError("cannot checkout without a worktree")
 
-    # determine the filename format from the repository configuration
-    fmt = branch_filename_format(repo)
-    # get the expected checksums for all tracked files in the repository
-    expected_checksums = file_versions_by_path(repo.state, fmt=fmt)
     # try to get the modified and missing tracked files using
     # find_changed_and_missing_files
     try:
+        # determine the filename format; a state without one tracks no files
+        fmt = tracked_filename_format(repo.state)
+        # get the expected checksums for all tracked files in the repository
+        expected_checksums = ({} if fmt is None
+                              else file_versions_by_path(repo.state, fmt=fmt))
         modified, missing = find_changed_and_missing_files(repo, expected_checksums)
-    # if a ValueError occurs during the find_changed_and_missing_files call, raise a
+    # if the format is missing or a tracked path is invalid, raise a
     # CheckoutError
     except ValueError as exc:
         raise CheckoutError(str(exc)) from exc
