@@ -16,6 +16,7 @@ import requests
 from requests.auth import AuthBase
 from urllib3.exceptions import (HTTPError as Urllib3Error, ProtocolError,
                                 ReadTimeoutError)
+from urllib3.response import HTTPResponse as Urllib3Response
 
 from ..utils import REMOTE_REQUEST_TIMEOUT
 from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
@@ -24,6 +25,12 @@ from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
 from .auth import LOOPBACK_HOSTS
 from .index import _parse_directory_listing, _redirected_directory
 
+
+def _refuse_short_body(response):
+    """Make urllib3 1.x refuse a body shorter than its Content-Length, as 2.x does."""
+    if isinstance(response.raw, Urllib3Response):
+        response.raw.enforce_content_length = True
+    return response
 
 
 def _declared_charset(content_type):
@@ -144,13 +151,13 @@ class HttpBackend(DataBackend):
         Asking for the identity encoding keeps servers from compressing a file
         on the fly, so its checksums still match.
         """
-        return self.context.session().get(
+        return _refuse_short_body(self.context.session().get(
             self.context.remote.file_url(path),
             stream=True,
             timeout=REMOTE_REQUEST_TIMEOUT,
             headers={"Accept-Encoding": "identity"},
             **self._auth_option(),
-        )
+        ))
 
     def _download_error(self, exc):
         """Describe an HTTP failure without exposing response contents."""
@@ -211,7 +218,7 @@ class HttpBackend(DataBackend):
                 response = self.context.session().request(
                     method, url, headers=headers, data=data, **options)
             if response.status_code not in {301, 302, 303, 307, 308}:
-                return response, url
+                return _refuse_short_body(response), url
             location = response.headers.get("Location")
             response.close()
             if not isinstance(location, str) or not location:

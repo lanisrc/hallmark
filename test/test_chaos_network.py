@@ -156,6 +156,7 @@ SCAN_FAULTS = {
     "redirect-outside-root": ("rel/sub/", Redirect("/other/")),
     "manifest-500": ("rel/sub/sha256sum.txt", Status(500)),
     "manifest-reset": ("rel/sub/sha256sum.txt", ResetAfter(5)),
+    "manifest-short-body": ("rel/sub/sha256sum.txt", ShortBody(5)),
 }
 
 
