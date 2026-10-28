@@ -427,6 +427,13 @@ class DataBackend:
 
     Args:
         context (OperationContext): Resources and settings for this operation.
+
+    Attributes:
+        context (OperationContext): Resources and settings for this operation.
+        auth_type (str, optional): Local profile type this backend reads:
+            ``http`` or ``s3`` from ``context.auth``, or ``ssh`` from
+            ``context.settings``. None, the default, means the backend accepts
+            no auth profile.
     """
 
     # The local profile type this backend reads from ``context.auth``:

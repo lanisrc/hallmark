@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Open, change and commit a Hallmark repository through ``Repo``.
+
+A repository is a worktree of dataset files and its ``.hm`` folder, which
+keeps the catalogue in git (see ``hallmark.repo.dothm``) and file contents
+in an object store (see ``hallmark.repo.objects``).
+"""
+
 from __future__ import annotations
 import os
 
@@ -445,7 +453,33 @@ class Repo:
 
     def add_paths(self, paths: List[Union[Path, str]], encoding: bool = False
                   ) -> ParaFrame:
+        '''
+        Stage files and folders of the worktree that match the filename format.
 
+        Each file's name is read with the branch's filename format and its
+        SHA-1 is computed. Files in a folder that do not match are listed as
+        unmatched; a named file that does not match is an error. Adding
+        ``"."`` replaces the catalogue's rows, while other paths update them.
+        The format is saved to ``config.yml`` and the state is staged.
+
+        Args:
+            paths (list[Path | str]): Files or folders, relative to the
+                working directory, or ``"."`` for the whole worktree.
+            encoding (bool): Apply the format's regex substitutions to each
+                name before reading it.
+
+        Returns:
+            ParaFrame: The matched files' fields and paths, without checksums;
+            ``attrs["unmatched"]`` lists the paths that did not match.
+
+        Raises:
+            ValueError: If the catalogue is remote, a path is a URL or a
+                pattern, no filename format is set, or a path is outside the
+                worktree, not a regular file, or a named file that does not
+                match.
+            FileNotFoundError: If a path does not exist.
+            RuntimeError: If the repository has no worktree.
+        '''
         # if the repository is a remote catalog, adding local paths is not allowed
         if is_remote_catalog(self.state):
             raise ValueError("Use a remote URL to update this catalog")

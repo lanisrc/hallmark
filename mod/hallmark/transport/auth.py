@@ -22,12 +22,29 @@ class SSHSettings:
     """
     Local SSH settings shared by the connections in one operation.
 
-    Timeouts are in seconds. ``transfer_timeout`` limits the total time
-    for each file, and ``max_sessions`` limits concurrent SFTP sessions.
-    Keepalives probe every ``server_alive_interval`` seconds and drop the
-    connection after ``server_alive_count_max`` unanswered probes. Unset
-    user, port, identity, and compression values fall back to SSH
+    Unset user, port, identity, and compression values fall back to SSH
     configuration.
+
+    Attributes:
+        user (str, optional): SSH username.
+        port (int, optional): SSH port.
+        identity_file (str, optional): Absolute path of the only private key
+            to offer.
+        host_key_policy (str): ``strict`` to require a known host key, or
+            ``accept-new`` to record the key of a new host. Changed keys are
+            always refused. Defaults to ``strict``.
+        connect_timeout (int): Seconds allowed to connect. Defaults to 10.
+        transfer_timeout (int): Seconds allowed in total for each file, or for
+            each batch of server checksums. Defaults to 3600.
+        shutdown_timeout (int): Seconds to wait for a stopped client to exit.
+            Defaults to 2.
+        max_sessions (int): Concurrent sessions on the shared SSH connection,
+            at most 10. Defaults to 4.
+        server_alive_interval (int): Seconds between keepalive probes.
+            Defaults to 15.
+        server_alive_count_max (int): Unanswered probes before the connection
+            is dropped. Defaults to 2.
+        compression (bool, optional): Whether SSH compresses traffic.
     """
     user: str | None = None
     port: int | None = None

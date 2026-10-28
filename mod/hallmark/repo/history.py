@@ -1,3 +1,7 @@
+"""
+Load the state of other revisions, and fetch their objects from local remotes.
+"""
+
 from __future__ import annotations
 
 from copy import deepcopy

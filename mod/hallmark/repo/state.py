@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Hold a repository's catalogue in memory.
+
+``State`` keeps ``config.yml``, ``meta.yml``, ``data.tsv`` and the other
+TSVs that ``config.yml`` names. The helpers here give catalogue values the
+text form they are saved in, and tell remote catalogues from local ones.
+"""
 
 from dataclasses import dataclass, field
 

@@ -8,6 +8,11 @@ class CyVerseIndexParser(_IndexParser):
     """Read CyVerse object and collection rows, including exact byte sizes."""
 
     def handle_starttag(self, tag, attrs):
+        """
+        Classify CyVerse ``object`` rows as directories (``collection``) or files.
+
+        Any such row also marks the page as a CyVerse listing.
+        """
         super().handle_starttag(tag, attrs)
         if tag == "tr":
             classes = dict(attrs).get("class", "").split()

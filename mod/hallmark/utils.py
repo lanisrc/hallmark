@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Helpers shared across Hallmark: checksums, safe relative paths, YAML and
+atomic file writes, and the conversion of filename field values.
+"""
+
 from __future__ import annotations
 import errno
 import re

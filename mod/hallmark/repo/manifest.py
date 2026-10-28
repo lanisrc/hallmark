@@ -1,3 +1,5 @@
+"""Map catalogue rows to the files they describe and to those files' SHA-1s."""
+
 from __future__ import annotations
 
 import json

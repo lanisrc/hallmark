@@ -304,6 +304,7 @@ class S3Backend(DataBackend):
         return decode_metadata(content)
 
     def close(self):
+        """Close the boto3 client; a later ``prepare`` creates a new one."""
         client, self._client = self._client, None
         if client is not None and hasattr(client, "close"):
             client.close()

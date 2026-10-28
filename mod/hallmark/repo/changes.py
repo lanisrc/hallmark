@@ -1,3 +1,5 @@
+"""Find worktree files that changed or went missing since they were committed."""
+
 from __future__ import annotations
 
 from pathlib import Path
