@@ -110,13 +110,12 @@ class ParaFrame(pd.DataFrame):
         conditions are returned.
 
         Args:
-            ``**kwargs``: Keyword arguments specifying column names and values to
-            filter by. Values may be scalars or sequences (lists or tuples).
-            Sequence values match any element in the sequence.
+            **kwargs: Column names and the values to filter by. Values may be
+                scalars or sequences (lists or tuples); a sequence matches any
+                of its elements.
 
         Returns:
-            pandas.DataFrame: A filtered DataFrame containing only the rows
-            that satisfy the requested conditions.
+            ParaFrame: The rows that satisfy any of the conditions.
         """
         # Create a boolean mask for filtering rows based on the specified conditions
         mask = pd.Series(False, index=self.index)

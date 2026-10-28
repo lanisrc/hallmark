@@ -222,20 +222,30 @@ class Objects:
     def contains(self, sha1: str) -> bool:
         """
         Return whether a checksum exists in the object store.
+
         Args:
             sha1 (str): SHA-1 checksum to locate.
+
         Returns:
             bool: True when the corresponding object exists.
+
+        Raises:
+            ValueError: If ``sha1`` is not exactly 40 hexadecimal characters.
         """
         return self._path_for_checksum(sha1).is_file()
 
     def object_path(self, sha1: str) -> Path:
         """
         Return the path where a checksum's object is (or would be) stored.
+
         Args:
             sha1 (str): SHA-1 checksum to locate.
+
         Returns:
             Path: Path to the object in this store.
+
+        Raises:
+            ValueError: If ``sha1`` is not exactly 40 hexadecimal characters.
         """
         return self._path_for_checksum(sha1)
 
@@ -405,6 +415,7 @@ class Objects:
     def restore(self, sha1: str, dest: Path) -> Path:
         """
         Restore a writable copy of an object to a specified destination.
+
         Args:
             sha1 (str): SHA-1 checksum of the object to restore.
             dest (Path): Destination path for the restored file.
@@ -414,6 +425,8 @@ class Objects:
 
         Raises:
             FileNotFoundError: If the object does not exist in the store.
+            ValueError: If ``sha1`` is malformed, or the object's content no
+                longer matches it.
         """
         # split the SHA-1 checksum into its storage path
         stored = self._path_for_checksum(sha1)

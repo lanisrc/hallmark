@@ -672,6 +672,7 @@ remote:
         """
         Dump a dictionary to a YAML file, preserving key order and using
         literal block style for multi-line strings.
+
         Args:
             data (dict): The dictionary to be dumped to YAML.
             stem (Union[Path, str]): The stem of the file name (without extension)

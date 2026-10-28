@@ -93,12 +93,14 @@ def load_head_state(repo) -> State:
 def find_remote_branch(repo, branch: str) -> str | None:
     """
     Find the first remote reference containing the requested branch.
+
     Args:
-        repo: Repository object.
-        branch: Branch name (without remote prefix).
+        repo (Repo): Repository object.
+        branch (str): Branch name, without a remote prefix.
+
     Returns:
-        A Git revision string such as "origin/main" or "upstream/main".
-        Returns None if the branch does not exist on any remote.
+        str | None: A Git revision such as ``"origin/main"``, or None if the
+        branch does not exist on any remote.
     """
     for remote in repo.dothm.remotes:
         for ref in remote.refs:

@@ -126,12 +126,13 @@ class State:
     In-memory Hallmark state database.
 
     Attributes:
-        config: Repository configuration values.
-        meta: Repository metadata.
-        data: Tabular file index containing indexed object checksums
-        (``sha1``) and associated metadata.
-        tables: The other TSVs that ``config.yml``'s ``data`` entries name,
-        by file name, such as one per filename format of a remote catalogue.
+        config (dict): Repository configuration values, from ``config.yml``.
+        meta (dict): Repository metadata, from ``meta.yml``.
+        data (pd.DataFrame): Rows of ``data.tsv``: indexed object checksums
+            (``sha1``) and associated metadata, or a remote catalogue's files.
+        tables (dict): The other TSVs that ``config.yml``'s ``data`` entries
+            name, by file name, such as one per filename format of a remote
+            catalogue.
     """
 
     config:    dict         = field(default_factory=dict)

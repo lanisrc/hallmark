@@ -118,8 +118,8 @@ def is_valid_checksum(
     allow_unknown_algorithm: bool = False,
     ) -> bool:
     """
-    Used in remote.download by validate_checksum_spec, repo.objects by _validate_sha1,
-    and remote.discovery by _attach_published_checksums
+    Used wherever a digest is read: remote.add, remote.discovery,
+    remote.download, remote.plan, repo.objects and the SSH and WebDAV backends.
     Validate a checksum against its expected length for the given algorithm.
 
     Args:
@@ -257,11 +257,10 @@ def publish_no_overwrite(source: Path, target: Path) -> None:
 @contextmanager
 def use_working_directory(path):
     '''
-    Used in repo by add.
     Temporarily change the working directory within a context.
 
     Args:
-        Path: Directory to switch to while inside the context.
+        path (Path | str): Directory to switch to while inside the context.
     '''
     old = os.getcwd()
     os.chdir(path)

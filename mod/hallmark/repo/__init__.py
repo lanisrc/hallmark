@@ -81,12 +81,13 @@ class Repo:
         Resolve repository and worktree paths.
 
         Args:
-            path (Path | str): Path to either a worktree or a
-            ``.hm`` repository.
+            path (Path | str): Path to either a worktree or a ``.hm``
+                repository.
 
         Returns:
             tuple[Path, Path | None]: A ``(dothm_path, worktree_path)`` tuple.
-            If ``path`` refers to a ``.hm`` directory, ``worktree_path`` is ``None``.
+            If ``path`` names a ``.hm`` directory, or ends in ``.hm``,
+            ``worktree_path`` is ``None``.
         '''
         path = Path(path).resolve()
         if path.name == ".hm" or path.suffix == ".hm":
@@ -98,9 +99,8 @@ class Repo:
         Open an existing hallmark repository.
 
         Args:
-            path: path to a worktree or '.hm repository'/
-        Returns:
-            none.
+            path (Path | str): Path to a worktree, or to the ``.hm`` folder of
+                a repository without one.
         '''
         dothm_path, worktree_path = self.resolve_repo_paths(path)
         self.dothm = Dothm(dothm_path)
@@ -420,9 +420,11 @@ class Repo:
     def checksum(path: Path, chunk_size: int = FILE_IO_CHUNK_SIZE) -> str:
         """
         Compute a file's SHA-1 checksum.
+
         Args:
             path (Path): Path to the file.
             chunk_size (int): Size of chunks to read at a time.
+
         Returns:
             str: SHA-1 checksum of the file.
         """
@@ -433,8 +435,10 @@ class Repo:
         """
         Hash multiple files concurrently in a thread pool this method owns, hashing
         each unique path only once even if it appears more than once in paths.
+
         Args:
             paths (list[Path]): List of file paths to hash.
+
         Returns:
             dict[Path, str]: Dictionary mapping each file path to its SHA1 checksum.
         """
@@ -658,15 +662,23 @@ class Repo:
         Return repository status information. Includes staged changes,
         worktree modifications, deletions, and untracked files.
 
-        Args:
-            self: Repository instance.
-
         Returns:
-            dict[str, object]: Status summary including:
-            - branch (str)
-            - staged changes (dict)
-            - worktree changes (dict)
-            - untracked files (list[str])
+            dict[str, object]: Status summary with these keys:
+
+            - ``branch`` (str | None): Current branch; None at a detached
+              ``HEAD``.
+            - ``commit`` (str | None): Short id of ``HEAD``; None before the
+              first commit.
+            - ``staged`` (dict): ``state`` lists changed files in ``.hm``;
+              ``added``, ``modified`` and ``deleted`` list catalogue paths
+              that differ from ``HEAD``.
+            - ``worktree`` (dict): ``modified`` and ``deleted`` list tracked
+              files that differ from the staged catalogue, plus changed
+              ``.hm/`` files. For a remote catalogue, ``modified`` lists
+              downloads edited in place.
+            - ``untracked`` (list[str]): Worktree files the catalogue does not
+              list.
+            - ``remote_catalog`` (bool): Whether the catalogue is remote.
         """
         staged_state = self.dothm.load_state(staged=True)
         head_state = load_head_state(self)
