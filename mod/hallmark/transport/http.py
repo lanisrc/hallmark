@@ -14,6 +14,9 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 from requests.auth import AuthBase
+from urllib3.exceptions import (HTTPError as Urllib3Error, ProtocolError,
+                                ReadTimeoutError)
+from urllib3.response import HTTPResponse as Urllib3Response
 
 from ..utils import REMOTE_REQUEST_TIMEOUT
 from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
@@ -22,6 +25,12 @@ from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
 from .auth import LOOPBACK_HOSTS
 from .index import _parse_directory_listing, _redirected_directory
 
+
+def _refuse_short_body(response):
+    """Make urllib3 1.x refuse a body shorter than its Content-Length, as 2.x does."""
+    if isinstance(response.raw, Urllib3Response):
+        response.raw.enforce_content_length = True
+    return response
 
 
 def _declared_charset(content_type):
@@ -142,20 +151,27 @@ class HttpBackend(DataBackend):
         Asking for the identity encoding keeps servers from compressing a file
         on the fly, so its checksums still match.
         """
-        return self.context.session().get(
+        return _refuse_short_body(self.context.session().get(
             self.context.remote.file_url(path),
             stream=True,
             timeout=REMOTE_REQUEST_TIMEOUT,
             headers={"Accept-Encoding": "identity"},
             **self._auth_option(),
-        )
+        ))
 
     def _download_error(self, exc):
-        # Requests exceptions can embed credentials in their URL or response body.
         """Describe an HTTP failure without exposing response contents."""
+        # Requests exceptions can embed credentials in their URL or response body.
         status = getattr(getattr(exc, "response", None), "status_code", None)
         cls = RemoteObjectMissing if status == 404 else DownloadError
-        detail = f"HTTP {status}" if isinstance(status, int) else type(exc).__name__
+        if isinstance(status, int):
+            detail = f"HTTP {status}"
+        elif isinstance(exc, ReadTimeoutError):
+            detail = "the connection stalled"
+        elif isinstance(exc, ProtocolError):
+            detail = "the connection was reset or the body was truncated"
+        else:
+            detail = type(exc).__name__
         if status in {401, 403}:
             detail += (f"; check auth profile {self.context.remote.auth!r}"
                        if self.auth is not None else
@@ -202,7 +218,7 @@ class HttpBackend(DataBackend):
                 response = self.context.session().request(
                     method, url, headers=headers, data=data, **options)
             if response.status_code not in {301, 302, 303, 307, 308}:
-                return response, url
+                return _refuse_short_body(response), url
             location = response.headers.get("Location")
             response.close()
             if not isinstance(location, str) or not location:
@@ -224,8 +240,11 @@ class HttpBackend(DataBackend):
                             handle.write(chunk)
                             if self.context.on_bytes is not None:
                                 self.context.on_bytes(len(chunk))
-        except requests.RequestException as exc:
+        # Reading response.raw directly bypasses Requests' error wrapping, so
+        # a reset, truncated or stalled transfer arrives as a urllib3 error.
+        except (requests.RequestException, Urllib3Error) as exc:
             raise self._download_error(exc) from None
+
     def read_text(self, relative_path, limit):
         """Read metadata within the source root and byte limit."""
         content = bytearray()

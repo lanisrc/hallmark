@@ -69,6 +69,9 @@ addopts = "--strict-markers"
 markers = [
     "ssh_client: exercise the actual local OpenSSH SFTP command parser",
     "ssh_integration: disposable loopback sshd (HALLMARK_RUN_SSH_TESTS=1 required)",
+    "chaos: fault injection, crash consistency and seeded random operations",
+    "survey: end-to-end survey workflows against loopback HTTP and SSH servers",
+    "survey_live: tiny downloads from public archives (HALLMARK_RUN_LIVE_TESTS=1 required)",
 ]
 
 [tool.coverage.run]
