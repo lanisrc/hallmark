@@ -78,9 +78,15 @@ class Objects:
     """
     Manage the Hallmark object store.
 
-    Files are stored in a content-addressed directory structure based on
-    their SHA-1 checksum, allowing them to be efficiently retrieved and
-    restored.
+    Files are stored read-only in a content-addressed directory structure
+    based on their SHA-1 checksum, so they can be restored to a worktree or
+    hard-linked there as downloads.
+
+    Attributes:
+        root (Path): The store directory, ``path / name``.
+        tmp (Path): Folder of unfinished downloads, ``root / "tmp"``.
+        stats (Path): Folder of each object's size and modification time
+            record, ``root / "stat"``.
     """
     def __init__(self, path: Union[Path, str], name: str = "objects"):
         """
@@ -505,9 +511,9 @@ class Objects:
         """
         Place the object for ``sha1`` at a destination as a download.
 
-        The object is hard-linked, read-only, where possible. Where the
-        destination is on another filesystem, or links are unavailable, a
-        verified writable copy is made instead. An existing destination is
+        The object is hard-linked, read-only, where possible. On Windows, where
+        the destination is on another filesystem, or where links are unavailable,
+        a verified writable copy is made instead. An existing destination is
         only replaced when asked, and then atomically, so it is never missing.
 
         Args:
@@ -521,6 +527,8 @@ class Objects:
         Raises:
             FileExistsError: If ``destination`` exists and ``replace`` is False.
             FileNotFoundError: If the object is not stored.
+            ValueError: If ``sha1`` is malformed, or a copied object's content no
+                longer matches it.
         """
         source = self.object_path(sha1)
         if LINK_INTO_WORKTREE:

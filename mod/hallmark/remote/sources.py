@@ -66,7 +66,9 @@ class SourceSpec:
     One remote selection recorded in a catalogue.
 
     Attributes:
-        name (str): Unique source name, recorded in each row's ``source``.
+        name (str): Unique source name, recorded as ``catalog_source`` in
+            each TSV row and, when there are several sources, in each
+            ``file:`` entry.
         remote (str): Name of the data remote that serves the files.
         root (str): Folder beneath the remote URL, ``""`` or ending in ``/``.
         prefix (str): Local folder for the files, ``""`` or ending in ``/``.
@@ -188,6 +190,10 @@ def effective_sources(state) -> list:
 
     Returns:
         list[SourceSpec]: Configured or synthesized sources.
+
+    Raises:
+        ValueError: If the configured remotes or sources are invalid, or a
+            source names an unknown remote.
     """
     config = state.config if isinstance(state.config, dict) else {}
     names = remote_names(config)
@@ -204,16 +210,21 @@ def materialize_sources(state) -> list:
     """
     Write a legacy catalogue's synthesized source into the state.
 
-    The single remote is named, ``sources`` is recorded and each row of
-    every TSV gains its ``source``; ``file:`` entries name no source while
-    there is only one. A state that already records sources is returned
-    unchanged.
+    An unnamed single remote is named ``origin``, ``sources`` is recorded and
+    each row of every TSV gains its ``catalog_source``; ``file:`` entries
+    name no source while there is only one. A state that already records
+    sources is left unchanged.
 
     Args:
         state (State): Repository state to update in place.
 
     Returns:
-        list[SourceSpec]: The state's sources.
+        list[SourceSpec]: The state's sources; empty when none can be
+        synthesized, as for a legacy catalogue with several remotes.
+
+    Raises:
+        ValueError: If the configured remotes or sources are invalid, or a
+            source names an unknown remote.
     """
     config = state.config
     if "sources" in config:
@@ -302,8 +313,8 @@ def rows_of(frame: pd.DataFrame, source: SourceSpec, sources: Sequence) -> pd.Se
     """
     Return a mask of the rows that belong to a source.
 
-    Rows without a ``source`` value belong to the only source of a legacy
-    catalogue.
+    While there is only one source, rows without a ``catalog_source`` value,
+    and every row of a table without that column, belong to it.
     """
     if SOURCE in frame.columns:
         values = frame[SOURCE].fillna("").astype(str)

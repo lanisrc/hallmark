@@ -97,17 +97,22 @@ def iter_manifest_entries(
 
 def file_versions_by_path(state, *, fmt: str | None = None) -> dict[str, str]:
     """
-    Create a mapping from file paths to SHA-1 checksums.
+    Create a mapping from file paths to what identifies their content.
+
+    For a local catalogue each path maps to its SHA-1 checksum. For a remote
+    catalogue every catalogued file, from each TSV and from ``file:`` entries,
+    maps to its row as JSON text with sorted keys and no empty values, so a
+    change to any field counts as a change; ``fmt`` is then not used.
 
     Args:
-        state: Repository state.
-        fmt (str | None): Optional filename format to use for parsing paths.
-            If not provided, the format will be determined from the repository
-            configuration.
+        state (State): Repository state.
+        fmt (str | None): Filename format that builds a row's path from its
+            fields when the row has no ``path``. If not provided, the
+            repository's single data format is used.
 
     Returns:
-        dict[str, str]: Dictionary mapping relative file paths to their
-        corresponding SHA-1 checksums.
+        dict[str, str]: Relative file paths mapped to their SHA-1 checksums,
+        or for a remote catalogue to their rows as JSON.
     """
     if is_remote_catalog(state):
         from ..transport.base import validate_remote_path

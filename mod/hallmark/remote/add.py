@@ -3,9 +3,9 @@ Catalog a remote folder as one source of a catalogue.
 
 A scan lists the source's files. The catalogue's filename formats sort them:
 each format keeps its files' rows in its own TSV, and files no format matches
-become ``file:`` entries in ``config.yml``. Nothing is written unless the
-scan completes, and the catalogue is saved only if no other command changed
-it meanwhile.
+become ``file:`` entries in ``config.yml``; without formats every file is a
+row of ``data.tsv``. Nothing is written unless the scan completes, and the
+catalogue is saved only if no other command changed it meanwhile.
 """
 
 import os
@@ -668,10 +668,11 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
     Catalog files from a remote folder as one source of the catalogue.
 
     The URL is matched to a configured remote, or becomes a new one. The
-    selection updates the source with the same folder and filters (or the
-    one named by ``source``), or adds a new source. Re-adding a source
-    replaces its files, keeping a known ``sha1`` while the server reports the
-    file unchanged; ``prune`` decides about files gone from the server.
+    selection updates the source with the same folder and filters, the
+    folder's only source when no filters are given, or the one named by
+    ``source``; otherwise it adds a new source. Re-adding a source replaces
+    its files, keeping a known ``sha1`` while the server reports the file
+    unchanged; ``prune`` decides about files gone from the server.
 
     The catalogue's filename formats, with any new ones, sort the files:
     each format's files are rows of its TSV, and files no format matches
@@ -682,9 +683,11 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
     Args:
         repo (Repo): Repository to update.
         value (str): Folder URL, optionally ending in a filename pattern.
+            ``webdav://`` and ``webdavs://`` URLs use the ``webdav`` backend.
         fmt (str | list, optional): Filename format, or a list of formats or
             ``{"fmt", "db"}`` entries, relative to the URL, if not part of it.
-        filter (str | list[str], optional): Glob filters.
+        filter (str | list[str], optional): Glob filters. Without them, a
+            source added again keeps its saved filters.
         auth, backend, backend_options: Settings for the remote; given values
             replace its saved ones.
         remote (str, optional): Remote name to use or create.
@@ -717,13 +720,26 @@ def add_remote(repo, value, *, fmt=None, filter=None, auth=None, backend=None,
         progress: Discovery progress callback or flag.
 
     Returns:
-        pandas.DataFrame: The files the server listed for this source.
+        pandas.DataFrame: This source's new rows, one per listed file that
+        was not skipped, without ``sha1``.
         ``attrs["removed"]`` lists catalogued paths that the server no longer
         has and that were removed, ``attrs["kept_missing"]`` those that were
         kept, ``attrs["changed"]`` downloaded paths whose file it reports
         changed, ``attrs["skipped"]`` the :class:`PathClash` of each path
         left out, and ``attrs["case_clashes"]`` groups of catalogue paths
         that differ only in letter case.
+
+    Raises:
+        ValueError: If an option, the URL, a filter or a format is invalid,
+            the repository tracks local files, the selection clashes with
+            another source or would drop catalogued files, no file matches,
+            files are gone without a ``prune`` choice or already sorted
+            without a ``resort`` choice, or the catalogue changed during the
+            scan. The previous catalogue is kept.
+        RemoteConfigurationError: If the URL holds a secret or the remote's
+            settings are invalid.
+        DownloadError: If the scan fails. The error keeps its type, such as
+            ``CapabilityError``.
     """
     if not (on_duplicate in (None, "error", "skip") or callable(on_duplicate)):
         raise ValueError('on_duplicate must be "error", "skip" or a callable')

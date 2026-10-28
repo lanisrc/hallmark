@@ -123,9 +123,13 @@ def data_tsv_text(data: pd.DataFrame) -> str:
 class Dothm(Repo):
     """Local ``.hm`` storage backend.
 
-    The backend version controls the hallmark ``State`` database files
-    (``config.yml``, ``meta.yml``, ``data.tsv``) on-disk.
-    It is itself a git worktree.
+    The backend version controls the hallmark ``State`` database files on
+    disk: ``config.yml``, ``meta.yml``, ``data.tsv`` and the other TSVs that
+    ``config.yml``'s ``data`` entries name. It is itself a git worktree, and
+    takes the arguments of ``git.Repo``.
+
+    Raises:
+        DothmError: If the repository is bare, with no worktree.
     """
     def _storage_path(self, stem: Union[Path, str], suffix: str) -> Path:
         """
@@ -508,8 +512,9 @@ remote:
                 a folder selects every row beneath it.
 
         Raises:
-            ValueError: If nothing is given, or a path matches nothing staged
-                or committed.
+            ValueError: If nothing is given, a path matches nothing staged or
+                committed, or a row names a ``file:`` entry of ``config.yml``,
+                which is restored through ``config.yml`` instead.
         """
         if not files and not rows:
             raise ValueError("Usage: hm restore --staged <path> [<path> ...]")
@@ -617,6 +622,10 @@ remote:
 
         Args:
             state (State): State to save; its rows are normalized in place.
+
+        Raises:
+            ValueError: If a row's path is not a safe relative path, or
+                ``config.yml`` names an invalid TSV. Nothing is written then.
         """
         fmt = single_data_format(state.config)
         state.data = normalize_rows(state.data)

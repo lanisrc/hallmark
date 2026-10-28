@@ -33,6 +33,12 @@ def table_names(config) -> list[str]:
 
     Args:
         config (dict): Repository configuration.
+
+    Returns:
+        list[str]: TSV file names, ``data.tsv`` first.
+
+    Raises:
+        ValueError: If an entry's ``db`` is not a valid TSV file name.
     """
     names = [DEFAULT_DB]
     entries = as_list_of_dicts(config.get("data")) if isinstance(config, dict) else None

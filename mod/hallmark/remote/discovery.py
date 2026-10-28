@@ -176,8 +176,9 @@ def discover_remote_files(
         Unavailable sizes, modification times, and checksums remain None.
 
     Raises:
-        ValueError: If a filter or format is invalid.
-        CapabilityError: If the source provides no supported listing.
+        ValueError: If a filter, format or ``server_checksum`` is invalid.
+        CapabilityError: If the source provides no supported listing, or
+            cannot compute ``server_checksum`` checksums on the server.
         DownloadError: If discovery fails, paths are unsafe, or manifests conflict.
     """
     # Validate selectors before contacting the source, even for an empty index.

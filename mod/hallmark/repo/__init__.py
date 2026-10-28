@@ -401,7 +401,9 @@ class Repo:
         Returns:
             dict: Results with ``succeeded``, ``failed``, ``total_bytes``, and
             ``errors`` keys. Also stored in ``download_result``. Individual
-            transfer failures are recorded in ``failed`` and ``errors``.
+            transfer failures are recorded in ``failed`` and ``errors``. The
+            optional keys are described in
+            ``hallmark.remote.download.execute_download_plan``.
 
         Raises:
             TypeError: If ``plan`` is not a DownloadPlan.
@@ -629,20 +631,27 @@ class Repo:
         remote_backend_options: Optional[dict] = None,
     ) -> dict:
         """
-        Update repository configuration values.
+        Update repository configuration values, then save and stage them.
 
         Args:
             fmt (str, optional): Data format specification.
-            remote_name (str, optional): Name of the remote repository.
-            remote_url (str, optional): URL of the remote repository.
-            remote_auth (str, optional): Local SSH profile name. An empty string
-                removes the reference; None leaves it unchanged.
+            remote_name (str, optional): Name of the data remote. With one remote
+                it renames it, and sources that use the old name follow; with
+                several it selects one, or adds it when ``remote_url`` is given.
+            remote_url (str, optional): URL of the data remote.
+            remote_auth (str, optional): Local authentication profile name. An
+                empty string removes the reference; None leaves it unchanged.
             remote_backend (str, optional): Registered data backend name.
             remote_backend_options (dict, optional): Backend-specific configuration.
             encoding_updates (dict[str, str], optional): Updates to encoding rules.
 
         Returns:
             dict: Updated configuration dictionary.
+
+        Raises:
+            ValueError: If a value is invalid, or the new format does not suit the
+                catalogue. ``RemoteConfigurationError``, a ``ValueError``, reports
+                an invalid remote URL, profile name or backend.
         """
         set_config(
             self,
@@ -797,7 +806,8 @@ class Repo:
             encoding (boolean): Apply local filename encoding rules.
             filter (string | list[string], optional): Remote path selection globs.
             remote_fmt (string | list, optional): Remote filename format for
-                parameters, or a list of {"fmt", "db"} entries, one per --fmt.
+                parameters, or a list of ``{"fmt", "db"}`` entries, one per
+                ``--fmt``.
             auth (string, optional): Local profile for remote authentication.
             backend (string, optional): Registered data backend name.
             backend_options (dict, optional): Backend configuration.
@@ -817,7 +827,9 @@ class Repo:
                 gone from the server, True removes them from the catalogue and
                 False keeps them; see ``add_remote``.
         Returns:
-            ParaFrame: Local parameters without checksums, or remote catalog rows.
+            ParaFrame | pandas.DataFrame: For local files, a ParaFrame of their
+            parameters without checksums. For a remote URL, the DataFrame
+            ``add_remote`` returns, with its ``attrs``.
         '''
         if isinstance(fmt, str) and "://" in fmt:
             if encoding:
@@ -935,13 +947,20 @@ class Repo:
 
     def restore_staged(self, paths: list[str]) -> None:
         """
-        Restore the staged files for the specified paths.
+        Unstage paths, leaving the worktree and the files in ``.hm`` as they are.
+
+        A dataset path returns its catalogue rows to ``HEAD``, and a folder
+        selects every row beneath it. A path inside ``.hm``, such as
+        ``.hm/config.yml``, unstages that file; ``"."`` or ``.hm`` unstages
+        everything.
 
         Args:
-            paths (list[str]): List of file paths to restore from the staging area.
+            paths (list[str]): Paths relative to the working directory.
 
         Raises:
-            ValueError: If no paths are provided or specified path is outside worktree.
+            ValueError: If no paths are given, a path is outside the worktree or
+                inside ``.hm/objects``, or a path matches nothing staged or
+                committed.
         """
         if not paths:
             raise ValueError("Usage: hm restore --staged <path> [<path> ...]")

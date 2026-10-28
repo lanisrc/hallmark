@@ -1,4 +1,7 @@
-"""Read local SSH settings for profile names stored in repository configuration."""
+"""
+Read local SSH, HTTP and S3 settings for the profile names that repository
+configuration stores.
+"""
 
 from __future__ import annotations
 
@@ -140,7 +143,7 @@ def load_auth_file(required: bool = False):
 
     Version 1 files hold SSH profiles only. Version 2 profiles declare a
     ``type`` of ``ssh``, ``http`` or ``s3``; because they may run secret
-    commands, version 2 files must be writable only by their owner.
+    commands, a version 2 file must belong to you and be writable only by you.
 
     Args:
         required (bool): Fail if the file does not exist.
@@ -150,7 +153,9 @@ def load_auth_file(required: bool = False):
         required or configured.
 
     Raises:
-        RemoteConfigurationError: If the file is unreadable or malformed.
+        RemoteConfigurationError: If the file is unreadable or malformed, or,
+            on POSIX, a version 2 file belongs to another account or others
+            can write to it.
     """
     path, configured = auth_file_path()
     if not path.exists() and not configured and not required:
@@ -219,11 +224,13 @@ def resolve_ssh_settings(remote):
         remote (RemoteSpec): Source URL and optional local profile name.
 
     Returns:
-        SSHSettings: Validated settings, or defaults for an HTTP source.
+        SSHSettings: Validated settings, or defaults for a source that is not
+        SSH or SFTP.
 
     Raises:
         RemoteConfigurationError: If the auth file, settings, or host binding
-            is invalid, or a referenced profile is missing.
+            is invalid, or a referenced profile is missing or not an SSH
+            profile.
     """
     settings = SSHSettings()
     if remote.scheme not in {"ssh", "sftp"}:
@@ -403,11 +410,14 @@ def resolve_settings(remote, auth_type):
             backend; SSH settings are resolved separately.
 
     Returns:
-        HttpSettings | S3Settings | None: Settings, or None without a profile.
+        HttpSettings | S3Settings | None: Settings, or None without a profile
+        or for an ``ssh`` backend.
 
     Raises:
-        RemoteConfigurationError: If the profile is missing, of another type,
-            not bound to the remote, or unsupported by the backend.
+        RemoteConfigurationError: If the auth file is missing or invalid, or
+            the profile is missing, of another type, not bound to the remote's
+            host, bucket or endpoint, has invalid fields, would send
+            credentials over plain HTTP, or is unsupported by the backend.
     """
     if remote.auth is None or auth_type == "ssh":
         return None

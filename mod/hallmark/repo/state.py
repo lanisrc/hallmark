@@ -71,9 +71,10 @@ def is_remote_catalog(state) -> bool:
     A remote catalogue records its ``sources`` in ``config.yml``; its rows'
     ``sha1``, when known, describes downloaded content rather than a
     committed object. Catalogues written before sources existed are
-    recognized by a ``path`` column without ``sha1``, and are given their
-    sources before a ``sha1`` column is ever added. Column names alone never
-    decide: a local filename pattern may have a ``{source}`` field.
+    recognized by a TSV with a ``path`` column but no ``sha1`` column, and
+    are given their sources before a ``sha1`` column is ever added. A
+    ``source`` column never decides: a local filename pattern may have a
+    ``{source}`` field.
 
     Args:
         state (State): Repository state to classify.

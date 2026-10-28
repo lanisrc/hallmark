@@ -176,11 +176,12 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
     """
     Clone an existing Git catalog or published HTTP/SFTP catalog snapshot.
 
-    Source URLs with credentials and existing destinations are rejected
-    before source access. An incomplete destination created by this call is
-    removed on failure. Local-file catalogs without a data server are rejected
-    before destination creation. Dataset discovery
-    belongs to ``Repo.add(URL)``.
+    Source URLs holding a password, an HTTP(S) username or token, a query
+    string or a fragment, and existing destinations are rejected before
+    source access. An incomplete destination created by this call is removed
+    on failure. Local-file catalogs without a data server are rejected
+    before destination creation. Dataset discovery belongs to
+    ``Repo.add(URL)``.
 
     Args:
         cls: Repository class used to initialize or open the result.
@@ -194,8 +195,12 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
 
     Raises:
         DestinationExistsError: If the destination already exists.
-        CloneError: If a requested catalog is missing or invalid.
-        ValueError: If source options are invalid.
+        CloneError: If a requested catalog is missing or invalid, or it
+            tracks local files without a data server.
+        RemoteConfigurationError: If the source URL is unsupported or could
+            store a secret.
+        ValueError: If source options are invalid, or a published catalog's
+            ``config.yml`` names invalid remotes, sources or TSVs.
         DownloadError: If remote metadata cannot be read or validated.
     """
     # Git records the source URL in .hm/.git/config, so it must hold no secret.

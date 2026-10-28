@@ -282,7 +282,10 @@ class S3Backend(DataBackend):
             raise self._error(exc) from None
 
     def read_text(self, relative_path, limit):
-        """Read a small metadata object, such as a checksum file."""
+        """
+        Read a metadata object, such as a checksum manifest, as UTF-8 text of
+        at most ``limit`` bytes.
+        """
         from botocore.exceptions import BotoCoreError, ClientError
 
         self.prepare()
