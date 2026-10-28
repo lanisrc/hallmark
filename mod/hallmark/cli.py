@@ -14,6 +14,7 @@
 
 """Hallmark CLI entrypoint and command wiring."""
 
+import functools
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -195,30 +196,43 @@ class _HallmarkGroup(click.Group):
 
 @click.group(name="hm", cls=_HallmarkGroup)
 @click.version_option()
-@click.pass_context
-def hallmark(ctx):
+def hallmark():
     """Reproducibility is the hallmark of the scientific method.
 
     Hallmark is a lightweight package designed to version control and
     manage data products in a complex workflow.
     """
-    # if the invoked subcommand is one of the commands that does not require a repo
-    if ctx.invoked_subcommand in [None, "init", "clone"]:
-        # return early without attempting to open a repository
-        return
-    # attempt to open the hallmark repository in the current directory
-    with _translate_cli_errors(*_USER_ERRORS,
-                               prefix="Failed to open hallmark repository"):
-        # cwd is the current working directory
-        cwd = Path.cwd()
-        # start with the current working directory as the default repository path
-        repo_path = cwd
-        if cwd.name != ".hm":
-            # search for the nearest parent directory containing a ".hm" folder
-            repo_path = next((path for path in (cwd, *cwd.parents)
-                              if (path / ".hm").exists()), cwd)
-        # ctx is the Click context object that holds the repository instance in ctx.obj
-        ctx.obj = Repo(repo_path)
+    # Commands open the repository themselves, when they run, so --help and
+    # --version work outside a repository.
+
+
+def _find_repository_path(cwd):
+    """Return the nearest directory at or above ``cwd`` that holds ``.hm``."""
+    if cwd.name == ".hm":
+        return cwd
+    return next((path for path in (cwd, *cwd.parents)
+                 if (path / ".hm").exists()), cwd)
+
+
+def _current_repo(ctx):
+    """Open the repository for this invocation once and keep it on the context."""
+    if ctx.obj is None:
+        with _translate_cli_errors(*_USER_ERRORS,
+                                   prefix="Failed to open hallmark repository"):
+            ctx.obj = Repo(_find_repository_path(Path.cwd()))
+    return ctx.obj
+
+
+def _pass_repo(command):
+    """Pass the enclosing repository as the command's first argument.
+
+    The repository is opened when the command runs, after Click has handled
+    ``--help``, rather than in the group callback.
+    """
+    @functools.wraps(command)
+    def wrapper(*args, **kwargs):
+        return command(_current_repo(click.get_current_context()), *args, **kwargs)
+    return wrapper
 
 
 def _load_backend_options(path):
@@ -243,7 +257,7 @@ def init(path):
 
 
 @hallmark.command(short_help="Show information of the current directory.")
-@click.pass_obj
+@_pass_repo
 def info(repo):
     """Show hallmark repository information of the current directory.
 
@@ -255,7 +269,7 @@ def info(repo):
 
 
 @hallmark.command(short_help="Show worktree and staged hallmark state.")
-@click.pass_obj
+@_pass_repo
 def status(repo):
     """Show hallmark status for the current branch and worktree."""
     # attempt to get the status of the hallmark repository, handling any errors
@@ -402,7 +416,7 @@ def _ask_about_duplicates(duplicates):
               help="Remove catalogued files gone from the server, or keep "
                    "them. Without either, add asks.")
 @click.argument("inputs", nargs=-1, required=True)
-@click.pass_obj
+@_pass_repo
 def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_fmts,
         remote_name, source, prefix, server_checksum, skip_duplicates, prune):
     """Add files to the hallmark index.
@@ -538,7 +552,7 @@ def detect(ctx, remote, filters, add_fmts):
         configured remote.
     """
     # get the list of configured remotes from this repository's configuration
-    remotes = normalize_remotes(ctx.obj.state.config.get("remote"))
+    remotes = normalize_remotes(_current_repo(ctx).state.config.get("remote"))
     # determine if the remote argument is a name or a URL
     if "://" not in remote:
         # check that the remote name exists in the configured remotes
@@ -597,7 +611,7 @@ def detect(ctx, remote, filters, add_fmts):
 @hallmark.command(short_help="Unstage paths without changing files.")
 @click.option("--staged", is_flag=True)
 @click.argument("paths", nargs=-1)
-@click.pass_obj
+@_pass_repo
 def restore(repo, staged, paths):
     """
     Restore staged files to their state in the HEAD commit.
@@ -633,7 +647,7 @@ def restore(repo, staged, paths):
 @click.option("--remote-backend-options", type=click.Path(exists=True, dir_okay=False),
               help="YAML mapping of backend-specific options.")
 @click.option("--encoding", "encodings", multiple=True)
-@click.pass_obj
+@_pass_repo
 def set_config(repo, fmt, remote_name, remote_url, remote_auth, remote_backend,
                remote_backend_options, encodings):
     """Update the current branch config.yml."""
@@ -669,7 +683,7 @@ def set_config(repo, fmt, remote_name, remote_url, remote_auth, remote_backend,
 
 @hallmark.command(short_help="Commit changes to the repository.")
 @click.option("-m", "message", required=True)
-@click.pass_obj
+@_pass_repo
 def commit(repo, message):
     """Commit changes in the index to the hallmark repository.
 
@@ -686,7 +700,7 @@ def commit(repo, message):
 
 
 @hallmark.command(short_help="Show hallmark commit history.")
-@click.pass_obj
+@_pass_repo
 def log(repo):
     """Show commit history for the hallmark state repository."""
     # use the _translate_cli_errors context manager to handle specific exceptions
@@ -707,7 +721,7 @@ _IDENTITY_USAGE = (
 @hallmark.command(short_help="Set the commit author for this repository.")
 @click.argument("key", required=False)
 @click.argument("value", required=False)
-@click.pass_obj
+@_pass_repo
 def config(repo, key, value):
     """Save KEY as VALUE for this repository only.
 
@@ -738,7 +752,7 @@ def config(repo, key, value):
 
 @hallmark.command(short_help="List or create hallmark branches.")
 @click.argument("name", required=False)
-@click.pass_obj
+@_pass_repo
 def branch(repo, name):
     """List local hallmark branches, or create NAME at the current commit.
 
@@ -767,7 +781,7 @@ def branch(repo, name):
 
 @hallmark.command(short_help="Switch to another branch.")
 @click.argument("target_branch")
-@click.pass_obj
+@_pass_repo
 def checkout(repo, target_branch):
     """Switch to TARGET and rewrite tracked files from its state.
 
@@ -812,7 +826,7 @@ def checkout(repo, target_branch):
               show_default=True)
 @click.option("--dry-run", is_flag=True,
               help="Show the download plan using only local catalog metadata.")
-@click.pass_obj
+@_pass_repo
 def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
              sources, output, max_workers, dry_run):
     """

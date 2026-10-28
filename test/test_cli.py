@@ -1294,3 +1294,25 @@ def test_user_errors_are_reported_without_a_traceback(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert "No space left on device" in result.output
     assert isinstance(result.exception, SystemExit)
+
+
+@pytest.mark.parametrize("command", sorted(hallmark.commands))
+def test_subcommand_help_works_outside_a_repository(tmp_path, monkeypatch, command):
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(hallmark, [command, "--help"])
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith(f"Usage: hm {command}"), result.output
+
+
+def test_version_works_outside_a_repository(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(hallmark, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert "version" in result.output
+
+
+def test_commands_report_a_missing_repository_when_they_run(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(hallmark, ["status"])
+    assert result.exit_code == 1
+    assert result.output.startswith("Error: Failed to open hallmark repository:")
