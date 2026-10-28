@@ -12,13 +12,16 @@ from .manifest import file_versions_by_path, iter_manifest_entries
 def working_directory_for_repo(repo) -> Path:
     '''
     Determine the effective working directory for repository operations.
-    Raises RuntimeError if the repository has no worktree
 
     Args:
-        repo (repo): repository object
+        repo (Repo): Repository object.
+
     Returns:
-        path: The current working directory if it is inside the repository
+        Path: The current working directory if it is inside the repository
         worktree; otherwise, the worktree root.
+
+    Raises:
+        RuntimeError: If the repository has no worktree.
     '''
     if repo.worktree is None:
         raise RuntimeError("cannot inspect files in a bare repository " \

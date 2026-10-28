@@ -45,7 +45,8 @@ from ..transport.base import (
     DownloadError, RemoteConfigurationError, copy_backend_options,
     reject_url_secrets)
 
-__all__ = ["add_remote", "is_remote_catalog", "split_remote_pattern"]
+__all__ = ["Duplicates", "PathClash", "add_remote", "is_remote_catalog",
+           "split_remote_pattern"]
 
 # Columns Hallmark writes for every remote catalogue row; pattern fields with
 # these names are not stored.
