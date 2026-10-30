@@ -408,15 +408,17 @@ def set_config(
     Update the repository configuration.
 
     Existing configuration values are preserved unless explicitly
-    replaced.
+    replaced. Nothing is saved; ``Repo.set_config`` saves and stages.
 
     Args:
         repo: Repository object.
         fmt (str, optional): Filename format.
-        remote_name (str, optional): Remote repository name.
-        remote_url (str, optional): Remote repository URL.
-        remote_auth (str, optional): Local SSH profile name. An empty string
-            removes the reference; None leaves it unchanged.
+        remote_name (str, optional): Data remote name. With one remote it
+            renames it, and sources that use the old name follow; with several
+            it selects one, or adds it when ``remote_url`` is given.
+        remote_url (str, optional): Data remote URL.
+        remote_auth (str, optional): Local authentication profile name. An
+            empty string removes the reference; None leaves it unchanged.
         remote_backend (str, optional): Registered backend name. An empty string
             restores automatic selection; None leaves it unchanged.
         remote_backend_options (mapping, optional): Replace backend options.
@@ -428,7 +430,12 @@ def set_config(
         dict: The updated configuration.
 
     Raises:
-        ValueError: If the new filename format is incompatible with existing data.
+        ValueError: If the new filename format is incompatible with existing
+            data, uses a reserved column name, or is set on a remote catalogue
+            with sources; or if a remote value is invalid.
+            ``RemoteConfigurationError``, a ``ValueError``, reports a remote URL
+            with credentials, query or fragment, and an invalid profile name or
+            backend.
     """
     config = deepcopy(repo.state.config)
     # raise a ValueError if the provided config is not a dictionary
@@ -662,6 +669,11 @@ def literal_fields(fmt: str, target: str):
     Args:
         fmt (str): Format string with optional specs, used to validate.
         target (str): Name or relative path to parse.
+
+    Returns:
+        dict[str, str] | None: Each field's text as it appears in ``target``,
+        unconverted; None if ``target`` does not match. Matching is
+        case-sensitive.
     """
     if parse.parse(fmt, target, case_sensitive=True) is None:
         return None

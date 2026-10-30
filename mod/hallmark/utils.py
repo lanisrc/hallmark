@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Helpers shared across Hallmark: checksums, safe relative paths, YAML and
+atomic file writes, and the conversion of filename field values.
+"""
+
 from __future__ import annotations
 import errno
 import re
@@ -43,6 +48,10 @@ def infer_checksum_algorithm(digest) -> str | None:
 
     Args:
         digest: Hexadecimal digest.
+
+    Returns:
+        str | None: ``md5``, ``sha1``, ``sha256`` or ``sha512``; None when the
+        value is not a hexadecimal digest of one of those lengths.
     """
     text = str(digest).strip().lower()
     for algorithm, length in CHECKSUM_LENGTHS.items():
@@ -113,8 +122,8 @@ def is_valid_checksum(
     allow_unknown_algorithm: bool = False,
     ) -> bool:
     """
-    Used in remote.download by validate_checksum_spec, repo.objects by _validate_sha1,
-    and remote.discovery by _attach_published_checksums
+    Used wherever a digest is read: remote.add, remote.discovery,
+    remote.download, remote.plan, repo.objects and the SSH and WebDAV backends.
     Validate a checksum against its expected length for the given algorithm.
 
     Args:
@@ -252,11 +261,10 @@ def publish_no_overwrite(source: Path, target: Path) -> None:
 @contextmanager
 def use_working_directory(path):
     '''
-    Used in repo by add.
     Temporarily change the working directory within a context.
 
     Args:
-        Path: Directory to switch to while inside the context.
+        path (Path | str): Directory to switch to while inside the context.
     '''
     old = os.getcwd()
     os.chdir(path)
@@ -517,6 +525,9 @@ def names_repository_metadata(path) -> bool:
 
     Args:
         path: Relative path with ``/`` separators.
+
+    Returns:
+        bool: True if a segment names repository metadata.
     """
     return any(part.lower() in REPOSITORY_INTERNAL_NAMES
                for part in str(path).split("/"))
@@ -525,7 +536,8 @@ def names_repository_metadata(path) -> bool:
 def validate_relative_path(value, *, label: str = "path") -> Path:
     """
     Used in repo.config by row_to_path, transport.base by validate_remote_path,
-    and repo.changes by is_within_root.
+    repo.dothm by save_state, repo.manifest by build_file_table, repo by
+    restore_staged, and here by resolve_path_in_root and validate_path_name.
     Validate that a given path is a safe relative path.
 
     Args:
@@ -577,10 +589,11 @@ def validate_relative_path(value, *, label: str = "path") -> Path:
 
 def resolve_path_in_root(root, value, *, label: str = "path") -> Path:
     """
-    Used in remote.download by _check_existing_files, repo by
-    _resolve_worktree_path and add_worktree, and repo.changes by
-    find_changed_and_missing_files.
-    Resolve a relative path beneath root without following symlinks outside it.
+    Used in remote.download by _check_existing_files and _place_from_store,
+    remote.add by _exists_in, repo by _resolve_worktree_path and
+    _downloads_changed_in_place, repo.branches by add_worktree, and
+    repo.changes by find_changed_and_missing_files.
+    Resolve a relative path beneath root, refusing any symbolic link on the way.
 
     Args:
         root: The root directory under which the path must be contained.

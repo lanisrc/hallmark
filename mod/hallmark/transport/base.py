@@ -146,6 +146,9 @@ def decode_metadata(content: bytes, charset: str | None = None) -> str:
         content (bytes): Text as received.
         charset (str, optional): Charset the server declared.
 
+    Returns:
+        str: The decoded text.
+
     Raises:
         DownloadError: If the charset is unknown or the bytes do not decode.
     """
@@ -212,8 +215,9 @@ class RemoteEntry:
         path (str): Literal path relative to the dataset root.
         size (int, optional): File size in bytes.
         mtime (float, optional): Modification time reported by the server.
-        checksum_algorithm (str, optional): Published checksum algorithm.
-        checksum (str, optional): Published digest.
+        checksum_algorithm (str, optional): Algorithm of ``checksum``.
+        checksum (str, optional): Digest published next to the data or
+            reported by the server.
         checksum_source (str, optional): Where the digest came from:
             ``published`` for a checksum file next to the data, ``server``
             for a digest the server reports or computes.
@@ -259,14 +263,14 @@ class RemoteSpec:
     """
     A parsed data-remote URL and optional local authentication profile.
 
-    Use ``parse`` to validate a URL. SSH roots are decoded once; catalog
-    paths appended to the root are treated as literal filenames.
+    Use ``from_url`` to validate a URL. SSH, SFTP and S3 roots are decoded
+    once; catalog paths appended to the root are treated as literal filenames.
 
     Attributes:
         url (str): Original source URL after trimming surrounding whitespace.
-        scheme (str): HTTP, HTTPS, SSH, or SFTP scheme in lowercase.
-        host (str): Hostname or SSH configuration alias.
-        root (str): Dataset root, decoded for SSH and SFTP.
+        scheme (str): HTTP, HTTPS, SSH, SFTP, or S3 scheme in lowercase.
+        host (str): Hostname, SSH configuration alias, or S3 bucket name.
+        root (str): Dataset root, decoded for SSH, SFTP and S3.
         user (str, optional): Explicit SSH username.
         port (int, optional): Explicit port number.
         auth (str, optional): Local authentication profile name.
@@ -304,7 +308,8 @@ class RemoteSpec:
         Parse and validate a data-remote URL.
 
         Args:
-            url (str): HTTP(S) URL or SSH/SFTP URL with an absolute dataset root.
+            url (str): HTTP(S) URL, ``s3://BUCKET/PREFIX/`` URL, or SSH/SFTP URL
+                with an absolute dataset root.
             auth (str, optional): Local auth profile name.
             backend (str, optional): Registered backend name. Defaults to URL
                 detection. Parsing does not load plugins or resolve profiles.
@@ -314,7 +319,8 @@ class RemoteSpec:
             RemoteSpec: Validated source description.
 
         Raises:
-            RemoteConfigurationError: If the URL or profile reference is invalid.
+            RemoteConfigurationError: If the URL, profile reference, backend name
+                or backend options are invalid.
         """
         if not isinstance(url, str) or not url.strip():
             raise RemoteConfigurationError("Remote URL must be a non-empty string")
@@ -400,6 +406,13 @@ class RemoteSpec:
 
         Args:
             root (str): Literal relative folder, or ``""`` for this root.
+
+        Returns:
+            RemoteSpec: This spec when ``root`` is empty, otherwise a spec rooted
+            at the folder with the same profile, backend and options.
+
+        Raises:
+            RemoteConfigurationError: If ``root`` is not a valid relative path.
         """
         if not root:
             return self
@@ -427,6 +440,13 @@ class DataBackend:
 
     Args:
         context (OperationContext): Resources and settings for this operation.
+
+    Attributes:
+        context (OperationContext): Resources and settings for this operation.
+        auth_type (str, optional): Local profile type this backend reads:
+            ``http`` or ``s3`` from ``context.auth``, or ``ssh`` from
+            ``context.settings``. None, the default, means the backend accepts
+            no auth profile.
     """
 
     # The local profile type this backend reads from ``context.auth``:
@@ -477,6 +497,10 @@ class DataBackend:
             on_directory (callable, optional): Callback receiving directory paths
                 relative to the dataset root.
 
+        Yields:
+            RemoteEntry: One entry per file, with a literal path relative to the
+            dataset root.
+
         Raises:
             CapabilityError: If the transport does not provide directory listings.
         """
@@ -511,6 +535,9 @@ class DataBackend:
 
         Raises:
             CapabilityError: If the transport does not support metadata reads.
+            RemoteObjectMissing: If the server reports that the file is missing.
+            DownloadError: If the file exceeds ``limit`` bytes, does not decode,
+                or cannot be read.
         """
         raise CapabilityError("Reading metadata is unsupported by this transport")
 

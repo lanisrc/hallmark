@@ -34,6 +34,9 @@ Repository Worktrees
    :members:
    :show-inheritance:
 
+.. automodule:: hallmark.repo.branches
+   :members:
+
 State Management
 ----------------
 
@@ -61,6 +64,25 @@ Downloading
 .. automodule:: hallmark.remote.download
    :members:
    :show-inheritance:
+
+Catalog sources
+---------------
+
+.. automodule:: hallmark.remote
+   :members:
+
+.. automodule:: hallmark.remote.add
+   :members:
+   :exclude-members: path, source, content, clashes, can_prefix
+
+.. automodule:: hallmark.remote.sources
+   :members:
+
+.. automodule:: hallmark.remote.discovery
+   :members:
+
+.. automodule:: hallmark.remote.clone
+   :members:
 
 Utilities
 ---------
@@ -217,3 +239,15 @@ and checksum verification.
 See :doc:`private_data` for CLI and Python examples, and
 :ref:`private-transport-reference` for authentication settings and
 supported server configurations.
+
+Authentication profiles
+-----------------------
+
+Profiles live in the local authentication file, not in the repository.
+A remote stores only the profile name.
+
+.. automodule:: hallmark.transport.auth
+   :members:
+
+.. automodule:: hallmark.transport.secrets
+   :members:

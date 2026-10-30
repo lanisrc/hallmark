@@ -30,6 +30,9 @@ extensions = [
 # Automatically generate summary tables
 autosummary_generate = True
 
+# Render the Args that classes document on __init__
+napoleon_include_init_with_doc = True
+
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 

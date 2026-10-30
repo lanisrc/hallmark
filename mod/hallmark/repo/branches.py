@@ -1,3 +1,12 @@
+"""
+Create branches, check them out, and add worktrees for them.
+
+``Repo.create_branch``, ``Repo.checkout`` and ``Repo.add_worktree`` call
+these functions. A local catalogue restores the target's files from the
+object store; a remote catalogue switches only ``.hm`` and leaves dataset
+files alone.
+"""
+
 import shlex
 from pathlib import Path
 from shutil import rmtree
@@ -17,18 +26,34 @@ from .changes import ensure_clean_tracked_files, tracked_paths
 
 
 def current_branch(repo):
+    """Return the name of the checked-out branch, or None at a detached HEAD."""
     if repo.dothm.head.is_detached:
         return None
     return repo.dothm.active_branch.name
 
 
 def current_commit(repo):
+    """Return the short id of the HEAD commit, or None before the first commit."""
     if not repo.dothm.head.is_valid():
         return None
     return repo.dothm.head.commit.hexsha[:7]
 
 
 def create_branch(repo, name):
+    """
+    Create a branch at the current commit without switching to it.
+
+    Args:
+        repo (Repo): Repository to branch.
+        name (str): Name for the new branch.
+
+    Returns:
+        str: The normalized branch name.
+
+    Raises:
+        ValueError: If the repository has no commits, the name is invalid, or
+            a branch of that name already exists.
+    """
     name = repo._validate_branch_name(name)
 
     if not repo.dothm.head.is_valid():
@@ -43,6 +68,21 @@ def create_branch(repo, name):
 
 
 def resolve_checkout_target(repo, target):
+    """
+    Find what a checkout target names: a local branch, a remote branch or a
+    commit, tried in that order.
+
+    Args:
+        repo (Repo): Repository to look in.
+        target (str): Branch name, remote branch name or commit id.
+
+    Returns:
+        tuple[str, str]: ``("branch", name)``, ``("remote", "REMOTE/BRANCH")``
+        or ``("commit", full_sha1)``.
+
+    Raises:
+        CheckoutError: If ``target`` names none of these.
+    """
     if target in {head.name for head in repo.dothm.heads}:
         return "branch", target
 
@@ -85,6 +125,29 @@ def _refuse_pending_state_changes(repo):
 
 
 def checkout(repo, target_branch):
+    """
+    Switch to a branch, remote branch or commit, and update the worktree.
+
+    A remote branch gets a local tracking branch; a commit leaves ``HEAD``
+    detached. A remote catalogue switches only ``.hm`` and refuses while it
+    holds uncommitted changes. A local catalogue restores the target's files
+    from the object store, first fetching missing objects for a remote
+    branch, and rolls everything back if a step fails.
+
+    Args:
+        repo (Repo): Repository with a worktree.
+        target_branch (str): Branch name, remote branch name or commit id.
+
+    Returns:
+        bool: True when the checkout succeeds.
+
+    Raises:
+        ValueError: If the target name is invalid.
+        CheckoutError: If there is no worktree, the target is unknown, the
+            worktree or ``.hm`` has changes, files or objects are missing,
+            the switch is between local files and a remote catalogue, the
+            target has no single filename format, or a step fails.
+    """
     # Validate and normalize the target branch name
     target_branch = repo._validate_branch_name(target_branch)
 
@@ -356,6 +419,29 @@ def checkout(repo, target_branch):
 
 
 def add_worktree(repo, target_branch):
+    """
+    Add a worktree for a branch, in a folder named after it next to the
+    current worktree.
+
+    An existing branch is linked; a new name branches from ``HEAD``. Files
+    are restored from the object store. A folder that already holds a
+    Hallmark worktree is left as it is.
+
+    Args:
+        repo (Repo): Repository with a worktree.
+        target_branch (str): Branch to attach.
+
+    Returns:
+        bool: True when the worktree is ready.
+
+    Raises:
+        ValueError: If the name is invalid or names the current worktree.
+        DestinationExistsError: If the folder exists and is not a Hallmark
+            worktree.
+        FileNotFoundError: If objects the branch needs are missing.
+        RuntimeError: If the repository is bare, the branch has no single
+            filename format, or the worktree or its files cannot be created.
+    """
     # Validate and normalize the target branch name
     target_branch = repo._validate_branch_name(target_branch)
 

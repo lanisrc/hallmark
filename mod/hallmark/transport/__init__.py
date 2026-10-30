@@ -23,10 +23,21 @@ class OperationContext:
         output_root (Path | str, optional): Root used to validate download paths.
 
     Attributes:
+        remote (RemoteSpec): Data source and optional local profile name.
+        output_root (Path, optional): Root used to validate download paths.
         settings (SSHSettings): SSH settings; defaults for other schemes.
         auth (HttpSettings | S3Settings | None): Credentials from the remote's
             profile, for backends declaring that ``auth_type``. Secrets are
             read only when a request needs them.
+        transport (DataBackend): Backend selected by ``remote.backend``.
+        cancelled (threading.Event): Set once the operation is cancelled.
+        on_bytes (callable, optional): Called with each count of bytes
+            received. The downloader sets it; workers call it concurrently.
+        text_limit (int): Byte limit for small single documents, such as a
+            published ``config.yml``: 16 MiB.
+        large_text_limit (int): Byte limit for listings, checksum manifests
+            and catalogue tables: 1 GiB.
+        listing_timeout (int): Seconds allowed for each SFTP metadata request.
     """
 
     def __init__(
@@ -77,6 +88,15 @@ class OperationContext:
             path (str): Path beneath the remote URL.
             large (bool): The document lists files, as a listing, checksum
                 manifest or catalogue table does, and gets the larger limit.
+
+        Returns:
+            str: Decoded metadata text.
+
+        Raises:
+            RemoteObjectMissing: If the server reports that the document is missing.
+            DownloadError: If the document exceeds ``text_limit``, or
+                ``large_text_limit`` when ``large`` is set, or does not decode.
+            CapabilityError: If the backend cannot read metadata.
         """
         limit = self.large_text_limit if large else self.text_limit
         return self.transport.read_text(path, limit)

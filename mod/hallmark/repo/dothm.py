@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Keep a repository's state in ``.hm``, a git worktree of its own.
+
+``Dothm`` writes and stages ``config.yml``, ``meta.yml``, ``data.tsv`` and
+the other TSVs that ``config.yml`` names, and loads them back from the
+index or any commit.
+"""
 
 from __future__ import annotations
 
@@ -116,9 +123,13 @@ def data_tsv_text(data: pd.DataFrame) -> str:
 class Dothm(Repo):
     """Local ``.hm`` storage backend.
 
-    The backend version controls the hallmark ``State`` database files
-    (``config.yml``, ``meta.yml``, ``data.tsv``) on-disk.
-    It is itself a git worktree.
+    The backend version controls the hallmark ``State`` database files on
+    disk: ``config.yml``, ``meta.yml``, ``data.tsv`` and the other TSVs that
+    ``config.yml``'s ``data`` entries name. It is itself a git worktree, and
+    takes the arguments of ``git.Repo``.
+
+    Raises:
+        DothmError: If the repository is bare, with no worktree.
     """
     def _storage_path(self, stem: Union[Path, str], suffix: str) -> Path:
         """
@@ -140,6 +151,7 @@ class Dothm(Repo):
 
     @cached_property
     def path(self) -> Path:
+        """Directory of this ``.hm`` worktree."""
         return Path(self.working_tree_dir)
 
     def __init__(self, *args, **kwargs):
@@ -150,6 +162,23 @@ class Dothm(Repo):
 
     @classmethod
     def init(cls, *args, **kwargs) -> "Dothm":
+        """
+        Create a ``.hm`` git repository, with ``main`` as its first branch.
+
+        A repository without commits gets a ``README.md`` and an initial
+        commit, so it always has a ``HEAD``.
+
+        Args:
+            *args: Positional arguments of ``git.Repo.init``, such as the path.
+            **kwargs: Keyword arguments of ``git.Repo.init``;
+                ``initial_branch`` defaults to ``"main"``.
+
+        Returns:
+            Dothm: The initialized repository.
+
+        Raises:
+            DothmError: If ``bare`` is True.
+        """
         if kwargs.get('bare', False):
             raise DothmError('A ".hm" directory must not be a bare git ' \
             'repository')
@@ -175,6 +204,7 @@ class Dothm(Repo):
 
     @staticmethod
     def config_template() -> str:
+        """Return the commented ``config.yml`` that a new repository starts with."""
         return """# Edit this file only if your branch needs regex substitutions.
 # For simple names, you can just run: hm add "a{a}_i{i}.h5"
 data:
@@ -196,6 +226,26 @@ remote:
         to_path: Union[Path, str],
         display_path: Optional[Union[Path, str]] = None,
     ) -> "Dothm":
+        """
+        Clone a ``.hm`` git repository.
+
+        A clone of a repository that holds only its initial ``README.md``
+        commit gets a ``config.yml`` from ``config_template``, an empty
+        ``meta.yml`` and an empty ``data.tsv``, staged but not committed.
+
+        Args:
+            url (str): Git URL or path of the ``.hm`` repository to clone.
+            to_path (Path | str): Destination ``.hm`` directory.
+            display_path (Path | str, optional): Path shown in error messages
+                in place of ``to_path``.
+
+        Returns:
+            Dothm: The cloned repository.
+
+        Raises:
+            CloneError: If git cannot clone ``url``, or the clone lacks
+                ``config.yml``, ``meta.yml`` or ``data.tsv``.
+        """
         to_path = Path(to_path)
 
         try:
@@ -229,6 +279,22 @@ remote:
                 display_path=display_path) from exc
 
     def link_worktree(self, path: Union[Path, str], branch: Optional[str] = None):
+        """
+        Add a linked git worktree of this ``.hm`` repository.
+
+        Args:
+            path (Path | str): Directory of the new worktree; it is made
+                absolute.
+            branch (str, optional): Branch to check out there. Without one,
+                git uses a branch named after the directory, creating it from
+                ``HEAD`` if needed.
+
+        Returns:
+            Dothm: The new worktree.
+
+        Raises:
+            DothmError: If git cannot add the worktree.
+        """
         path = Path(path).resolve()  # use absolute path
         # try to add the specified path as a git worktree
         try:
@@ -243,6 +309,15 @@ remote:
         name: Optional[str] = None,
         email: Optional[str] = None,
     ) -> None:
+        """
+        Save the commit author name and email for this repository only.
+
+        Args:
+            name (str, optional): Value for ``user.name``; None leaves it
+                unchanged.
+            email (str, optional): Value for ``user.email``; None leaves it
+                unchanged.
+        """
         with self.config_writer() as writer:
             if name is not None:
                 writer.set_value("user", "name", name)
@@ -260,12 +335,50 @@ remote:
         return values[0], values[1]
 
     def identity(self) -> tuple[Optional[str], Optional[str]]:
+        """
+        Return the commit author name and email set for this repository.
+
+        Only this repository's own git config is read.
+
+        Returns:
+            tuple[str | None, str | None]: The name and email, each None when
+            it is unset or blank.
+        """
         return self._read_identity(self.config_reader("repository"))
 
     def effective_identity(self) -> tuple[Optional[str], Optional[str]]:
+        """
+        Return the commit author name and email git will commit with.
+
+        Values set for this repository take precedence over the user's global
+        and system git configuration.
+
+        Returns:
+            tuple[str | None, str | None]: The name and email, each None when
+            it is not configured at any level, or is blank.
+        """
         return self._read_identity(self.config_reader())
 
     def load_state(self, revision=None, *, staged=False) -> State:
+        """
+        Load the state from the index, or from a commit.
+
+        With no ``revision``, the TSVs come from the index, and ``config.yml``
+        and ``meta.yml`` from the files in ``.hm`` unless ``staged`` is True.
+        Older commits that keep per-row ``versions/`` records are read from
+        those records. A TSV that ``config.yml`` names but that is missing
+        loads as an empty table, and a ``config.yml`` with an invalid ``db``
+        name loads with no other TSVs.
+
+        Args:
+            revision (str, optional): Commit to read, such as ``"HEAD"`` or a
+                branch name; None reads the index.
+            staged (bool): With no ``revision``, read ``config.yml`` and
+                ``meta.yml`` from the index as well.
+
+        Returns:
+            State: The loaded state, with the other TSVs in ``tables``.
+        """
         if revision is None:
             blobs = {
                 blob.path: blob
@@ -399,8 +512,9 @@ remote:
                 a folder selects every row beneath it.
 
         Raises:
-            ValueError: If nothing is given, or a path matches nothing staged
-                or committed.
+            ValueError: If nothing is given, a path matches nothing staged or
+                committed, or a row names a ``file:`` entry of ``config.yml``,
+                which is restored through ``config.yml`` instead.
         """
         if not files and not rows:
             raise ValueError("Usage: hm restore --staged <path> [<path> ...]")
@@ -508,6 +622,10 @@ remote:
 
         Args:
             state (State): State to save; its rows are normalized in place.
+
+        Raises:
+            ValueError: If a row's path is not a safe relative path, or
+                ``config.yml`` names an invalid TSV. Nothing is written then.
         """
         fmt = single_data_format(state.config)
         state.data = normalize_rows(state.data)
@@ -563,6 +681,7 @@ remote:
         """
         Dump a dictionary to a YAML file, preserving key order and using
         literal block style for multi-line strings.
+
         Args:
             data (dict): The dictionary to be dumped to YAML.
             stem (Union[Path, str]): The stem of the file name (without extension)

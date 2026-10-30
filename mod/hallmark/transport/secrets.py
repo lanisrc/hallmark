@@ -64,10 +64,13 @@ class SecretRef:
         Validate a secret reference from an auth profile.
 
         Args:
-            value: ``{"env": NAME}``, ``{"keyring": {"service": S,
+            value (dict): ``{"env": NAME}``, ``{"keyring": {"service": S,
                 "username": U}}`` or ``{"command": [PROGRAM, ARG, ...]}``.
             profile (str): Profile name, for messages.
             field (str): Profile field, for messages.
+
+        Returns:
+            SecretRef: The validated reference.
 
         Raises:
             RemoteConfigurationError: If the value is a literal secret or an
@@ -95,6 +98,10 @@ class SecretRef:
     def resolve(self) -> Secret:
         """
         Read the secret.
+
+        Returns:
+            Secret: The value, hidden from ``repr`` and ``str``; call ``reveal``
+            to use it.
 
         Raises:
             RemoteConfigurationError: If the secret is unavailable.

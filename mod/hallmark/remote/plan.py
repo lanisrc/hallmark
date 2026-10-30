@@ -86,13 +86,15 @@ class DownloadPlan:
     An immutable selection of files, source, and destination for a download.
 
     Creating a plan does not approve a transfer. Sizes come from the catalog;
-    a duration estimate requires every file size and a supplied transfer rate.
+    a duration estimate requires the size of every file to transfer and a
+    supplied transfer rate.
 
     Attributes:
-        items (tuple[DownloadItem]): Selected files and their metadata.
-        remote_url (str, optional): Data source URL; may be None for an empty plan.
+        items (tuple[DownloadItem]): Files to transfer and their metadata.
+        remote_url (str, optional): Data source URL; None when no remote is
+            configured or the items come from several remotes.
         output_path (Path): Absolute destination directory.
-        remote_auth (str, optional): Local SSH profile name.
+        remote_auth (str, optional): Local authentication profile name.
         remote_name (str, optional): Name of the selected data remote.
         estimated_bytes_per_second (float, optional): Positive rate supplied
             by the caller for duration estimates.
@@ -163,7 +165,7 @@ class DownloadPlan:
 
     @property
     def file_count(self) -> int:
-        """Number of files the plan places, including those from the cache."""
+        """Number of files the plan places, including those from the object store."""
         return len(self.items) + len(self.stored_items)
 
     @property
@@ -184,7 +186,7 @@ class DownloadPlan:
 
     @property
     def unknown_size_count(self) -> int:
-        """Number of files without a recorded size."""
+        """Number of files to transfer without a recorded size."""
         return sum(item.size_bytes is None for item in self.items)
 
     @property
@@ -205,7 +207,10 @@ class DownloadPlan:
 
         Returns:
             str: File count, size and duration estimates, source, and destination.
-            URL credentials, query parameters, and fragments are omitted.
+            A plan using several remotes lists each with its file count. Further
+            lines count files placed from ``.hm/objects`` and outdated files to be
+            replaced, and name files already downloaded. URL credentials, query
+            parameters, and fragments are omitted.
         """
         size = f"{self.known_bytes:,} bytes"
         if self.unknown_size_count:

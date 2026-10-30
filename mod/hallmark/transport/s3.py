@@ -282,7 +282,10 @@ class S3Backend(DataBackend):
             raise self._error(exc) from None
 
     def read_text(self, relative_path, limit):
-        """Read a small metadata object, such as a checksum file."""
+        """
+        Read a metadata object, such as a checksum manifest, as UTF-8 text of
+        at most ``limit`` bytes.
+        """
         from botocore.exceptions import BotoCoreError, ClientError
 
         self.prepare()
@@ -304,6 +307,7 @@ class S3Backend(DataBackend):
         return decode_metadata(content)
 
     def close(self):
+        """Close the boto3 client; a later ``prepare`` creates a new one."""
         client, self._client = self._client, None
         if client is not None and hasattr(client, "close"):
             client.close()

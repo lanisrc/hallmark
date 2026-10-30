@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Open, change and commit a Hallmark repository through ``Repo``.
+
+A repository is a worktree of dataset files and its ``.hm`` folder, which
+keeps the catalogue in git (see ``hallmark.repo.dothm``) and file contents
+in an object store (see ``hallmark.repo.objects``).
+"""
+
 from __future__ import annotations
 import os
 
@@ -73,12 +81,13 @@ class Repo:
         Resolve repository and worktree paths.
 
         Args:
-            path (Path | str): Path to either a worktree or a
-            ``.hm`` repository.
+            path (Path | str): Path to either a worktree or a ``.hm``
+                repository.
 
         Returns:
             tuple[Path, Path | None]: A ``(dothm_path, worktree_path)`` tuple.
-            If ``path`` refers to a ``.hm`` directory, ``worktree_path`` is ``None``.
+            If ``path`` names a ``.hm`` directory, or ends in ``.hm``,
+            ``worktree_path`` is ``None``.
         '''
         path = Path(path).resolve()
         if path.name == ".hm" or path.suffix == ".hm":
@@ -90,9 +99,8 @@ class Repo:
         Open an existing hallmark repository.
 
         Args:
-            path: path to a worktree or '.hm repository'/
-        Returns:
-            none.
+            path (Path | str): Path to a worktree, or to the ``.hm`` folder of
+                a repository without one.
         '''
         dothm_path, worktree_path = self.resolve_repo_paths(path)
         self.dothm = Dothm(dothm_path)
@@ -393,7 +401,9 @@ class Repo:
         Returns:
             dict: Results with ``succeeded``, ``failed``, ``total_bytes``, and
             ``errors`` keys. Also stored in ``download_result``. Individual
-            transfer failures are recorded in ``failed`` and ``errors``.
+            transfer failures are recorded in ``failed`` and ``errors``. The
+            optional keys are described in
+            ``hallmark.remote.download.execute_download_plan``.
 
         Raises:
             TypeError: If ``plan`` is not a DownloadPlan.
@@ -412,9 +422,11 @@ class Repo:
     def checksum(path: Path, chunk_size: int = FILE_IO_CHUNK_SIZE) -> str:
         """
         Compute a file's SHA-1 checksum.
+
         Args:
             path (Path): Path to the file.
             chunk_size (int): Size of chunks to read at a time.
+
         Returns:
             str: SHA-1 checksum of the file.
         """
@@ -425,8 +437,10 @@ class Repo:
         """
         Hash multiple files concurrently in a thread pool this method owns, hashing
         each unique path only once even if it appears more than once in paths.
+
         Args:
             paths (list[Path]): List of file paths to hash.
+
         Returns:
             dict[Path, str]: Dictionary mapping each file path to its SHA1 checksum.
         """
@@ -445,7 +459,33 @@ class Repo:
 
     def add_paths(self, paths: List[Union[Path, str]], encoding: bool = False
                   ) -> ParaFrame:
+        '''
+        Stage files and folders of the worktree that match the filename format.
 
+        Each file's name is read with the branch's filename format and its
+        SHA-1 is computed. Files in a folder that do not match are listed as
+        unmatched; a named file that does not match is an error. Adding
+        ``"."`` replaces the catalogue's rows, while other paths update them.
+        The format is saved to ``config.yml`` and the state is staged.
+
+        Args:
+            paths (list[Path | str]): Files or folders, relative to the
+                working directory, or ``"."`` for the whole worktree.
+            encoding (bool): Apply the format's regex substitutions to each
+                name before reading it.
+
+        Returns:
+            ParaFrame: The matched files' fields and paths, without checksums;
+            ``attrs["unmatched"]`` lists the paths that did not match.
+
+        Raises:
+            ValueError: If the catalogue is remote, a path is a URL or a
+                pattern, no filename format is set, or a path is outside the
+                worktree, not a regular file, or a named file that does not
+                match.
+            FileNotFoundError: If a path does not exist.
+            RuntimeError: If the repository has no worktree.
+        '''
         # if the repository is a remote catalog, adding local paths is not allowed
         if is_remote_catalog(self.state):
             raise ValueError("Use a remote URL to update this catalog")
@@ -591,20 +631,27 @@ class Repo:
         remote_backend_options: Optional[dict] = None,
     ) -> dict:
         """
-        Update repository configuration values.
+        Update repository configuration values, then save and stage them.
 
         Args:
             fmt (str, optional): Data format specification.
-            remote_name (str, optional): Name of the remote repository.
-            remote_url (str, optional): URL of the remote repository.
-            remote_auth (str, optional): Local SSH profile name. An empty string
-                removes the reference; None leaves it unchanged.
+            remote_name (str, optional): Name of the data remote. With one remote
+                it renames it, and sources that use the old name follow; with
+                several it selects one, or adds it when ``remote_url`` is given.
+            remote_url (str, optional): URL of the data remote.
+            remote_auth (str, optional): Local authentication profile name. An
+                empty string removes the reference; None leaves it unchanged.
             remote_backend (str, optional): Registered data backend name.
             remote_backend_options (dict, optional): Backend-specific configuration.
             encoding_updates (dict[str, str], optional): Updates to encoding rules.
 
         Returns:
             dict: Updated configuration dictionary.
+
+        Raises:
+            ValueError: If a value is invalid, or the new format does not suit the
+                catalogue. ``RemoteConfigurationError``, a ``ValueError``, reports
+                an invalid remote URL, profile name or backend.
         """
         set_config(
             self,
@@ -624,15 +671,23 @@ class Repo:
         Return repository status information. Includes staged changes,
         worktree modifications, deletions, and untracked files.
 
-        Args:
-            self: Repository instance.
-
         Returns:
-            dict[str, object]: Status summary including:
-            - branch (str)
-            - staged changes (dict)
-            - worktree changes (dict)
-            - untracked files (list[str])
+            dict[str, object]: Status summary with these keys:
+
+            - ``branch`` (str | None): Current branch; None at a detached
+              ``HEAD``.
+            - ``commit`` (str | None): Short id of ``HEAD``; None before the
+              first commit.
+            - ``staged`` (dict): ``state`` lists changed files in ``.hm``;
+              ``added``, ``modified`` and ``deleted`` list catalogue paths
+              that differ from ``HEAD``.
+            - ``worktree`` (dict): ``modified`` and ``deleted`` list tracked
+              files that differ from the staged catalogue, plus changed
+              ``.hm/`` files. For a remote catalogue, ``modified`` lists
+              downloads edited in place.
+            - ``untracked`` (list[str]): Worktree files the catalogue does not
+              list.
+            - ``remote_catalog`` (bool): Whether the catalogue is remote.
         """
         staged_state = self.dothm.load_state(staged=True)
         head_state = load_head_state(self)
@@ -751,7 +806,8 @@ class Repo:
             encoding (boolean): Apply local filename encoding rules.
             filter (string | list[string], optional): Remote path selection globs.
             remote_fmt (string | list, optional): Remote filename format for
-                parameters, or a list of {"fmt", "db"} entries, one per --fmt.
+                parameters, or a list of ``{"fmt", "db"}`` entries, one per
+                ``--fmt``.
             auth (string, optional): Local profile for remote authentication.
             backend (string, optional): Registered data backend name.
             backend_options (dict, optional): Backend configuration.
@@ -771,7 +827,9 @@ class Repo:
                 gone from the server, True removes them from the catalogue and
                 False keeps them; see ``add_remote``.
         Returns:
-            ParaFrame: Local parameters without checksums, or remote catalog rows.
+            ParaFrame | pandas.DataFrame: For local files, a ParaFrame of their
+            parameters without checksums. For a remote URL, the DataFrame
+            ``add_remote`` returns, with its ``attrs``.
         '''
         if isinstance(fmt, str) and "://" in fmt:
             if encoding:
@@ -889,13 +947,20 @@ class Repo:
 
     def restore_staged(self, paths: list[str]) -> None:
         """
-        Restore the staged files for the specified paths.
+        Unstage paths, leaving the worktree and the files in ``.hm`` as they are.
+
+        A dataset path returns its catalogue rows to ``HEAD``, and a folder
+        selects every row beneath it. A path inside ``.hm``, such as
+        ``.hm/config.yml``, unstages that file; ``"."`` or ``.hm`` unstages
+        everything.
 
         Args:
-            paths (list[str]): List of file paths to restore from the staging area.
+            paths (list[str]): Paths relative to the working directory.
 
         Raises:
-            ValueError: If no paths are provided or specified path is outside worktree.
+            ValueError: If no paths are given, a path is outside the worktree or
+                inside ``.hm/objects``, or a path matches nothing staged or
+                committed.
         """
         if not paths:
             raise ValueError("Usage: hm restore --staged <path> [<path> ...]")

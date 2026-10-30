@@ -971,23 +971,31 @@ def plan_download(
 
     No network requests are made. With no explicit paths or TSVs, select
     the complete catalog before applying filters. Missing sizes remain unknown.
-    Folder paths select catalogued descendants. Existing checksum matches are
-    skipped, and unknown paths or conflicting existing files raise an error.
+    Folder paths select catalogued descendants. Existing files that match
+    their catalogue row are skipped, and files whose content is already in
+    ``.hm/objects`` are placed from there without a transfer. An earlier
+    download that no longer matches its row is replaced when its bytes are
+    kept in ``.hm/objects``. Unknown paths and other existing files raise an
+    error.
 
     Args:
         repo: The hallmark repository object.
         output_path (Path | str, optional): Destination directory. Defaults
             to the worktree; required for a bare repository.
-        file_paths (sequence[str], optional): Remote-relative file paths.
-        tsv_names (sequence[str], optional): Catalog TSVs to select.
+        file_paths (str | sequence[str], optional): Catalogue paths, relative
+            to the destination. A folder selects its catalogued files.
+        tsv_names (str | sequence[str], optional): Catalog TSVs to select.
         all_files (bool): Select all configured files. Cannot be combined
             with explicit paths or TSVs. Defaults to False.
         filter (str | list[str], optional): Relative path glob or globs.
         fmt (str, optional): Filename format that selected paths must match.
-        remote_name (str, optional): Configured data remote to use.
+        remote_name (str, optional): Configured data remote that serves every
+            file, as for a mirror. By default each file uses its catalogue
+            source's remote, and files outside any source use the default
+            remote.
         estimated_bytes_per_second (float, optional): Positive rate used
             to estimate duration when every file size is known.
-        sources (sequence[str], optional): Keep only files of these
+        sources (str | sequence[str], optional): Keep only files of these
             catalogue sources.
 
     Returns:
@@ -1056,6 +1064,11 @@ def execute_download_plan(
     """
     Execute a download plan using its recorded source and destination.
 
+    Each file is fetched into ``.hm/objects`` and verified before it is
+    linked or copied to its destination. Files the plan found in the store are
+    placed without a transfer. The SHA-1 of each file now in place is then
+    staged in remote catalogue rows that lack one; nothing is committed.
+
     Args:
         repo: Repository associated with the plan. Current configuration
             is not used to change the planned transfer.
@@ -1067,6 +1080,14 @@ def execute_download_plan(
     Returns:
         dict: Results with ``succeeded``, ``failed``, ``total_bytes``, and
         ``errors`` keys. Individual transfer failures are recorded here.
+        When they apply, ``skipped``, ``from_store``, ``copied``,
+        ``replaced`` and ``unchanged`` list the paths already in place,
+        placed from ``.hm/objects``, copied rather than hard-linked, replacing
+        an outdated file, or fetched to compare and found unchanged.
+        ``staged`` counts the SHA-1s staged in the catalogue, and
+        ``catalog_upgraded`` is True when an older catalogue was given its
+        sources first. ``staging_note`` or ``staging_error`` says why SHA-1s
+        were not recorded.
 
     Raises:
         TypeError: If ``plan`` is not a DownloadPlan.

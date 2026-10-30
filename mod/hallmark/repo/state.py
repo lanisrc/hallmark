@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Hold a repository's catalogue in memory.
+
+``State`` keeps ``config.yml``, ``meta.yml``, ``data.tsv`` and the other
+TSVs that ``config.yml`` names. The helpers here give catalogue values the
+text form they are saved in, and tell remote catalogues from local ones.
+"""
 
 from dataclasses import dataclass, field
 
@@ -64,9 +71,10 @@ def is_remote_catalog(state) -> bool:
     A remote catalogue records its ``sources`` in ``config.yml``; its rows'
     ``sha1``, when known, describes downloaded content rather than a
     committed object. Catalogues written before sources existed are
-    recognized by a ``path`` column without ``sha1``, and are given their
-    sources before a ``sha1`` column is ever added. Column names alone never
-    decide: a local filename pattern may have a ``{source}`` field.
+    recognized by a TSV with a ``path`` column but no ``sha1`` column, and
+    are given their sources before a ``sha1`` column is ever added. A
+    ``source`` column never decides: a local filename pattern may have a
+    ``{source}`` field.
 
     Args:
         state (State): Repository state to classify.
@@ -119,12 +127,13 @@ class State:
     In-memory Hallmark state database.
 
     Attributes:
-        config: Repository configuration values.
-        meta: Repository metadata.
-        data: Tabular file index containing indexed object checksums
-        (``sha1``) and associated metadata.
-        tables: The other TSVs that ``config.yml``'s ``data`` entries name,
-        by file name, such as one per filename format of a remote catalogue.
+        config (dict): Repository configuration values, from ``config.yml``.
+        meta (dict): Repository metadata, from ``meta.yml``.
+        data (pd.DataFrame): Rows of ``data.tsv``: indexed object checksums
+            (``sha1``) and associated metadata, or a remote catalogue's files.
+        tables (dict): The other TSVs that ``config.yml``'s ``data`` entries
+            name, by file name, such as one per filename format of a remote
+            catalogue.
     """
 
     config:    dict         = field(default_factory=dict)
