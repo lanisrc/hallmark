@@ -1180,7 +1180,7 @@ def test_catalogued_checksum_is_verified_before_a_known_sha1(
                         Path(destination).write_bytes(b"right"))
     result = repo.download(plan, approved=True)
     assert (result["succeeded"], result["failed"]) == (1, 1)
-    assert "b.fits (sha1)" in result["errors"][0]
+    assert result["errors"] == ["b.fits: Checksum mismatch (sha1)"]
     assert (repo.worktree / "a.fits").read_bytes() == b"right"
 
 
@@ -1348,7 +1348,7 @@ def test_a_plain_checksums_file_is_verified_by_digest_length(
     assert rows.loc["M87_001.fits", "checksum_source"] == "published"
     result = repo.download(repo.plan_download(all_files=True), approved=True)
     assert result["succeeded"] == 1
-    assert result["errors"] == ["Checksum mismatch for M87_002.fits (sha256)"]
+    assert result["errors"] == ["M87_002.fits: Checksum mismatch (sha256)"]
 
 
 def test_an_unnamed_remote_is_origin_everywhere(tmp_path, remote_listing):

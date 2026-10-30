@@ -31,7 +31,8 @@ import pandas as pd
 from .utils import (
     find_encoding_for_format,
     apply_regex_replacement,
-    try_numeric_conversion)
+    try_numeric_conversion,
+    validate_format_fields)
 
 
 class ParaFrame(pd.DataFrame):
@@ -260,10 +261,15 @@ class ParaFrame(pd.DataFrame):
 
                 Otherwise returns
                 ``(yaml_encodings, fmt_g, globbed_files)``.
+
+        Raises:
+            ValueError: If a field of ``fmt`` has no name or is not a plain
+                name with an optional spec.
         """
         # Determine the base path for searching files.
         # If not provided, use the current working directory.
         base_path = (Path(base_path) if base_path is not None else Path.cwd())
+        validate_format_fields(fmt, positional=bool(args))
 
         pmax = len(fmt) // 3  # to specify a parameter, we need at least
         # three characters '{p}'; the maximum number
@@ -284,12 +290,16 @@ class ParaFrame(pd.DataFrame):
             try:
                 pattern = pattern.format(*args, **kwargs)
                 break
+            except IndexError as exc:
+                raise ValueError(
+                    f"{fmt!r} has more unnamed fields than the {len(args)} "
+                    "positional values given") from exc
             # if a KeyError occurs, it means a required keyword argument is missing
             except KeyError as exc:
                 # get the missing key from the exception
                 key = str(exc.args[0])
-                # create a regex pattern to match the missing field in the format string
-                field_pattern = (r"\{" + re.escape(key) + r":?.*?\}")
+                # match exactly this field, with any spec, so {a} leaves {ab} alone
+                field_pattern = (r"\{" + re.escape(key) + r"(?:[.[!:][^{}]*)?\}")
                 replacement = f"{{{key}}}"
 
                 # pattern is the glob pattern with missing field replaced by a wildcard
@@ -360,6 +370,8 @@ class ParaFrame(pd.DataFrame):
         Returns:
             ParaFrame: A ``ParaFrame`` whose rows correspond to matched files.
             Parsed parameters are stored as columns together with a ``path`` column.
+            ``attrs["unmatched"]`` lists the relative paths that the glob
+            found but that do not fit ``fmt``, including its type specs.
         """
         base_path = Path(base_path) if base_path is not None else Path.cwd()
 
@@ -372,8 +384,13 @@ class ParaFrame(pd.DataFrame):
             **kwargs,
         )
 
-        parser = parse.compile(fmt_g)
+        # As in hm add ., a name must fit the typed format, letter case included.
+        # The spec names that format, so encodings is read only once.
+        fmt_enc = yaml_encodings["fmt"] if encoding else fmt
+        checker = parse.compile(fmt_enc.lstrip("/"), case_sensitive=True)
+        parser = parse.compile(fmt_g, case_sensitive=True)
         frame = []
+        unmatched = []
 
         # Writing the ParaFrame
         for f in globbed_files:
@@ -383,10 +400,12 @@ class ParaFrame(pd.DataFrame):
             else:
                 f_new = f_short
 
-            r = parser.parse(f_new)
+            r = parser.parse(f_new) if checker.parse(f_new) is not None else None
 
             if r is None:
-                print(f'Failed to parse "{f}"')
+                unmatched.append(f_short)
+                if debug:
+                    print(f'Failed to parse "{f}"')
             else:
                 frame.append({"path": f_short, **r.named})
         # attempt to convert each parameter column to numeric
@@ -396,4 +415,5 @@ class ParaFrame(pd.DataFrame):
             # if the column is not "path", attempt to convert it to numeric
             if column != "path":
                 result[column] = try_numeric_conversion(result[column])
+        result.attrs["unmatched"] = unmatched
         return result

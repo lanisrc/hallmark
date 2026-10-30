@@ -64,7 +64,8 @@ def _assert_status(repo, *, state=(), added=(), modified=(), deleted=(),
         "commit": (repo.dothm.head.commit.hexsha[:7]
                    if repo.dothm.head.is_valid() else None),
         "staged": staged, "worktree": worktree,
-        "untracked": sorted(untracked), "remote_catalog": False,
+        "untracked": sorted(untracked), "outdated": [], "outdated_stored": 0,
+        "remote_catalog": False,
     }
     lines = [f"On branch {branch}"]
     for title, entries in (
@@ -370,6 +371,22 @@ def test_new_branch_can_stage_removals_then_use_its_own_pattern(local_repo):
     assert all((repo.worktree / path).is_file() for path in removed)
     assert not (repo.worktree / "b0_i90.h5").exists()
     _assert_status(repo)
+
+
+def test_local_checkout_reports_no_outdated_downloads(local_repo):
+    repo = local_repo
+    _seed(repo)
+    _invoke("branch", "experiment")
+    _invoke("checkout", "experiment")
+    (repo.worktree / "a0_i0.h5").write_text("another version, longer\n")
+    _invoke("add", ".")
+    _invoke("commit", "-m", "Another version")
+    # A local checkout rewrites the file, so nothing is left outdated.
+    assert _invoke("checkout", "main") == 'Switched to branch "main".\n'
+    assert (repo.worktree / "a0_i0.h5").read_text() == "contents of a0_i0.h5\n"
+    _assert_status(repo)
+    (repo.worktree / "a0_i0.h5").write_text("edited\n")
+    _assert_status(repo, worktree_modified=["a0_i0.h5"])
 
 
 def test_compatible_pattern_change_preserves_files_and_reparses_fields(local_repo):
@@ -694,3 +711,32 @@ def test_local_patterns_cannot_reuse_catalogue_columns(tmp_path, field):
     with pytest.raises(ValueError, match="Rename the pattern field"):
         repo.set_config(fmt=f"x_{{{field}}}.h5")
     assert repo.state.data.empty
+
+
+def test_dot_after_pattern_with_a_field_name_prefix_keeps_the_state(local_repo):
+    repo = local_repo
+    paths = ["run1/run1_a.h5", "run2/run2_b.h5"]
+    _write(repo.worktree, *paths)
+
+    added = repo.add("run{run}/run{run}_{run_id}.h5")
+    before = Repo(repo.worktree).state.data.copy(deep=True)
+    repo.add_paths(["."])
+
+    assert added["path"].tolist() == paths
+    pd.testing.assert_frame_equal(Repo(repo.worktree).state.data, before)
+    _assert_status(repo, state=INITIAL_STATE, added=paths)
+
+
+def test_pattern_skips_files_whose_values_do_not_fit_its_types(local_repo):
+    repo = local_repo
+    _write(repo.worktree, "a_1.txt", "a_x.txt", "s1/a_2.txt", "s1/a_y.txt")
+
+    added = repo.add("a_{a:d}.txt")
+    before = Repo(repo.worktree).state.data.copy(deep=True)
+    repo.add_paths(["."])
+
+    assert added["path"].tolist() == ["a_1.txt", "s1/a_2.txt"]
+    assert added.attrs["unmatched"] == ["a_x.txt", "s1/a_y.txt"]
+    pd.testing.assert_frame_equal(Repo(repo.worktree).state.data, before)
+    _assert_status(repo, state=INITIAL_STATE, added=["a_1.txt", "s1/a_2.txt"],
+                   untracked=["a_x.txt", "s1/a_y.txt"])

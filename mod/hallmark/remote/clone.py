@@ -24,8 +24,8 @@ from ..repo.config import (
 )
 from ..transport import OperationContext, RemoteSpec
 from ..transport.base import (
-    RemoteObjectMissing, reject_url_credentials, reject_url_secrets,
-    validate_remote_path)
+    DownloadError, RemoteConfigurationError, RemoteObjectMissing,
+    reject_url_credentials, reject_url_secrets, validate_remote_path)
 from ..repo.worktree import Worktree
 from .sources import normalize_sources
 
@@ -91,6 +91,30 @@ def _validate_snapshot(files, config):
             _resolve_catalog_path(row, formats)
 
 
+def _read_catalog_file(context, name, *, large=False, optional=False):
+    """
+    Read one file of a published catalog.
+
+    Returns:
+        str | None: The file's text; None if an optional file is absent.
+
+    Raises:
+        CloneError: If the file is missing or cannot be read.
+    """
+    location = f"{context.remote.display}{context.remote.root}"
+    try:
+        return context.read_text(name, large=large)
+    except RemoteObjectMissing as exc:
+        if optional:
+            return None
+        raise CloneError(f"Published catalog at {location} is missing {name}") from exc
+    except RemoteConfigurationError:
+        raise
+    except DownloadError as exc:
+        raise CloneError(
+            f"Could not read the published catalog at {location}: {exc}") from exc
+
+
 def _read_catalog_snapshot(context):
     """
     Read and validate a published catalog without fetching dataset files.
@@ -98,9 +122,8 @@ def _read_catalog_snapshot(context):
     Return None when ``config.yml`` is absent. Once present, incomplete or
     malformed catalog metadata raises CloneError rather than triggering fallback.
     """
-    try:
-        config_text = context.read_text("config.yml")
-    except RemoteObjectMissing:
+    config_text = _read_catalog_file(context, "config.yml", optional=True)
+    if config_text is None:
         return None
     try:
         config = yaml.safe_load(config_text)
@@ -108,12 +131,8 @@ def _read_catalog_snapshot(context):
         raise CloneError("Invalid published catalog config.yml") from exc
     if not isinstance(config, dict) or "data" not in config:
         raise CloneError("Published catalog config.yml must contain a data mapping")
-    try:
-        meta_text = context.read_text("meta.yml")
-        data_text = context.read_text("data.tsv", large=True)
-    except RemoteObjectMissing as exc:
-        raise CloneError(
-            "Published Hallmark catalog is missing required metadata") from exc
+    meta_text = _read_catalog_file(context, "meta.yml")
+    data_text = _read_catalog_file(context, "data.tsv", large=True)
     try:
         meta = yaml.safe_load(meta_text)
     except yaml.YAMLError as exc:
@@ -124,7 +143,7 @@ def _read_catalog_snapshot(context):
              "data.tsv": data_text}
     for name in _catalog_filenames(config):
         if name not in files:
-            files[name] = context.read_text(name, large=True)
+            files[name] = _read_catalog_file(context, name, large=True)
     _validate_snapshot(files, config)
     return files
 
@@ -195,13 +214,13 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
 
     Raises:
         DestinationExistsError: If the destination already exists.
-        CloneError: If a requested catalog is missing or invalid, or it
-            tracks local files without a data server.
+        CloneError: If a requested catalog is missing, invalid or
+            unreadable, or it tracks local files without a data server.
         RemoteConfigurationError: If the source URL is unsupported or could
             store a secret.
         ValueError: If source options are invalid, or a published catalog's
             ``config.yml`` names invalid remotes, sources or TSVs.
-        DownloadError: If remote metadata cannot be read or validated.
+        DownloadError: If remote metadata cannot be validated.
     """
     # Git records the source URL in .hm/.git/config, so it must hold no secret.
     # Local paths may contain "?" or "#"; only URLs carry queries and fragments.

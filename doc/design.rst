@@ -157,4 +157,4 @@ Repository ``Repo``
 
 ..  |hallmark| replace:: ``hallmark``
 
-..  _hallmark: https://github.com/l6a/hallmark
+..  _hallmark: https://github.com/lanisrc/hallmark

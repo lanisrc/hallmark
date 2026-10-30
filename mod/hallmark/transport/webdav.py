@@ -109,7 +109,7 @@ class WebDavBackend(HttpBackend):
                     if len(content) > limit:
                         raise DownloadError("WebDAV listing exceeds its size limit")
         except requests.RequestException as exc:
-            raise self._download_error(exc) from None
+            raise self._download_error(exc, self._read_action(directory)) from None
         self.text_urls[directory] = final_url
         return bytes(content)
 

@@ -17,7 +17,8 @@ from hallmark import Repo  # noqa: E402
 from hallmark.remote.discovery import discover_remote_files  # noqa: E402
 from hallmark.transport import OperationContext, RemoteSpec  # noqa: E402
 from hallmark.transport.base import (  # noqa: E402
-    CapabilityError, DownloadError, RemoteConfigurationError, RemoteObjectMissing)
+    AccessRefused, CapabilityError, DownloadError, RemoteConfigurationError,
+    RemoteObjectMissing)
 from hallmark.transport.s3 import S3Backend  # noqa: E402
 
 BUCKET = "ehtc-sims"
@@ -94,7 +95,7 @@ def test_add_and_download_verify_through_the_cache(s3, tmp_path):
     (repo.worktree / "a.h5").unlink()
     repo.objects.object_path(hashlib.sha1(b"alpha").hexdigest()).unlink()
     result = repo.download(repo.plan_download(file_paths=["a.h5"]), approved=True)
-    assert result["failed"] == 1 and "a.h5 (sha256)" in result["errors"][0]
+    assert result["errors"] == ["a.h5: Checksum mismatch (sha256)"]
 
 
 def test_profiles_bind_keys_to_buckets_and_endpoints(s3, monkeypatch, tmp_path):
@@ -137,8 +138,10 @@ def test_missing_objects_and_refusals_are_reported_by_code(s3, tmp_path):
             context.transport.fetch("gone.h5", tmp_path / "gone.h5")
         denied = ClientError({"Error": {"Code": "AccessDenied",
                                         "Message": "secret details"}}, "GetObject")
-        error = context.transport._error(denied)
-        assert "--auth" in str(error) and "secret details" not in str(error)
+        error = context.transport._error(denied, "m87/a.h5")
+        assert isinstance(error, AccessRefused)
+        assert str(error) == (f"Access to s3://{BUCKET}/m87/a.h5 was refused "
+                              "(AccessDenied)")
 
 
 def test_unsafe_keys_and_options_are_refused(s3):

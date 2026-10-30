@@ -7,17 +7,24 @@ object store; a remote catalogue switches only ``.hm`` and leaves dataset
 files alone.
 """
 
+import json
+import os
 import shlex
+import stat
 from pathlib import Path
 from shutil import rmtree
-from tempfile import TemporaryDirectory
+from tempfile import mkdtemp
 
 from git.exc import GitCommandError
 
 from ..error import CheckoutError, DestinationExistsError, DothmError
-from ..utils import resolve_path_in_root
-from .state import is_remote_catalog
-from .config import branch_filename_format, row_to_path, single_data_format
+from ..transport.base import validate_remote_path
+from ..utils import (
+    CHECKOUT_PREFIX, INCOMPLETE_WORKTREE_MARKER, calculate_file_checksum,
+    is_valid_checksum, replace_file_on_success, resolve_path_in_root)
+from .catalog import catalog_rows
+from .state import cell_text, is_remote_catalog
+from .config import row_to_path, single_data_format, tracked_filename_format
 from .manifest import iter_manifest_entries
 from .history import (
     load_branch_state, load_head_state, find_remote_branch,
@@ -124,6 +131,131 @@ def _refuse_pending_state_changes(repo):
             + " restore " + " ".join(shlex.quote(path) for path in unstaged))
 
 
+def checkout_folders(worktree) -> list:
+    """Return the folders in ``worktree`` that checkouts work in, sorted."""
+    with os.scandir(worktree) as entries:
+        return sorted(Path(entry.path) for entry in entries
+                      if entry.name.startswith(CHECKOUT_PREFIX)
+                      and entry.is_dir(follow_symlinks=False))
+
+
+def recover_interrupted_checkout(repo):
+    """
+    Roll back every checkout that was killed partway, so it can be run again.
+
+    Before a checkout switches branch or moves a file, it writes in its folder
+    a journal of the files it will move and install, and it removes the
+    journal before the folder once it is done. A folder without a journal
+    changed nothing, or belongs to a finished checkout, and is removed.
+    Otherwise each installed file that is still the one installed is removed,
+    the originals are moved back, the original branch is checked out again
+    and a branch the checkout created is deleted. Every step can be repeated,
+    so a recovery that is itself killed is finished by the next one. Callers
+    hold the state lock.
+
+    Raises:
+        CheckoutError: If a checkout cannot be rolled back; its folder is kept.
+    """
+    if repo.worktree is None:
+        return
+    folders = checkout_folders(repo.worktree)
+    for folder in folders:
+        journal_path = folder / "journal.json"
+        if journal_path.is_file():
+            try:
+                _undo_checkout(repo, folder, json.loads(
+                    journal_path.read_text(encoding="utf-8")))
+            except Exception as exc:
+                raise CheckoutError(
+                    "cannot roll back the checkout interrupted in "
+                    f"{folder}: {exc}") from exc
+            journal_path.unlink()
+        rmtree(folder, ignore_errors=True)
+    if folders:
+        repo.state = repo.dothm.load_state()
+
+
+def _undo_checkout(repo, folder, journal):
+    """Used by recover_interrupted_checkout. Undo what a journal records."""
+    backups = [
+        (relative_path, resolve_path_in_root(folder, backup, label="checkout backup"))
+        for relative_path, backup in journal["backups"]]
+    # Content tells an install only where its original is kept here: an
+    # original never moved, or moved back, can be an untracked file with
+    # the very same content.
+    kept = {relative_path for relative_path, backup_path in backups
+            if os.path.lexists(backup_path)}
+    for relative_path, _, sha1, identity in journal["installs"]:
+        path = repo._resolve_worktree_path(relative_path, label="checkout target")
+        # Never an original moved back or a file written since.
+        if _is_installed(path, sha1 if relative_path in kept else None, identity):
+            path.unlink()
+            _remove_empty_parents(repo.worktree, path)
+    for relative_path, backup_path in reversed(backups):
+        if not os.path.lexists(backup_path):
+            continue
+        path = repo._resolve_worktree_path(relative_path, label="checkout target")
+        if os.path.lexists(path):
+            raise FileExistsError(f'"{relative_path}" is in the way of its '
+                                  f"original, kept in {backup_path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(backup_path, path)
+    if not _head_is(repo, journal["branch"], journal["commit"]):
+        _restore_head(repo, journal["branch"], journal["commit"])
+    if journal["created_branch"] and journal["target"] in {
+            head.name for head in repo.dothm.heads}:
+        repo.dothm.git.branch("-D", journal["target"])
+
+
+def _is_installed(path: Path, sha1, identity) -> bool:
+    """
+    Used by _undo_checkout.
+    Return whether ``path`` is the file a checkout installed: the same inode,
+    or, where inodes are not kept and ``sha1`` is given, the same content.
+    """
+    try:
+        found = path.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(found.st_mode):
+        return False
+    if found.st_ino and [found.st_dev, found.st_ino] == list(identity):
+        return True
+    return sha1 is not None and calculate_file_checksum(path) == sha1
+
+
+def _head_is(repo, branch, commit) -> bool:
+    """Return whether HEAD is on ``branch``, or at ``commit`` if it is None."""
+    if branch is not None:
+        return current_branch(repo) == branch
+    return repo.dothm.head.is_detached and repo.dothm.head.commit.hexsha == commit
+
+
+def _restore_head(repo, branch, commit) -> None:
+    """Check out ``branch`` again, or detach at ``commit`` if it is None."""
+    if branch is None:
+        repo.dothm.git.checkout("--detach", commit)
+    else:
+        repo.dothm.git.checkout(branch)
+
+
+def _remove_empty_parents(root, path: Path) -> None:
+    """Remove the folders above ``path`` that are left empty, up to ``root``."""
+    parent = path.parent
+    while parent != root and parent.exists():
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        parent = parent.parent
+
+
+def _write_journal(path: Path, journal: dict) -> None:
+    """Write a checkout's journal; a reader finds the old one or the new one."""
+    with replace_file_on_success(path) as temp_path:
+        temp_path.write_text(json.dumps(journal), encoding="utf-8")
+
+
 def checkout(repo, target_branch):
     """
     Switch to a branch, remote branch or commit, and update the worktree.
@@ -132,27 +264,46 @@ def checkout(repo, target_branch):
     detached. A remote catalogue switches only ``.hm`` and refuses while it
     holds uncommitted changes. A local catalogue restores the target's files
     from the object store, first fetching missing objects for a remote
-    branch, and rolls everything back if a step fails.
+    branch, and rolls everything back if a step fails. The state lock is
+    held throughout, and a checkout that another process left unfinished is
+    rolled back first.
 
     Args:
         repo (Repo): Repository with a worktree.
         target_branch (str): Branch name, remote branch name or commit id.
 
     Returns:
-        bool: True when the checkout succeeds.
+        bool: True when the checkout succeeds; False, having changed
+        nothing, if the target is the current branch.
 
     Raises:
         ValueError: If the target name is invalid.
         CheckoutError: If there is no worktree, the target is unknown, the
             worktree or ``.hm`` has changes, files or objects are missing,
-            the switch is between local files and a remote catalogue, the
-            target has no single filename format, or a step fails.
+            the switch is between local files and a remote catalogue, a
+            catalogue with files has no single filename format, or a step
+            fails.
     """
+    with repo.dothm.state_lock():
+        recover_interrupted_checkout(repo)
+        return _checkout(repo, target_branch)
+
+
+def _checkout(repo, target_branch):
     # Validate and normalize the target branch name
     target_branch = repo._validate_branch_name(target_branch)
 
     if repo.worktree is None:
         raise CheckoutError("cannot checkout without a worktree")
+    # As in git, checking out the current branch, even one without commits,
+    # changes nothing and keeps the staged state.
+    if target_branch == current_branch(repo):
+        return False
+    # Nothing in .hm is committed yet, and there is no commit to come back to.
+    if not repo.dothm.head.is_valid():
+        raise CheckoutError(
+            f'branch "{current_branch(repo)}" has no commits yet; '
+            "commit before checkout")
     # Resolve the target once and load the state of exactly that revision.
     target_kind, resolved_target = resolve_checkout_target(repo, target_branch)
     target_state = _load_revision_state(repo, resolved_target)
@@ -175,13 +326,15 @@ def checkout(repo, target_branch):
     remote_revision = resolved_target if has_remote else None
 
     current_tracked = tracked_paths(repo)
-    # Get the data format string for the target branch configuration
-    target_fmt = single_data_format(target_state.config)
-    if target_fmt is None:
+    # Get the data format string for the target branch configuration; a
+    # target that tracks no files, such as a new repository's, needs none
+    try:
+        target_fmt = tracked_filename_format(target_state)
+    except ValueError as exc:
         # Raise an error if the target branch does not meet the expected criteria
         raise CheckoutError(
             "checkout currently supports only repositories with "
-            "one data format and data.tsv")
+            "one data format and data.tsv") from exc
 
     # list of (relative path, sha1) tuples for all entries in the target branch
     target_entries_raw = list(iter_manifest_entries(target_state, fmt=target_fmt))
@@ -249,9 +402,8 @@ def checkout(repo, target_branch):
 
     # Store the name of the currently active branch before switching
     original_branch = current_branch(repo)
-    original_commit = current_commit(repo) if original_branch is None else None
-    # Get the current format string from the branch configuration
-    current_fmt = branch_filename_format(repo)
+    # Get the current format string; None only if no rows are tracked
+    current_fmt = tracked_filename_format(repo.state)
     # Create a mapping of current tracked paths to their SHA1 checksums
     current_sha_by_path = {
         row_to_path(row, current_fmt): str(row["sha1"]).lower()
@@ -268,154 +420,315 @@ def checkout(repo, target_branch):
     changed_target_paths = {
         relative_path
         for relative_path, _ in changed_target_entries}
+    # paths that are either currently tracked but not in the target branch
+    # or paths that are tracked but have changed from the current branch
+    affected_paths = sorted((current_tracked - target_tracked
+                             ) | changed_target_paths,
+        key=lambda path: (len(path.parts), path.as_posix()), reverse=True)
 
-    def remove_empty_parents(path: Path) -> None:
-        """Recursively remove empty parent directories up to the worktree root."""
-        # parent is the immediate parent directory of the given path
-        parent = path.parent
-        # while the parent directory is not the worktree root and it exists
-        while parent != repo.worktree and parent.exists():
-            # try to remove the parent directory
+    # What the next open needs to roll back this checkout if it is killed.
+    journal = {
+        "branch": original_branch,
+        "commit": repo.dothm.head.commit.hexsha,
+        "target": target_branch,
+        "created_branch": has_remote,
+        "backups": [[path.as_posix(), f"backup/{index}"]
+                    for index, path in enumerate(affected_paths)],
+        "installs": []}
+    # Stage the target files, and later keep the originals, in a folder in the
+    # worktree, so that both stay on its filesystem and survive a crash.
+    transaction_root = Path(mkdtemp(prefix=CHECKOUT_PREFIX, dir=repo.worktree))
+    journal_path = transaction_root / "journal.json"
+
+    # files that will be restored from object store before switching branches
+    staged_files = []
+    # try to restore the target files from object store into the staging area
+    try:
+        for index, (relative_path, sha1) in enumerate(changed_target_entries):
+            staged_path = transaction_root / "staged" / str(index)
+            # restore checks that the copy has this sha1
+            repo.objects.restore(sha1, staged_path)
+            staged = staged_path.stat()
+            staged_files.append((relative_path, staged_path))
+            journal["installs"].append([
+                relative_path.as_posix(), f"staged/{index}", sha1,
+                [staged.st_dev, staged.st_ino]])
+        _write_journal(journal_path, journal)
+    # nothing has changed yet, so the folder is all there is to remove
+    except BaseException as exc:
+        rmtree(transaction_root, ignore_errors=True)
+        if not isinstance(exc, Exception):
+            raise
+        raise CheckoutError(
+            f'cannot checkout branch "{target_branch}": '
+            f"failed to prepare target files: {exc}") from exc
+
+    backups: list[tuple[Path, Path]] = []
+    installed_paths: list[tuple[str, Path]] = []
+    # try to switch branches and update the worktree with the target files
+    try:
+        # if the target branch is new, create and switch to it
+        if has_local:
+            repo.dothm.git.checkout(target_branch)
+
+        elif has_remote:
+            repo.dothm.git.checkout("--track",remote_revision)
+
+        else:
+            repo.dothm.git.checkout("--detach", resolved_target)
+
+        # Reload the repository state after switching branches
+        repo.state = repo.dothm.load_state()
+
+        for index, relative_path in enumerate(affected_paths):
+            # absolute path in the worktree for the affected relative path
+            path = repo._resolve_worktree_path(
+                relative_path, label="checkout target")
+            # create a backup before replacing it with the target file
+            if path.exists():
+                backup_path = transaction_root / "backup" / str(index)
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                # Listed first: an interrupt can arrive just after the move.
+                backups.append((path, backup_path))
+                path.replace(backup_path)
+                _remove_empty_parents(repo.worktree, path)
+
+        for relative_path, staged_path in staged_files:
+            # Determine the destination path in the worktree for the staged file
+            destination = repo._resolve_worktree_path(
+                relative_path, label="checkout target")
+            # Create parent directories for the destination path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            installed_paths.append((relative_path.as_posix(), destination))
+            # Replace the destination path with the staged file
+            staged_path.replace(destination)
+        # The checkout is done once its journal is gone.
+        journal_path.unlink()
+    # attempt to rollback changes if anything, Ctrl-C included, stops it
+    except BaseException as exc:
+        rollback_errors = []
+        head_restored = True
+
+        # try to restore the original branch if it was changed during checkout
+        try:
+            if not _head_is(repo, original_branch, journal["commit"]):
+                _restore_head(repo, original_branch, journal["commit"])
+        # if restoring the original branch fails, record the error for reporting
+        except Exception as rollback_exc:
+            head_restored = False
+            rollback_errors.append(
+                f"could not restore branch: {rollback_exc}")
+
+        kept_installs = set()
+        for relative_path, path in reversed(installed_paths):
+            # try to remove the installed files from the failed checkout
             try:
-                parent.rmdir()
-            # if an OSError occurs (e.g., directory not empty), break the loop
-            except OSError:
-                break
-            # move up to the next parent directory
-            parent = parent.parent
+                # if the path is a file or a symlink, unlink it
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+                _remove_empty_parents(repo.worktree, path)
+            # if removing the installed file fails, record error for reporting
+            except Exception as rollback_exc:
+                kept_installs.add(relative_path)
+                rollback_errors.append(
+                    f'could not remove "{path}": {rollback_exc}')
 
-    # Use a temporary directory to stage files and create backups for rollback
-    with TemporaryDirectory(
-        prefix=".hallmark-checkout-", dir=repo.worktree) as temporary_directory:
-        # Create paths for staging and backup within the temporary directory
-        transaction_root = Path(temporary_directory)
-        staged_root = transaction_root / "staged"
-        backup_root = transaction_root / "backup"
+        for original_path, backup_path in reversed(backups):
+            # the move was interrupted before it happened
+            if not os.path.lexists(backup_path):
+                continue
+            # try to restore the original files from the backups
+            try:
+                original_path.parent.mkdir(parents=True, exist_ok=True)
+                backup_path.replace(original_path)
+            # if restoring the original file fails, record error for reporting
+            except Exception as rollback_exc:
+                rollback_errors.append(
+                    f'could not restore "{original_path}": '
+                    f"{rollback_exc}")
 
-        # files that will be restored from object store before switching branches
-        staged_files = []
-        # try to restore the target files from object store into the staging area
+        branch_left = False
+        # a remote-tracking checkout creates a local branch, so remove it
+        if has_remote and target_branch in {
+            head.name for head in repo.dothm.heads}:
+            # try to delete the newly created branch to rollback the checkout
+            try:
+                repo.dothm.git.branch("-D", target_branch)
+            # if deleting the new branch fails, record error for reporting
+            except GitCommandError as rollback_exc:
+                branch_left = True
+                rollback_errors.append(
+                    f"could not remove new branch: {rollback_exc}")
+
+        # try to reload the repository state after rollback
         try:
-            for index, (relative_path, sha1) in enumerate(changed_target_entries):
-                staged_path = staged_root / str(index)
-                repo.objects.restore(sha1, staged_path)
-                staged_files.append((relative_path, staged_path))
-        # raise a CheckoutError if any exception occurs during the restoration
-        except Exception as exc:
-            raise CheckoutError(
-                f'cannot checkout branch "{target_branch}": '
-                f"failed to prepare target files: {exc}") from exc
-
-        backups: list[tuple[Path, Path]] = []
-        installed_paths: list[Path] = []
-        # try to switch branches and update the worktree with the target files
-        try:
-            # if the target branch is new, create and switch to it
-            if has_local:
-                repo.dothm.git.checkout(target_branch)
-
-            elif has_remote:
-                repo.dothm.git.checkout("--track",remote_revision)
-
-            else:
-                repo.dothm.git.checkout("--detach", resolved_target)
-
-            # Reload the repository state after switching branches
             repo.state = repo.dothm.load_state()
+        # if reloading the repository state fails, record error for reporting
+        except Exception as rollback_exc:
+            rollback_errors.append(
+                f"could not reload repository state: {rollback_exc}")
 
-            # paths that are either currently tracked but not in the target branch
-            # or paths that are tracked but have changed from the current branch
-            affected_paths = sorted((current_tracked - target_tracked
-                                     ) | changed_target_paths,
-                key=lambda path: (len(path.parts), path.as_posix()), reverse=True)
-            for relative_path in affected_paths:
-                # absolute path in the worktree for the affected relative path
-                path = repo._resolve_worktree_path(
-                    relative_path, label="checkout target")
-                # create a backup before replacing it with the target file
-                if path.exists():
-                    backup_path = backup_root / str(len(backups))
-                    backup_path.parent.mkdir(parents=True, exist_ok=True)
-                    path.replace(backup_path)
-                    backups.append((path, backup_path))
-                    remove_empty_parents(path)
-
-            for relative_path, staged_path in staged_files:
-                # Determine the destination path in the worktree for the staged file
-                destination = repo._resolve_worktree_path(
-                    relative_path, label="checkout target")
-                # Create parent directories for the destination path
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                # Replace the destination path with the staged file
-                staged_path.replace(destination)
-                # add the destination path to the list of installed paths
-                installed_paths.append(destination)
-        # attempt to rollback changes if any exception occurs
-        except Exception as exc:
-            rollback_errors = []
-
-            # try to restore the original branch if it was changed during checkout
+        # Keep what is left to undo for the next open to finish.
+        journal["backups"] = [
+            entry for entry in journal["backups"]
+            if os.path.lexists(transaction_root / entry[1])]
+        journal["installs"] = [
+            entry for entry in journal["installs"] if entry[0] in kept_installs]
+        journal["created_branch"] = branch_left
+        details = ""
+        if (head_restored and not branch_left and not journal["backups"]
+                and not journal["installs"]):
+            rmtree(transaction_root, ignore_errors=True)
+        else:
             try:
-                if current_branch(repo) != original_branch:
-                    if original_branch is None:
-                        repo.dothm.git.checkout("--detach", original_commit)
-                    else:
-                        repo.dothm.git.checkout(original_branch)
-            # if restoring the original branch fails, record the error for reporting
-            except Exception as rollback_exc:
+                _write_journal(journal_path, journal)
+            except Exception as journal_exc:
                 rollback_errors.append(
-                    f"could not restore branch: {rollback_exc}")
-
-            for path in reversed(installed_paths):
-                # try to remove the installed files from the failed checkout
-                try:
-                    # if the path is a file or a symlink, unlink it
-                    if path.is_file() or path.is_symlink():
-                        path.unlink()
-                    remove_empty_parents(path)
-                # if removing the installed file fails, record error for reporting
-                except Exception as rollback_exc:
-                    rollback_errors.append(
-                        f'could not remove "{path}": {rollback_exc}')
-
-            for original_path, backup_path in reversed(backups):
-                # try to restore the original files from the backups
-                try:
-                    original_path.parent.mkdir(parents=True, exist_ok=True)
-                    backup_path.replace(original_path)
-                # if restoring the original file fails, record error for reporting
-                except Exception as rollback_exc:
-                    rollback_errors.append(
-                        f'could not restore "{original_path}": '
-                        f"{rollback_exc}")
-
-            # a remote-tracking checkout creates a local branch, so remove it
-            if has_remote and target_branch in {
-                head.name for head in repo.dothm.heads}:
-                # try to delete the newly created branch to rollback the checkout
-                try:
-                    repo.dothm.git.branch("-D", target_branch)
-                # if deleting the new branch fails, record error for reporting
-                except GitCommandError as rollback_exc:
-                    rollback_errors.append(
-                        f"could not remove new branch: {rollback_exc}")
-
-            # try to reload the repository state after rollback
-            try:
-                repo.state = repo.dothm.load_state()
-            # if reloading the repository state fails, record error for reporting
-            except Exception as rollback_exc:
-                rollback_errors.append(
-                    f"could not reload repository state: {rollback_exc}")
-            # construct a detailed error message for the failed checkout
-            message = (f'checkout of branch "{target_branch}" failed: {exc}')
-            # if there were any errors during rollback, append them to the message
-            if rollback_errors:
-                message += "; rollback incomplete: " + "; ".join(rollback_errors)
-            # raise a CheckoutError with the detailed message and original exception
-            raise CheckoutError(message) from exc
+                    f"could not update {journal_path}: {journal_exc}")
+            details = (f"; originals kept in {transaction_root}"
+                       if journal["backups"] else
+                       f"; the next open finishes the rollback from "
+                       f"{transaction_root}")
+        # if there were any errors during rollback, append them to the message
+        if rollback_errors:
+            details += "; rollback incomplete: " + "; ".join(rollback_errors)
+        if not isinstance(exc, Exception):
+            if details and hasattr(exc, "add_note"):
+                exc.add_note(f'checkout of branch "{target_branch}" '
+                             f"interrupted{details}")
+            raise
+        # raise a CheckoutError with the detailed message and original exception
+        raise CheckoutError(
+            f'checkout of branch "{target_branch}" failed: {exc}{details}'
+        ) from exc
+    rmtree(transaction_root, ignore_errors=True)
     # if checkout process completes successfully, return True to indicate success
     return True
+
+
+def _paths_known(state) -> bool:
+    """
+    Return whether add_worktree can tell where each file of a state goes.
+
+    Remote catalogues list paths. A local catalogue needs exactly one
+    filename format, unless it has no rows, as in a new repository.
+    """
+    return (is_remote_catalog(state) or state.data.empty
+            or single_data_format(state.config) is not None)
+
+
+def _check_stored_objects(repo, state):
+    """
+    Raise FileNotFoundError naming the objects a local catalogue lacks.
+
+    A remote catalogue needs none: its files not yet downloaded wait for
+    ``hm download`` in the new worktree.
+    """
+    if is_remote_catalog(state):
+        return
+    try:
+        missing_objects = repo.objects.missing_checksums(
+            row["sha1"] for _, row in state.data.iterrows())
+    # an invalid checksum names no object, so report it as missing
+    except ValueError as exc:
+        raise FileNotFoundError(str(exc)) from exc
+    if missing_objects:
+        raise FileNotFoundError(
+            "cannot create worktree; missing object(s): "
+            + ", ".join(missing_objects))
+
+
+def _remove_stale_temps(destinations):
+    """Remove the ``.NAME.RANDOM.tmp`` files left beside ``destinations``."""
+    names = {}
+    for destination in destinations:
+        names.setdefault(destination.parent, set()).add(destination.name)
+    # one listing per folder, however many of its files are missing
+    for folder, wanted in names.items():
+        for stale in folder.glob(".*.tmp"):
+            parts = stale.name[1:].rsplit(".", 2)
+            if len(parts) == 3 and parts[0] in wanted:
+                stale.unlink(missing_ok=True)
+
+
+def _place_stored_objects(repo, state, root, *, skip_existing):
+    """
+    Place the files of a state that ``.hm/objects`` holds beneath ``root``.
+
+    A local catalogue's files are restored as writable copies. A remote
+    catalogue's are linked read-only, or copied across filesystems, as
+    downloads are, and only those already downloaded are placed. With
+    ``skip_existing``, files already there are kept: a placement is atomic,
+    so a file under its final name is complete.
+    """
+    remote = is_remote_catalog(state)
+    if remote:
+        # every TSV and file: entry; a path listed twice is placed once
+        files = {}
+        for row in catalog_rows(state):
+            sha1 = cell_text(row.get("sha1")).lower()
+            if is_valid_checksum("sha1", sha1) and repo.objects.contains(sha1):
+                files[validate_remote_path(row["path"])] = sha1
+    else:
+        files = dict(iter_manifest_entries(state))
+    pending = []
+    for rel_path, sha1 in files.items():
+        destination = resolve_path_in_root(
+            root, rel_path, label="worktree data path")
+        if not (skip_existing and os.path.lexists(destination)):
+            pending.append((destination, sha1))
+    if skip_existing:
+        _remove_stale_temps(destination for destination, _ in pending)
+    for destination, sha1 in pending:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if remote:
+            repo.objects.materialize(sha1, destination)
+        else:
+            repo.objects.restore(sha1, destination)
+
+
+def _unfinished_worktree_error(repo, target, reason):
+    """Say why a marked worktree cannot be finished, and how to remove it."""
+    main = shlex.quote(str(repo.dothm.path))
+    # git locks a worktree until its checkout ends; a second --force unlocks it
+    return RuntimeError(
+        f'cannot finish the interrupted worktree "{target}": {reason}. '
+        f"Remove it with: git -C {main} worktree remove --force --force "
+        f"{shlex.quote(str(target / '.hm'))} (or delete the folder and run: "
+        f"git -C {main} worktree prune), then add it again")
+
+
+def _finish_worktree(repo, target, target_branch):
+    """
+    Place the files an interrupted add_worktree left out, then drop its marker.
+
+    Only missing files are placed, so files already there stay as they are.
+    A worktree on another branch is left alone.
+    """
+    try:
+        linked = type(repo)(target)
+    except Exception as exc:
+        raise _unfinished_worktree_error(
+            repo, target, f"its .hm does not open ({type(exc).__name__}: {exc})"
+            ) from exc
+    # git writes the index last, so a checkout it did not finish has none
+    if not os.path.isfile(linked.dothm.index.path):
+        raise _unfinished_worktree_error(
+            repo, target, "git did not finish checking out its .hm")
+    if current_branch(linked) != target_branch:
+        return
+    if not _paths_known(linked.state):
+        raise _unfinished_worktree_error(
+            repo, target, "its catalogue has no single data format")
+    _check_stored_objects(repo, linked.state)
+    # the marker stays on failure, so the next run tries again
+    try:
+        _place_stored_objects(repo, linked.state, target, skip_existing=True)
+    except Exception as exc:
+        raise RuntimeError(
+            f'failed to populate worktree for branch "{target_branch}": {exc}'
+            ) from exc
+    (target / INCOMPLETE_WORKTREE_MARKER).unlink(missing_ok=True)
 
 
 def add_worktree(repo, target_branch):
@@ -458,8 +771,16 @@ def add_worktree(repo, target_branch):
         raise ValueError("worktree destination cannot be the current worktree")
     # the dothm path for the target worktree is the ".hm" directory
     target_dothm = target / ".hm"
-    # if the target path exists and is not a hallmark worktree, raise an error
-    if target.exists() and not target_dothm.exists():
+    # the marker stays until every file is placed, so a rerun can finish
+    marker = target / INCOMPLETE_WORKTREE_MARKER
+    # an existing worktree is left as it is, unless a run was interrupted
+    if target_dothm.exists():
+        if marker.exists():
+            _finish_worktree(repo, target, target_branch)
+        return True
+    # a folder that is empty, or holds only the marker, is used as it is
+    if target.exists() and (not target.is_dir() or any(
+            entry.name != INCOMPLETE_WORKTREE_MARKER for entry in target.iterdir())):
         raise DestinationExistsError(
             f'worktree destination "{target}" already exists '
             "and is not a Hallmark worktree")
@@ -475,91 +796,63 @@ def add_worktree(repo, target_branch):
     else:
         target_state = load_head_state(repo)
 
-    # get the target fmt from the target branch configuration
-    target_fmt = single_data_format(target_state.config)
-    # if target branch does not have exactly one data format, raise a RuntimeError
-    if target_fmt is None:
+    if not _paths_known(target_state):
         raise RuntimeError(
             "add_worktree requires exactly one data entry "
             "with a non-empty fmt")
+    _check_stored_objects(repo, target_state)
 
-    # if the target worktree does not exist
-    if not target_dothm.exists():
-        # check for missing objects in the target state that are not present in
-        # the object store
-        try:
-            missing_objects = repo.objects.missing_checksums(
-                row["sha1"] for _, row in target_state.data.iterrows())
-        # if a ValueError occurs during object existence check, raise cleanly
-        except ValueError as exc:
-            raise FileNotFoundError(str(exc)) from exc
-        # if there are missing objects, raise a FileNotFoundError with details
-        if missing_objects:
-            raise FileNotFoundError(
-                "cannot create worktree; missing object(s): "
-                + ", ".join(missing_objects))
+    # create the target directory and its parents if they do not exist
+    target.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    try:
+        # if the target branch already exists, link the new worktree to it
+        if not created_branch:
+            repo.dothm.link_worktree(target_dothm, target_branch)
+        # if the target branch does not exist, create a new worktree and branch
+        else:
+            repo.dothm.git.worktree("add", "-b", target_branch,
+                                    str(target_dothm))
+    # if the worktree creation fails, raise a RuntimeError with details
+    except (GitCommandError, DothmError) as exc:
+        # rmtree the target directory to clean up any partial worktree creation
+        rmtree(target, ignore_errors=True)
+        raise RuntimeError(f'failed to create worktree for branch '
+                           f'"{target_branch}": {exc}') from exc
 
-        # create the target directory and its parents if they do not exist
-        target.mkdir(parents=True, exist_ok=True)
+    try:
+        _place_stored_objects(repo, target_state, target, skip_existing=False)
+        marker.unlink()
+
+    # if any exception occurs during file restoration, attempt a clean up
+    except Exception as exc:
+        # Attempt to remove the worktree from Git and clean up the directory
         try:
-            # if the target branch already exists, link the new worktree to it
-            if not created_branch:
-                repo.dothm.link_worktree(target_dothm, target_branch)
-            # if the target branch does not exist, create a new worktree and branch
-            else:
-                repo.dothm.git.worktree("add", "-b", target_branch,
-                                        str(target_dothm))
-        # if the worktree creation fails, raise a RuntimeError with details
-        except (GitCommandError, DothmError) as exc:
-            # rmtree the target directory to clean up any partial worktree creation
+            repo.dothm.git.worktree("remove", "--force", str(target_dothm))
+        # if the worktree removal fails, attempt to prune the worktree list
+        except GitCommandError:
+            # remove the target directory before pruning
             rmtree(target, ignore_errors=True)
-            raise RuntimeError(f'failed to create worktree for branch '
-                               f'"{target_branch}": {exc}') from exc
-
-        # iterate over the target state data and restore files from the object store
-        try:
-            for _, row in target_state.data.iterrows():
-                rel_path = row_to_path(row, target_fmt)
-                # resolve relative path to an absolute path in the target worktree
-                destination = resolve_path_in_root(
-                    target,
-                    rel_path,
-                    label="worktree data path")
-                # ensure the parent directory exists before restoring the file
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                # restore the file from the object store using its SHA-1 checksum
-                repo.objects.restore(row["sha1"], destination)
-
-        # if any exception occurs during file restoration, attempt a clean up
-        except Exception as exc:
-            # Attempt to remove the worktree from Git and clean up the directory
             try:
-                repo.dothm.git.worktree("remove", "--force", str(target_dothm))
-            # if the worktree removal fails, attempt to prune the worktree list
+                repo.dothm.git.worktree("prune")
             except GitCommandError:
-                # remove the target directory before pruning
-                rmtree(target, ignore_errors=True)
-                try:
-                    repo.dothm.git.worktree("prune")
-                except GitCommandError:
-                    # pass if pruning fails, already handling a restoration error
-                    pass
-            # If the target directory still exists after cleanup attempts, remove it
-            else:
-                rmtree(target, ignore_errors=True)
+                # pass if pruning fails, already handling a restoration error
+                pass
+        # If the target directory still exists after cleanup attempts, remove it
+        else:
+            rmtree(target, ignore_errors=True)
 
-            # If a new branch was created and the restoration failed
-            if created_branch:
-                # try to delete the newly created branch
-                try:
-                    repo.dothm.git.branch("-D", target_branch)
-                # if the branch deletion fails, pass since already handling an error
-                except GitCommandError:
-                    pass
-            # raise RuntimeError with details about failure to populate the worktree
-            raise RuntimeError(
-                f'failed to populate worktree for branch '
-                f'"{target_branch}": {exc}') from exc
+        # If a new branch was created and the restoration failed
+        if created_branch:
+            # try to delete the newly created branch
+            try:
+                repo.dothm.git.branch("-D", target_branch)
+            # if the branch deletion fails, pass since already handling an error
+            except GitCommandError:
+                pass
+        # raise RuntimeError with details about failure to populate the worktree
+        raise RuntimeError(
+            f'failed to populate worktree for branch '
+            f'"{target_branch}": {exc}') from exc
 
     return True
-

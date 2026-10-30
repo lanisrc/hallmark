@@ -13,11 +13,13 @@ power cut or an out-of-memory kill. Arguments are passed to ``hm``, or
 ``--api CODE`` runs Python with ``Repo`` imported, in the current folder.
 """
 
+import functools
 import importlib
 import json
 import os
 import signal
 import sys
+import types
 
 
 def _install(spec):
@@ -41,6 +43,10 @@ def _install(spec):
             return result
         return original(*args, **kwargs)
 
+    if isinstance(owner, types.ModuleType):
+        # pathlib on Python 3.9 and 3.10 keeps os functions as class
+        # attributes, where a plain function would be bound as a method.
+        wrapper = functools.partial(wrapper)
     setattr(owner, attribute, wrapper)
 
 

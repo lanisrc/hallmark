@@ -15,6 +15,7 @@
 """Hallmark CLI entrypoint and command wiring."""
 
 import functools
+import shlex
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -32,9 +33,18 @@ from .remote.download import DownloadError
 from .remote.discovery import discover_remote_files, path_matches
 from .remote.sources import SourceSpec
 from .repo.config import normalize_remotes
+from .repo.state import is_remote_catalog
 from .transport import OperationContext, RemoteSpec
+from .transport.base import AccessRefused
 from .error import CheckoutError, CloneError, HallmarkError
 from .utils import CHECKSUM_ALGORITHMS
+
+
+def _error_text(exc):
+    """Return an error's message; a network error's text can hold its URL."""
+    if isinstance(exc, (requests.RequestException, Urllib3Error)):
+        return f"{type(exc).__name__} (network error)"
+    return str(exc)
 
 
 # use a context manager to translate application errors into clean Click errors
@@ -62,7 +72,7 @@ def _translate_cli_errors(*error_types, prefix=None):
     # handle any specified error types raised within the context manager
     except error_types as exc:
         # construct a user-friendly error message with an optional prefix
-        message = (f"{prefix}: {exc}" if prefix else str(exc))
+        message = (f"{prefix}: {_error_text(exc)}" if prefix else _error_text(exc))
         raise ClickException(message) from exc
 
 
@@ -75,14 +85,46 @@ _REPO_READ_ERRORS = (
     FileNotFoundError,
     CheckoutError)
 
-def _report_download_results(results: dict) -> None:
+
+def _refusal_hint(profile, fix, url=None) -> str:
     """
-    Used by _run_download.
+    Advise after a server refused access: check the profile in use, or
+    name one as ``fix`` says. HTTP(S) requests also read ~/.netrc.
+    """
+    if profile:
+        return f"Check that auth profile {profile!r} grants access"
+    netrc = str(url).lower().startswith(("http", "webdav"))
+    return fix + (" (or use ~/.netrc)" if netrc else "")
+
+
+def _refused_profile(exc):
+    """Return the auth profile a refused request used, through rewrapping errors."""
+    while exc is not None:
+        if getattr(exc, "profile", None):
+            return exc.profile
+        exc = exc.__cause__
+    return None
+
+
+def _remote_auth(name) -> tuple:
+    """Return a data remote's label and the command that sets its profile."""
+    if not name:
+        return "the data remote", "hm set-config --remote-auth PROFILE"
+    return (f"remote {name!r}",
+            f"hm set-config --remote-name {shlex.quote(name)} --remote-auth PROFILE")
+
+
+def _report_download_results(results: dict, auth_hint=None) -> None:
+    """
+    Used by _run_download and clone.
     Report the results of the download operation to the user.
     Args:
         results (dict): A dictionary containing the download results, including
             the number of succeeded and failed downloads, total bytes downloaded,
             and any error messages.
+        auth_hint (callable, optional): Advice for a remote that refused
+            access, given its name and the auth profile it used; printed once
+            after the errors.
     Raises:
         ClickException: If there were failed downloads, indicating the number of
             failed files and providing error messages.
@@ -142,6 +184,9 @@ def _report_download_results(results: dict) -> None:
     if len(errors) > 10:
         click.echo(
             f"  - ... {len(errors) - 10} more error(s)", err=True)
+    if auth_hint is not None:
+        for name, profile in results.get("access_refused", {}).items():
+            click.echo(auth_hint(name, profile), err=True)
     # raise a ClickException to indicate failure
     raise ClickException(f"Failed to download {failed} file(s)")
 
@@ -172,7 +217,14 @@ def _run_download(repo, plan, *, max_workers):
     click.confirm("Download these files?", default=False, abort=True)
     results = repo.download(plan, approved=True, max_workers=max_workers,
                             progress=True)
-    _report_download_results(results)
+
+    def auth_hint(name, profile):
+        url = (plan.remotes.get(name) or {"url": plan.remote_url}).get("url")
+        label, command = _remote_auth(name)
+        return _refusal_hint(profile, f"Set an auth profile for {label}: {command}",
+                             url)
+
+    _report_download_results(results, auth_hint)
 
 
 # Errors a user causes or can fix, such as a typo in config.yml, a missing
@@ -191,7 +243,7 @@ class _HallmarkGroup(click.Group):
         except (click.exceptions.Exit, click.exceptions.Abort, ClickException):
             raise
         except _USER_ERRORS as exc:
-            raise ClickException(str(exc) or type(exc).__name__) from exc
+            raise ClickException(_error_text(exc) or type(exc).__name__) from exc
 
 
 @click.group(name="hm", cls=_HallmarkGroup)
@@ -268,6 +320,11 @@ def info(repo):
     click.echo(f'hallmark worktree: "{repo.worktree}"')
 
 
+def _outdated_hint(stored: int) -> str:
+    """Say how to bring outdated downloads in line, and how many need no transfer."""
+    return f"run hm download; {stored} in .hm/objects"
+
+
 @hallmark.command(short_help="Show worktree and staged hallmark state.")
 @_pass_repo
 def status(repo):
@@ -318,9 +375,16 @@ def status(repo):
         click.secho("Untracked files:", fg="red")
         for path in untracked:
             click.echo("  " + click.style(path, fg="red"))
+    outdated = snapshot["outdated"]
+    if outdated:
+        click.echo("")
+        hint = _outdated_hint(snapshot["outdated_stored"])
+        click.secho(f"Outdated downloads ({hint}):", fg="red")
+        for path in outdated:
+            click.echo("  " + click.style(path, fg="red"))
 
     if not any((staged["state"], staged["added"], staged["modified"], staged["deleted"],
-                worktree["modified"], worktree["deleted"], untracked)):
+                worktree["modified"], worktree["deleted"], untracked, outdated)):
         click.echo("")
         if snapshot.get("remote_catalog"):
             click.echo("nothing to commit, remote catalog unchanged")
@@ -393,7 +457,7 @@ def _ask_about_duplicates(duplicates):
     default=False,
     show_default=True,
     help="Enable regex-based encoding rules from config.yml.")
-@click.option("--auth", help="Local SSH authentication profile.")
+@click.option("--auth", help="Local auth profile for the remote (HTTP, S3 or SSH).")
 @click.option("--backend", help="Registered remote data backend.")
 @click.option("--backend-options", type=click.Path(exists=True, dir_okay=False),
               help="YAML mapping of backend-specific options.")
@@ -479,8 +543,16 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
                     remote_options["on_duplicate"] = _ask_about_duplicates
                 if remote and prune is None:
                     remote_options["prune"] = _ask_about_missing
-                pf = repo.add(inputs[0], encoding, progress=True, **remote_options,
-                              resort=_ask_about_resort)
+                try:
+                    pf = repo.add(inputs[0], encoding, progress=True,
+                                  **remote_options, resort=_ask_about_resort)
+                except AccessRefused as exc:
+                    # Without --auth, the remote's configured profile was used.
+                    hint = _refusal_hint(
+                        auth or _refused_profile(exc),
+                        "Name an auth profile: rerun hm add with --auth PROFILE",
+                        inputs[0])
+                    raise ClickException(f"{exc}\n{hint}") from exc
             else:
                 pf = repo.add(inputs[0], encoding)
         # oterhwise, use the add_paths method for multiple inputs
@@ -528,9 +600,10 @@ def add(repo, encoding, inputs, auth, backend, backend_options, filters, remote_
     unmatched = pf.attrs.get("unmatched", [])
     if unmatched:
         click.echo("Skipped files that do not match the branch pattern:")
-        # print each unmatched path
-        for path in unmatched:
+        for path in unmatched[:10]:
             click.echo(f"  {path}")
+        if len(unmatched) > 10:
+            click.echo(f"  ... and {len(unmatched) - 10} more")
 
 
 @hallmark.command(short_help="Detect filename formats in a remote folder.")
@@ -642,7 +715,8 @@ def restore(repo, staged, paths):
 @click.option("--remote-name")
 @click.option("--remote-url")
 @click.option("--remote-auth",
-              help="Local SSH profile name. An empty string removes the reference.")
+              help="Local auth profile name (HTTP, S3 or SSH). An empty string "
+                   "removes the reference.")
 @click.option("--remote-backend", help="Registered data backend name.")
 @click.option("--remote-backend-options", type=click.Path(exists=True, dir_okay=False),
               help="YAML mapping of backend-specific options.")
@@ -783,26 +857,39 @@ def branch(repo, name):
 @click.argument("target_branch")
 @_pass_repo
 def checkout(repo, target_branch):
-    """Switch to TARGET and rewrite tracked files from its state.
+    """Switch to TARGET.
 
     TARGET may be an existing branch or a commit id. A commit id leaves you on
     no branch, so use `hm branch NAME` to create one before committing again.
     An unrecognized TARGET is an error and changes nothing.
-    Only hallmark-tracked files are rewritten; unrelated files are left
-    alone unless they block restoration of a tracked path.
+
+    Local files tracked by hallmark are rewritten from TARGET's state;
+    unrelated files are left alone unless they block restoration of a
+    tracked path. A remote catalog's checkout switches only the catalog:
+    downloads that now hold another version are reported as outdated, and
+    `hm download` brings them in line, from .hm/objects without a transfer
+    where they are stored.
     """
     # use the _translate_cli_errors context manager to handle specific exceptions
     with _translate_cli_errors(*_REPO_READ_ERRORS):
         # attempt to switch to the target branch, handling any errors
         switched = repo.checkout(target_branch)
 
-    if switched:
-        snapshot = repo.branches()
-        if snapshot["current"] is None:
-            click.echo(
-                f'Now at commit {snapshot["detached_at"]}; not on a branch.')
-        else:
-            click.echo(f'Switched to branch "{snapshot["current"]}".')
+    snapshot = repo.branches()
+    if not switched:
+        click.echo(f'Already on branch "{snapshot["current"]}".')
+        return
+    if snapshot["current"] is None:
+        click.echo(
+            f'Now at commit {snapshot["detached_at"]}; not on a branch.')
+    else:
+        click.echo(f'Switched to branch "{snapshot["current"]}".')
+    if is_remote_catalog(repo.state):
+        with _translate_cli_errors(*_REPO_READ_ERRORS):
+            outdated, stored = repo.outdated_downloads()
+        if outdated:
+            click.echo(f"Outdated downloads: {len(outdated)} file(s) "
+                       f"({_outdated_hint(stored)})")
 
 
 @hallmark.command(short_help="Download files from the configured data remote.")
@@ -867,7 +954,9 @@ def download(repo, files, tsv_names, download_all, filters, fmt, remote_name,
 @hallmark.command(short_help="Clone an existing Hallmark catalog.")
 @click.argument("url")
 @click.argument("path")
-@click.option("--auth", help="Optional local SSH authentication profile.")
+@click.option("--auth",
+              help="Local auth profile for reading a published catalog "
+                   "(HTTP, S3 or SSH).")
 @click.option("--filter", "filters", multiple=True,
               help="Select paths matching a glob. ** matches recursively. "
                    "May be repeated.")
@@ -900,6 +989,11 @@ def clone(url, path, auth, filters, fmt, source_type, no_download, max_workers):
         click.echo(plan.summary())
         return click.confirm("Download these files?", default=False)
 
+    def auth_hint(name, profile):
+        label, command = _remote_auth(name)
+        return _refusal_hint(profile, f'Set an auth profile for {label}: cd "{path}", '
+                             f"run {command}, then hm download --all")
+
     with _translate_cli_errors(DownloadError, GitError, ValueError):
         path_matches("validation", filter=filters or None, fmt=fmt)
         try:
@@ -910,7 +1004,20 @@ def clone(url, path, auth, filters, fmt, source_type, no_download, max_workers):
                               max_workers=max_workers)
         except CloneError as exc:
             click.echo(str(exc), err=True)
+            if isinstance(exc.__cause__, AccessRefused):
+                click.echo(_refusal_hint(
+                    auth, "Name an auth profile for the catalog server: "
+                    "hm clone --auth PROFILE URL PATH", url), err=True)
             raise SystemExit(1) from exc
+        except DownloadError as exc:
+            result = getattr(exc, "result", None)
+            if result is None:
+                raise
+            try:
+                _report_download_results(result, auth_hint)
+            finally:
+                click.echo(f'Catalog kept at "{Path(path) / ".hm"}"; run hm '
+                           f'download --all from "{path}" to retry.', err=True)
         click.echo(f'Successfully cloned to "{path}"')
         if not no_download and repo.download_result is None:
             click.echo(f'Skipped download; run hm download --all from "{path}" later.')

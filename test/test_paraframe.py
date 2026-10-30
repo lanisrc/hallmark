@@ -1,3 +1,5 @@
+import re
+
 from hallmark import ParaFrame
 import pytest
 
@@ -166,6 +168,20 @@ def test_parse_accepts_single_encoding_mapping(tmp_path):
         f"Expected spin value: [-0.5], but got: {frame['aspin'].tolist()}"
 
 
+def test_parse_reads_encodings_given_as_a_generator(tmp_path):
+    """Encodings that can be read only once still select the typed format."""
+    (tmp_path / "am0.5_i30.h5").write_text("contents\n", encoding="utf-8")
+    (tmp_path / "am1_i30.h5").write_text("contents\n", encoding="utf-8")
+    specs = [{"fmt": "a{aspin:f}_i{i:d}.h5", "encoding": {"aspin": "m([0-9.]+)"}}]
+
+    frame = ParaFrame.parse("a{aspin:f}_i{i:d}.h5", base_path=tmp_path,
+                            encodings=(spec for spec in specs), encoding=True)
+
+    assert frame.to_dict(orient="records") == [
+        {"path": "am0.5_i30.h5", "aspin": -0.5, "i": 30}]
+    assert frame.attrs["unmatched"] == ["am1_i30.h5"]
+
+
 def test_parse_encoding_false_ignores_invalid_encoding_specs(tmp_path):
     """
     Test that ParaFrame.parse ignores encoding spec validation when
@@ -226,9 +242,9 @@ def test_parse_encoding_true_rejects_nonstring_patterns(tmp_path):
 
 def test_parse_skips_files_that_fail_to_match_after_encoding(tmp_path, capsys):
     """
-    Test that ParaFrame.parse silently skips (and reports) a globbed
-    file whose
-    encoded name no longer matches the parse template, rather than raising.
+    Test that ParaFrame.parse skips a globbed file whose encoded name no longer
+    matches the parse template, rather than raising, lists it as unmatched and,
+    with debug=True, reports it.
     Args:
         tmp_path (Path): Temporary directory provided by pytest for testing.
         capsys: Pytest fixture for capturing stdout/stderr.
@@ -240,13 +256,97 @@ def test_parse_skips_files_that_fail_to_match_after_encoding(tmp_path, capsys):
     encoding = {"fmt": "a_{n}.dat", "encoding": {"aspin": r"(a)_"}}
 
     frame = ParaFrame.parse(
-        "a_{n}.dat", base_path=tmp_path, encodings=encoding, encoding=True)
+        "a_{n}.dat", base_path=tmp_path, encodings=encoding, encoding=True,
+        debug=True)
 
     assert frame.empty, \
         f"Expected no rows since the encoded name no longer matches, got {frame}"
+    assert frame.attrs["unmatched"] == ["a_qq.dat"]
     captured = capsys.readouterr()
-    assert "Failed to parse" in captured.out, \
+    assert f'Failed to parse "{data_path}"' in captured.out, \
         f"Expected a 'Failed to parse' message, got: {captured.out!r}"
+
+
+def _write_files(root, *names):
+    for name in names:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("data\n", encoding="utf-8")
+
+
+def test_parse_field_name_prefix_of_another(tmp_path):
+    """A field whose name begins another field's name leaves that field intact."""
+    _write_files(tmp_path, "run1/run1_a.h5", "run2/run2_b.h5")
+
+    frame = ParaFrame.parse("run{run}/run{run}_{run_id}.h5", base_path=tmp_path)
+
+    assert frame["path"].tolist() == ["run1/run1_a.h5", "run2/run2_b.h5"]
+    assert list(frame.columns) == ["path", "run", "run_id"]
+    assert frame["run"].tolist() == [1, 2]
+    assert frame["run_id"].tolist() == ["a", "b"]
+
+
+def test_parse_prefix_field_kwarg_filters(tmp_path, capsys):
+    """A value given for {ab} selects files even when {a} is also a field."""
+    _write_files(tmp_path, "x_y.txt", "p_q.txt")
+
+    frame = ParaFrame.parse("{ab}_{a}.txt", base_path=tmp_path, ab="x", debug=True)
+
+    assert frame["path"].tolist() == ["x_y.txt"]
+    assert list(frame.columns) == ["path", "ab", "a"]
+    assert f'Pattern: "{tmp_path / "x_*.txt"}"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("fmt,field", [
+    ("data/a_{}/b.txt", "an empty field"),
+    ("data/a_{}/b_{b:d}.txt", "an empty field"),
+    ("data/a_{0}/b_{b:d}.txt", "the field {0}"),
+])
+def test_parse_unnamed_field_raises_valueerror(tmp_path, fmt, field):
+    _write_files(tmp_path, "data/a_1/b.txt", "data/a_1/b_10.txt")
+
+    with pytest.raises(ValueError) as excinfo:
+        ParaFrame.parse(fmt, base_path=tmp_path)
+
+    assert str(excinfo.value) == (
+        f"Format fields need names, as in {{run}}; {fmt!r} has {field}")
+
+
+@pytest.mark.parametrize("fmt,message", [
+    ("a_{a.x}.txt", "must be identifiers, as in {run_id}; 'a_{a.x}.txt' has {a.x}"),
+    ("a_{a[0]}.txt", "must be identifiers, as in {run_id}; 'a_{a[0]}.txt' has {a[0]}"),
+    ("a_{ a }.txt", "must be identifiers, as in {run_id}; 'a_{ a }.txt' has { a }"),
+    ("a_{a!r}.txt", "cannot convert values; 'a_{a!r}.txt' has {a!r}"),
+    ("a_{a:{w}d}.txt", "cannot contain fields; 'a_{a:{w}d}.txt' has {a:{w}d}"),
+    ("a_{a:q}.txt", "format spec 'q' not recognised"),
+])
+def test_parse_rejects_fields_that_are_not_plain_names(tmp_path, fmt, message):
+    _write_files(tmp_path, "a_1.txt")
+
+    with pytest.raises(ValueError, match=re.escape(message)):
+        ParaFrame.parse(fmt, base_path=tmp_path)
+
+
+def test_parse_positional_values_fill_unnamed_fields(tmp_path):
+    _write_files(tmp_path, "a_1_x.txt", "a_2_x.txt")
+
+    frame = ParaFrame.parse("a_{}_{c}.txt", 1, base_path=tmp_path)
+
+    assert frame["path"].tolist() == ["a_1_x.txt"]
+    with pytest.raises(ValueError, match="more unnamed fields than the 1 positional"):
+        ParaFrame.parse("a_{}_{}.txt", 1, base_path=tmp_path)
+
+
+def test_parse_enforces_type_spec(tmp_path, capsys):
+    """A name whose value does not fit the field's type is unmatched, quietly."""
+    _write_files(tmp_path, "a_1.txt", "a_x.txt")
+
+    frame = ParaFrame.parse("a_{a:d}.txt", base_path=tmp_path)
+
+    assert frame["path"].tolist() == ["a_1.txt"]
+    assert frame["a"].tolist() == [1]
+    assert frame.attrs["unmatched"] == ["a_x.txt"]
+    assert capsys.readouterr().out == ""
 
 
 ### _find_encoding_settings tests ###

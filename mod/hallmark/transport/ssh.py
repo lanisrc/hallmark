@@ -236,12 +236,14 @@ class SshBackend(DataBackend):
         file_limit=None,
         capture_stderr=False,
         report_progress=False,
+        action="SSH operation",
     ):
         """
         Run an OpenSSH command with output limits and a total time limit.
 
         Optionally bound a downloaded metadata file's size or report received
         dataset bytes. Always stop and reap the client before returning.
+        ``action`` names the operation if the client fails.
         """
         output = bytearray()
         stderr_size = 0
@@ -300,7 +302,7 @@ class SshBackend(DataBackend):
                     # stderr is untrusted and may contain echoed credentials/paths.
                     # SFTP exits do not reliably distinguish absence from auth errors.
                     raise DownloadError(
-                        f"SSH operation failed for {self.context.remote.display}; "
+                        f"{action} failed on {self.context.remote.display}; "
                         "check access, file existence, and server capabilities"
                     )
                 return bytes(diagnostics if capture_stderr else output)
@@ -385,6 +387,7 @@ class SshBackend(DataBackend):
                 destination=destination,
                 file_limit=file_limit,
                 report_progress=file_limit is None,
+                action=f"SSH transfer of {relative_path}",
             )
 
     def server_checksums(self, relative_paths, algorithm):

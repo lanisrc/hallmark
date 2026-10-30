@@ -27,9 +27,12 @@ from contextlib import contextmanager
 from functools import cached_property
 from pathlib import Path
 from typing import Optional, Union
-from io import BytesIO
+from io import BytesIO, StringIO
+import glob
 import json
 import os
+import tempfile
+import threading
 
 try:
     import fcntl
@@ -37,7 +40,7 @@ except ImportError:  # Windows
     fcntl = None
     import msvcrt
 
-from git import Repo
+from git import Actor, Repo
 from git.exc import GitCommandError
 from shutil import rmtree
 from tempfile import TemporaryFile
@@ -107,12 +110,40 @@ def write_yaml(data, handle) -> None:
         width=float("inf"))
 
 
+def _yaml_text(data) -> str:
+    """Return ``data`` as the YAML text ``write_yaml`` writes."""
+    handle = StringIO()
+    write_yaml(data, handle)
+    return handle.getvalue()
+
+
 def _read_tsv_blob(blob, empty: pd.DataFrame) -> pd.DataFrame:
     """Read a staged or committed TSV; an empty file gives ``empty``."""
     content = blob.data_stream.read()
     if not content.strip():
         return empty
     return pd.read_csv(BytesIO(content), sep="\t", dtype=str, keep_default_na=False)
+
+
+def _identity_from_environ(role: str, default) -> tuple[Optional[str], Optional[str]]:
+    """Let GIT_<role>_NAME and GIT_<role>_EMAIL override each default, as git does."""
+    return tuple(os.environ.get(f"GIT_{role}_{key}", "").strip() or value
+                 for key, value in zip(("NAME", "EMAIL"), default))
+
+
+# One mutex and depth per lock file, shared by every Dothm open on it in this
+# process: a second flock on the same file would wait for the first.
+_STATE_LOCKS: dict = {}
+_STATE_LOCKS_GUARD = threading.Lock()
+
+
+def _process_state_lock(lock_path: Path):
+    """Return the in-process mutex and per-thread depth for ``lock_path``."""
+    key = os.path.realpath(lock_path)
+    with _STATE_LOCKS_GUARD:
+        if key not in _STATE_LOCKS:
+            _STATE_LOCKS[key] = (threading.RLock(), threading.local())
+        return _STATE_LOCKS[key]
 
 
 def data_tsv_text(data: pd.DataFrame) -> str:
@@ -184,6 +215,7 @@ class Dothm(Repo):
             'repository')
         kwargs.setdefault("initial_branch", "main")
         dothm = super().init(*args, **kwargs)
+        dothm.exclude_objects()
 
         # if no commits exist, create a README.md file to initialize the repository
         if not dothm.heads:
@@ -193,7 +225,7 @@ class Dothm(Repo):
 
     This is a dot-hallmark repository.
     It is a git-version-controlled dataset index used by `hallmark`.
-    See https://l6a.github.io/hallmark/ for `hallmark` usage.
+    See https://lanisrc.github.io/hallmark/ for `hallmark` usage.
     """,
                 encoding="utf-8")
             # add the README.md file to the git index and commit it
@@ -251,6 +283,7 @@ remote:
         try:
             super().clone_from(url, str(to_path))
             dothm = cls(str(to_path))
+            dothm.exclude_objects()
 
             commit = dothm.head.commit
             initial_message = "Initial commit: local `.hm` repository"
@@ -277,6 +310,27 @@ remote:
                 fallback=f'Failed to clone from "{url}"',
                 clone_path=to_path,
                 display_path=display_path) from exc
+
+    def exclude_objects(self) -> None:
+        """
+        Exclude the object store from Git, which must never commit or clean it.
+
+        Linked worktrees share the exclude file, and there ``objects`` is a
+        symlink, so the pattern has no trailing slash. A tracked
+        ``.gitignore`` would change the initial commit ``clone`` recognises.
+        """
+        exclude = Path(self.common_dir) / "info" / "exclude"
+        try:
+            text = exclude.read_bytes()
+        except FileNotFoundError:
+            text = b""
+        # Git trims trailing spaces from a pattern, but not tabs.
+        if any(line.rstrip(b" ") == b"/objects" for line in text.splitlines()):
+            return
+        exclude.parent.mkdir(exist_ok=True)
+        with exclude.open("ab") as handle:
+            handle.write(b"/objects\n" if not text or text.endswith(b"\n")
+                         else b"\n/objects\n")
 
     def link_worktree(self, path: Union[Path, str], branch: Optional[str] = None):
         """
@@ -328,7 +382,8 @@ remote:
         values = []
         for key in ("name", "email"):
             try:
-                value = str(reader.get_value("user", key)).strip()
+                # get_value would read a name such as 007 as the number 7.
+                value = reader.get("user", key).strip()
             except (NoSectionError, NoOptionError):
                 value = ""
             values.append(value or None)
@@ -350,14 +405,33 @@ remote:
         """
         Return the commit author name and email git will commit with.
 
-        Values set for this repository take precedence over the user's global
-        and system git configuration.
+        GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL take precedence, as in git; then
+        values set for this repository; then the user's global and system git
+        configuration.
 
         Returns:
             tuple[str | None, str | None]: The name and email, each None when
-            it is not configured at any level, or is blank.
+            it is not set at any level, or is blank.
         """
-        return self._read_identity(self.config_reader())
+        return _identity_from_environ(
+            "AUTHOR", self._read_identity(self.config_reader()))
+
+    def commit_actors(self) -> tuple[Actor, Actor]:
+        """
+        Return the author and committer a commit is signed with.
+
+        GIT_COMMITTER_NAME and GIT_COMMITTER_EMAIL override the configuration
+        for the committer, as in git. A committer set neither way is the
+        author, not a name GitPython would guess from the user and host.
+
+        Returns:
+            tuple[Actor, Actor]: The author and the committer.
+        """
+        author = self.effective_identity()
+        configured = self._read_identity(self.config_reader())
+        committer = _identity_from_environ(
+            "COMMITTER", [own or other for own, other in zip(configured, author)])
+        return Actor(*author), Actor(*committer)
 
     def load_state(self, revision=None, *, staged=False) -> State:
         """
@@ -452,22 +526,38 @@ remote:
 
         Commands that run for minutes, such as downloads and scans, re-read
         the state under this lock before saving, so a change another command
-        saved in the meantime is kept rather than overwritten.
+        saved in the meantime is kept rather than overwritten. A thread that
+        holds the lock may take it again, through any Dothm of the same
+        ``.hm``, as save_state does.
         """
-        with open(Path(self.git_dir) / "hallmark.lock", "a+b") as handle:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            else:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
+        lock_path = Path(self.git_dir) / "hallmark.lock"
+        mutex, held = _process_state_lock(lock_path)
+        with mutex:
+            depth = getattr(held, "depth", 0)
+            if depth:
+                # A second flock from this process would wait for itself.
+                held.depth = depth + 1
+                try:
+                    yield
+                finally:
+                    held.depth = depth
+                return
+            with open(lock_path, "a+b") as handle:
                 if fcntl is not None:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 else:
                     handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                held.depth = 1
+                try:
+                    yield
+                finally:
+                    held.depth = 0
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    else:
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
     def _legacy_record_paths(self) -> list[str]:
         """Return the index's per-row ``versions/`` records from older layouts."""
@@ -483,14 +573,12 @@ remote:
 
     def _drop_legacy_records(self) -> None:
         """
-        Stop tracking the per-row ``versions/`` records older commits keep.
+        Remove the per-row ``versions/`` records older layouts kept, once
+        save_state has unstaged them.
 
         data.tsv is the catalogue's one record. Older commits stay readable,
         because ``load_state`` still reads their records.
         """
-        legacy = self._legacy_record_paths()
-        if legacy:
-            self._remove_from_index(legacy)
         rmtree(self.path / "versions", ignore_errors=True)
         (self.path / "versions.yml").unlink(missing_ok=True)
 
@@ -614,11 +702,12 @@ remote:
     def save_state(self, state: State) -> None:
         """
         Write and stage ``config.yml``, ``meta.yml``, ``data.tsv`` and the
-        other TSVs that ``config.yml`` names.
+        other TSVs that ``config.yml`` names, all of them or none.
 
         Rows are saved, and kept in memory, in the form load_state returns, so
         saving a loaded state changes nothing. Each row's path is checked first.
-        A table without columns, never written, is not created.
+        A table without columns, never written, is not created. If a file or
+        the index cannot be updated, every file keeps its previous content.
 
         Args:
             state (State): State to save; its rows are normalized in place.
@@ -637,15 +726,149 @@ remote:
         for frame in state.tables.values():
             for path in frame.get("path", []):
                 validate_relative_path(path, label="catalogue path")
-        self.write_yaml(state.config, "config")
-        self.write_yaml(state.meta, "meta")
-        self.write_tsv(state.data, "data")
         written = [name for name, frame in state.tables.items()
                    if len(frame.columns)]
-        for name in written:
-            self.write_tsv(state.tables[name], name)
-        self._add_to_index(["config.yml", "meta.yml", "data.tsv", *written])
-        self._drop_legacy_records()
+        texts = {"config.yml": _yaml_text(state.config),
+                 "meta.yml": _yaml_text(state.meta),
+                 "data.tsv": data_tsv_text(state.data),
+                 **{name: data_tsv_text(state.tables[name]) for name in written}}
+        with self.state_lock():
+            legacy = self._legacy_record_paths()
+
+            def stage():
+                self._add_to_index(list(texts))
+                # load_state reads data.tsv only once these are gone.
+                if legacy:
+                    self._remove_from_index(legacy)
+
+            self._replace_together(texts, then=stage, also=legacy)
+            self._drop_legacy_records()
+
+    def _replace_together(self, texts: dict, then, also=()) -> None:
+        """
+        Replace files in ``.hm`` so that a failure leaves each one as it was.
+
+        Every text is written to a temporary file before any file is replaced,
+        so a full disk fails first. If a replacement or ``then`` fails, or the
+        process is interrupted, the files get their previous content back, the
+        index its previous entries for them, and the original error is raised.
+        If the index cannot be put back, the files keep the content it stages.
+
+        Args:
+            texts (dict): Text by file name in ``.hm``, in replacement order.
+            then (Callable[[], None]): Run once every file is replaced, to
+                stage them.
+            also: Other paths whose index entries ``then`` changes; they are
+                put back with the rest.
+        """
+        for name in texts:
+            # Left by a save that was killed.
+            for stale in self.path.glob(f".{glob.escape(name)}.*.tmp"):
+                stale.unlink(missing_ok=True)
+        targets = {name: self.path / name for name in texts}
+        previous, temps, replaced, restore_index = {}, {}, [], False
+        indexed = {*texts, *also}
+        try:
+            for name, path in targets.items():
+                previous[name] = self._keep_previous(path)
+            for name, text in texts.items():
+                descriptor, temp = tempfile.mkstemp(
+                    prefix=f".{name}.", suffix=".tmp", dir=self.path)
+                temps[name] = Path(temp)
+                newline = "" if name.lower().endswith(".tsv") else None
+                with os.fdopen(descriptor, "w", encoding="utf-8",
+                               newline=newline) as handle:
+                    handle.write(text)
+            entries = self._entries_of(self.index, indexed)
+            for name, temp in temps.items():
+                # Listed first: an interrupt can arrive just after the rename.
+                replaced.append(name)
+                temp.replace(targets[name])
+            restore_index = True
+            then()
+        except BaseException as exc:
+            unrestored = []
+            if restore_index:
+                try:
+                    self._restore_entries(indexed, entries)
+                except BaseException:
+                    # The index keeps this save's entries, so the files do too.
+                    unrestored = ["the index", *map(str, targets.values())]
+                    replaced = []
+            for name in reversed(replaced):
+                # Not stopped by a second interrupt: the files must match again.
+                try:
+                    self._restore_file(targets[name], previous[name])
+                except BaseException:
+                    unrestored.append(str(targets[name]))
+            if unrestored and hasattr(exc, "add_note"):
+                exc.add_note("Could not restore after the failed save: "
+                             + ", ".join(unrestored))
+            raise
+        finally:
+            for path in [*temps.values(), *previous.values()]:
+                if isinstance(path, Path):
+                    path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _keep_previous(path: Path):
+        """
+        Used by _replace_together.
+        Return what restores ``path``: a hard link to it, which a rollback
+        renames back without writing, its bytes if no link can be made, or
+        None if it does not exist.
+        """
+        if not path.is_file():
+            return None
+        descriptor, name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        os.close(descriptor)
+        backup = Path(name)
+        try:
+            backup.unlink()
+            os.link(path, backup)
+            return backup
+        except OSError:
+            backup.unlink(missing_ok=True)
+            return path.read_bytes()
+
+    @staticmethod
+    def _restore_file(path: Path, previous) -> None:
+        """Used by _replace_together. Put back what _keep_previous returned."""
+        if previous is None:
+            path.unlink(missing_ok=True)
+            return
+        temp = None
+        try:
+            if isinstance(previous, bytes):
+                descriptor, temp = tempfile.mkstemp(
+                    prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(previous)
+                previous = temp
+            # Not Path.replace, which the chaos tests count as forward writes.
+            os.replace(previous, path)
+        finally:
+            if temp is not None:
+                Path(temp).unlink(missing_ok=True)
+
+    @staticmethod
+    def _entries_of(index, paths) -> dict:
+        """Return the entries of ``paths`` in ``index``, keyed by (path, stage)."""
+        return {key: entry for key, entry in index.entries.items()
+                if key[0] in paths}
+
+    def _restore_entries(self, paths, entries) -> None:
+        """Used by _replace_together. Give ``paths`` their earlier index entries."""
+        # Each access to self.index reads a new index object.
+        index = self.index
+        current = self._entries_of(index, paths)
+        if current == entries:
+            return
+        for key in current:
+            del index.entries[key]
+        index.entries.update(entries)
+        index.write()
 
     def _add_to_index(self, paths) -> None:
         """

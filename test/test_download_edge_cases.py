@@ -276,8 +276,8 @@ def test_a_plan_with_files_needs_an_object_store(tmp_path, server):
 
 
 @pytest.mark.parametrize("checksum, message", [
-    (("crc32", "abcd1234"), "Unsupported checksum algorithm: 'crc32'"),
-    (("sha256", "xyz"), "Invalid sha256 checksum: 'xyz'"),
+    (("crc32", "abcd1234"), "a.fits: Unsupported checksum algorithm: 'crc32'"),
+    (("sha256", "xyz"), "a.fits: Invalid sha256 checksum: 'xyz'"),
 ])
 def test_an_unusable_checksum_fails_its_file_before_any_transfer(
         repo, server, checksum, message):
@@ -304,7 +304,7 @@ def test_content_that_no_longer_matches_its_recorded_sha1_is_refused(
     assert paths(plan.items) == ["a.fits"]
     assert fetched == ["a.fits"]
     assert result["failed"] == 1
-    assert result["errors"] == ["Checksum mismatch for a.fits (sha1)"]
+    assert result["errors"] == ["a.fits: Checksum mismatch (sha1)"]
     assert not (repo.worktree / "a.fits").exists()
     assert not repo.objects.contains(sha1(b"ALPHA"))
     assert list(repo.objects.tmp.iterdir()) == []
@@ -320,7 +320,7 @@ def test_a_recorded_sha1_is_checked_even_when_the_checksum_matches(repo, server)
     repo.dothm.save_state(repo.state)
     _, result = download(repo)
     assert (result["succeeded"], result["failed"]) == (1, 1)
-    assert result["errors"] == ["Checksum mismatch for a.fits (sha1)"]
+    assert result["errors"] == ["a.fits: Checksum mismatch (sha1)"]
     assert not (repo.worktree / "a.fits").exists()
     assert (repo.worktree / "b.fits").read_bytes() == b"bravo"
 
@@ -335,7 +335,7 @@ def test_a_local_write_failure_is_reported_for_its_file(repo, server, monkeypatc
     _, result = download(repo)
     assert (result["succeeded"], result["failed"]) == (1, 1)
     assert result["errors"] == [
-        "Failed to download a.fits: [Errno 28] No space left on device"]
+        "a.fits: Download failed: [Errno 28] No space left on device"]
     assert not (repo.worktree / "a.fits").exists()
     assert (repo.worktree / "b.fits").read_bytes() == b"bravo"
     assert list(repo.objects.tmp.iterdir()) == []

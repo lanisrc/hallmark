@@ -1,4 +1,4 @@
-"""Run both demo workflows with a disposable HTTP dataset instead of private SSH."""
+"""Run the shipped demo notebooks with a disposable HTTP dataset instead of SSH."""
 
 from functools import partial
 from hashlib import sha256
@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import site
 import subprocess
 import sys
 from threading import Thread
@@ -82,29 +83,29 @@ def demo_dataset(tmp_path):
     "demo_add.ipynb",
     "demo_private_data.ipynb",
 ])
-def test_demo_notebook_workflow(tmp_path, request, notebook):
+def test_demo_notebook_workflow(tmp_path, demo_dataset, notebook):
     """Execute every code cell, retaining state and failing on the first error.
 
     JSON loading avoids adding Jupyter dependencies to the test suite. Bash cells
     run in one shell and Python cells in one interpreter. Only the documented SSH
     URL is replaced; discovery, downloads, clones, and local commands are real.
+    The notebooks run as on a fresh machine, without a git identity or netrc.
     """
-    notebook_path = DEMO_DIR / notebook
-    dataset_url = DEMO_URL
-    if notebook == "demo_add.ipynb":
-        # Retain staging workflow coverage without changing the codex demos.
-        notebook_path = Path(__file__).parent / "fixtures" / notebook
-    else:
-        dataset_url = request.getfixturevalue("demo_dataset")
-    document = json.loads(notebook_path.read_text(encoding="utf-8"))
-    cells = [(index, "".join(cell["source"]).replace(DEMO_URL, dataset_url))
+    document = json.loads((DEMO_DIR / notebook).read_text(encoding="utf-8"))
+    cells = [(index, "".join(cell["source"]).replace(DEMO_URL, demo_dataset))
              for index, cell in enumerate(document["cells"], start=1)
              if cell["cell_type"] == "code"]
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith("GIT_")}
+    env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
+               NETRC=str(tmp_path / "no-netrc"), TMPDIR=str(tmp_path))
+    # Python finds packages installed with pip --user through HOME.
+    env.setdefault("PYTHONUSERBASE", site.getuserbase())
     # Include the checkout for subprocesses even when the package is not installed.
-    env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [
         str(DEMO_DIR.parent / "mod"), env.get("PYTHONPATH")]))
-    env["TMPDIR"] = str(tmp_path)
     if document["metadata"]["kernelspec"]["language"] == "bash":
         bash = shutil.which("bash")
         if bash is None:

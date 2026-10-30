@@ -21,16 +21,20 @@ in an object store (see ``hallmark.repo.objects``).
 """
 
 from __future__ import annotations
+import errno
 import os
+import stat
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from git.exc import GitCommandError
 
 from .branches import (
-    checkout, create_branch, current_branch, current_commit, add_worktree)
+    checkout, checkout_folders, create_branch, current_branch, current_commit,
+    add_worktree, recover_interrupted_checkout)
 from ..remote.add import add_remote
 from .dothm import Dothm
 from .catalog import catalog_rows
@@ -41,7 +45,7 @@ from ..paraframe import ParaFrame
 from .manifest import build_file_table, file_versions_by_path, iter_manifest_entries
 from .history import (
     load_head_state)
-from ..error import DestinationExistsError
+from ..error import CheckoutError, DestinationExistsError
 from ..utils import (
     FILE_IO_CHUNK_SIZE,
     iter_repository_files,
@@ -49,6 +53,7 @@ from ..utils import (
     resolve_path_in_root,
     apply_regex_replacement,
     try_numeric_conversion,
+    validate_format_fields,
     validate_relative_path)
 from .changes import find_changed_and_missing_files, working_directory_for_repo
 from .config import (
@@ -105,6 +110,19 @@ class Repo:
         dothm_path, worktree_path = self.resolve_repo_paths(path)
         self.dothm = Dothm(dothm_path)
         self.worktree = worktree_path and Worktree(worktree_path)
+        # A checkout killed partway is rolled back before the state is read.
+        if self.worktree is not None and checkout_folders(self.worktree):
+            with ExitStack() as stack:
+                try:
+                    stack.enter_context(self.dothm.state_lock())
+                # msvcrt gives up after about 10 s; flock waits.
+                except OSError as exc:
+                    if exc.errno != errno.EDEADLK:
+                        raise
+                    raise CheckoutError(
+                        f"another hm checkout is running in {self.worktree}"
+                    ) from exc
+                recover_interrupted_checkout(self)
         self.state = self.dothm.load_state()
         self.download_result = None
 
@@ -116,6 +134,11 @@ class Repo:
         if dothm_objects.resolve() != main_objects.resolve() \
         and not dothm_objects.exists():
             dothm_objects.symlink_to(main_objects)
+        try:
+            self.dothm.exclude_objects()
+        except OSError:
+            # A read-only repository must still open for hm status and hm log.
+            pass
 
     def _resolve_worktree_path(self, value, *, label: str = "tracked path") -> Path:
         """
@@ -198,6 +221,7 @@ class Repo:
             paths = (path.relative_to(root) for path in iter_repository_files(root))
 
         rows = []
+        unmatched = []
         for parent in sorted({path.parent for path in paths}):
             found = ParaFrame.parse(
                 fmt, base_path=root / parent,
@@ -206,8 +230,12 @@ class Repo:
             for row in found.to_dict(orient="records"):
                 row["path"] = (parent / row["path"]).as_posix()
                 rows.append(row)
+            unmatched.extend((parent / path).as_posix()
+                             for path in found.attrs["unmatched"])
 
-        return ParaFrame(rows, base_path=root, encodings=encodings)
+        result = ParaFrame(rows, base_path=root, encodings=encodings)
+        result.attrs["unmatched"] = sorted(unmatched)
+        return result
 
 
     @classmethod
@@ -246,7 +274,12 @@ class Repo:
 
     def _download_cloned_files(self, *, approve, approved, max_workers, progress,
                                  filter=None, fmt=None):
-        """Run an approved transfer after catalog creation has completed."""
+        """
+        Run an approved transfer after catalog creation has completed.
+
+        Raises:
+            DownloadError: If files failed; its ``result`` holds the results.
+        """
         from ..remote.download import DownloadError
 
         plan = self.plan_download(filter=filter, fmt=fmt)
@@ -258,11 +291,13 @@ class Repo:
             plan, approved=True, max_workers=max_workers, progress=progress)
         if self.download_result["failed"]:
             details = "\n".join(self.download_result["errors"][:5])
-            raise DownloadError(
+            error = DownloadError(
                 f"Failed to download {self.download_result['failed']} "
                 f"file(s):\n{details}\n"
                 f'Catalog kept at "{self.dothm.path}". '
                 "Successfully downloaded files were kept.")
+            error.result = self.download_result
+            raise error
 
     @classmethod
     def clone(
@@ -318,10 +353,11 @@ class Repo:
 
         Raises:
             DestinationExistsError: If the destination already exists.
-            CloneError: If a requested catalog is missing or invalid.
+            CloneError: If a requested catalog is missing, invalid or unreadable.
             ValueError: If source options are invalid or conflict.
-            DownloadError: If metadata access or downloading fails, or a download
-                is requested for a bare destination.
+            DownloadError: If downloading fails, or a download is requested for
+                a bare destination. After failed transfers, its ``result`` holds
+                the download results, as ``download_result`` does.
         """
         from ..remote.clone import clone_catalog
         from ..remote.discovery import path_matches
@@ -688,6 +724,11 @@ class Repo:
             - ``untracked`` (list[str]): Worktree files the catalogue does not
               list.
             - ``remote_catalog`` (bool): Whether the catalogue is remote.
+            - ``outdated`` (list[str]): Downloads of a remote catalogue that
+              hold another version than their row, as after a checkout.
+            - ``outdated_stored`` (int): How many of those rows' files are in
+              ``.hm/objects``, so ``hm download`` places them without a
+              transfer.
         """
         staged_state = self.dothm.load_state(staged=True)
         head_state = load_head_state(self)
@@ -720,6 +761,8 @@ class Repo:
         remote_catalog = is_remote_catalog(staged_state)
         worktree_modified: list[str] = []
         worktree_deleted: list[str] = []
+        outdated: list[str] = []
+        outdated_stored = 0
         staged_paths = set(staged_map)
 
         # If the repository has a worktree, check for modified and missing tracked files
@@ -729,7 +772,9 @@ class Repo:
                     self, staged_map
                 )
             else:
-                worktree_modified = self._downloads_changed_in_place(staged_state)
+                downloads = self._downloaded_rows(staged_state)
+                worktree_modified = self._downloads_changed_in_place(downloads)
+                outdated, outdated_stored = self._outdated_downloads(downloads)
             worktree_root = Path(self.worktree)
             # generator that yields relative paths of all files in the worktree
             worktree_files = (full_path.relative_to(worktree_root).as_posix()
@@ -765,10 +810,48 @@ class Repo:
                 "deleted": sorted(worktree_deleted),
             },
             "untracked": sorted(untracked),
+            "outdated": outdated,
+            "outdated_stored": outdated_stored,
             "remote_catalog": remote_catalog,
         }
 
-    def _downloads_changed_in_place(self, state) -> list[str]:
+    def outdated_downloads(self) -> tuple[list[str], int]:
+        """
+        Return ``status``'s outdated downloads without its other checks.
+
+        hm checkout reports them after switching a remote catalog, without
+        walking the worktree for untracked files.
+
+        Returns:
+            tuple[list[str], int]: ``status()["outdated"]`` and
+            ``status()["outdated_stored"]``; empty for a local catalog.
+        """
+        state = self.dothm.load_state(staged=True)
+        if self.worktree is None or not is_remote_catalog(state):
+            return [], 0
+        return self._outdated_downloads(self._downloaded_rows(state))
+
+    def _downloaded_rows(self, state) -> list[tuple[dict, Path]]:
+        """
+        Used by status and outdated_downloads.
+        Return each catalog row with a SHA-1, and its path in the worktree.
+
+        Resolving the path is the costly part of checking a download, so the
+        checks share it.
+        """
+        found = []
+        for row in catalog_rows(state):
+            if not row.get("sha1", ""):
+                continue
+            try:
+                destination = resolve_path_in_root(
+                    self.worktree, row["path"], label="downloaded path")
+            except (ValueError, OSError):
+                continue
+            found.append((row, destination))
+        return found
+
+    def _downloads_changed_in_place(self, downloads) -> list[str]:
         """
         Used by status.
         List downloaded files whose object changed since it was stored.
@@ -777,18 +860,51 @@ class Repo:
         both. Only recorded stats are compared; nothing is hashed.
         """
         changed = []
-        for row in catalog_rows(state):
-            path, sha1 = row["path"], row.get("sha1", "")
-            if not sha1:
-                continue
-            try:
-                destination = resolve_path_in_root(
-                    self.worktree, path, label="downloaded path")
-            except ValueError:
-                continue
+        for row, destination in downloads:
+            path, sha1 = row["path"], row["sha1"]
             if self.objects.is_linked(sha1, destination) and self.objects.changed(sha1):
                 changed.append(path)
         return changed
+
+    def _outdated_downloads(self, downloads) -> tuple[list[str], int]:
+        """
+        Used by status and outdated_downloads.
+        List downloads that hold another version than their catalog row.
+
+        A checkout of a remote catalog switches only the catalog, so files
+        keep the other branch's content until hm download replaces them. A
+        file other than the row's object is outdated when its size differs
+        from the row's, or when it is a hard link to another stored object.
+        Only stats are compared; nothing is hashed.
+
+        Returns:
+            tuple[list[str], int]: The outdated paths, and how many of their
+            rows' objects are in .hm/objects, to be placed without a transfer.
+        """
+        outdated, stored, stored_inodes = [], 0, None
+        for row, destination in downloads:
+            path, sha1 = row["path"], row["sha1"]
+            try:
+                info = os.lstat(destination)
+                linked = self.objects.is_linked(sha1, destination)
+            except (ValueError, OSError):
+                # No file, or a malformed SHA-1: nothing to compare.
+                continue
+            if not stat.S_ISREG(info.st_mode) or linked:
+                continue
+            size = row.get("size_bytes", "")
+            if not size.isdecimal() or int(size) == info.st_size:
+                # At the same size, only a link to another object tells.
+                if info.st_nlink < 2:
+                    continue
+                if stored_inodes is None:
+                    stored_inodes = self.objects.by_inode()
+                if (info.st_dev, info.st_ino) not in stored_inodes:
+                    continue
+            outdated.append(path)
+            if self.objects.contains(sha1) and not self.objects.changed(sha1):
+                stored += 1
+        return sorted(outdated), stored
 
     def add(self, fmt: str, encoding: bool = False, *, filter=None,
             remote_fmt=None, auth=None, backend=None, backend_options=None,
@@ -853,6 +969,7 @@ class Repo:
         # Normalize the format string to ensure it is a non-empty string
         fmt = require_nonempty_string(fmt, label="format")
         check_pattern_fields(fmt)
+        validate_format_fields(fmt)
         # if the format string has no filename fields, treat it as a literal path
         if not filename_fields(fmt):
             # return early since there are no filename fields to parse
@@ -895,6 +1012,7 @@ class Repo:
             raise RuntimeError(
                 'Set your name and email first: hm config user.name "..." '
                 'and hm config user.email "..."')
+        author, committer = self.dothm.commit_actors()
         changes = (
             self.dothm.index.diff("HEAD")
             if self.dothm.head.is_valid() else self.dothm.index.entries
@@ -904,7 +1022,7 @@ class Repo:
 
         staged_state = self.dothm.load_state(staged=True)
         if is_remote_catalog(staged_state) or staged_state.data.empty:
-            self.dothm.index.commit(msg)
+            self.dothm.index.commit(msg, author=author, committer=committer)
             return True
 
         current_fmt = single_data_format(staged_state.config)
@@ -942,7 +1060,7 @@ class Repo:
                 actual_sha1=actual_checksum_by_path[path],
             )
 
-        self.dothm.index.commit(msg)
+        self.dothm.index.commit(msg, author=author, committer=committer)
         return True
 
     def restore_staged(self, paths: list[str]) -> None:
@@ -1062,8 +1180,9 @@ class Repo:
         '''
         Return the commit author name and email git will actually sign with.
 
-        Values stored for this repository take precedence, falling back to the
-        user's global and system git configuration.
+        GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL take precedence, as in git, then
+        values stored for this repository, then the user's global and system
+        git configuration.
 
         Returns:
             tuple[string | None, string | None]: The resolved name and email,
@@ -1087,14 +1206,20 @@ class Repo:
 
     def checkout(self, target_branch: str) -> bool:
         '''
-        Switch to a different branch and update the worktree. Raises ValueError if
-        branch name is invalid. Raises CheckoutError if the workign directoary
+        Switch to a different branch or commit. Raises ValueError if the
+        branch name is invalid. Raises CheckoutError if the working directory
         is not clean or checkout can't be completed safely.
+
+        Tracked local files are rewritten from the target's state. A remote
+        catalog's checkout switches only the catalog: downloads that now hold
+        another version are listed in ``status()["outdated"]`` until
+        ``download`` replaces them, from .hm/objects where they are stored.
 
         Args:
             target_branch (string): Branch to switch to.
         Returns:
-            boolean: True if checkout succeeds.
+            boolean: True if checkout succeeds; False if ``target_branch`` is
+            the current branch, which changes nothing.
         Raises:
             CheckoutError: If the checkout cannot be completed safely.
         '''
@@ -1105,6 +1230,11 @@ class Repo:
         Create or link a new worktree for a branch. Raises ValueError if branch name
         is invalid.
         Raises RuntimeError if called in a bare repository or worktree creation fails.
+
+        Local files are restored as writable copies. A remote catalogue's files
+        whose content is in ``.hm/objects`` are linked read-only, as downloads
+        are; the rest wait for ``hm download`` in the new worktree. Running it
+        again finishes a worktree an interrupted call left incomplete.
 
         Args:
             target_branch (string): Name of the branch to attach.

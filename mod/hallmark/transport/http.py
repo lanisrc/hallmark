@@ -19,8 +19,8 @@ from urllib3.exceptions import (HTTPError as Urllib3Error, ProtocolError,
 from urllib3.response import HTTPResponse as Urllib3Response
 
 from ..utils import REMOTE_REQUEST_TIMEOUT
-from .base import (DownloadError, RemoteConfigurationError, RemoteEntry,
-                   RemoteObjectMissing, DataBackend, decode_metadata,
+from .base import (AccessRefused, DownloadError, RemoteConfigurationError,
+                   RemoteEntry, RemoteObjectMissing, DataBackend, decode_metadata,
                    reject_control_characters)
 from .auth import LOOPBACK_HOSTS
 from .index import _parse_directory_listing, _redirected_directory
@@ -159,24 +159,56 @@ class HttpBackend(DataBackend):
             **self._auth_option(),
         ))
 
-    def _download_error(self, exc):
-        """Describe an HTTP failure without exposing response contents."""
-        # Requests exceptions can embed credentials in their URL or response body.
+    def _download_error(self, exc, action):
+        """
+        Describe an HTTP failure by its status or kind, never by its text.
+
+        Requests exceptions can embed credentials in their URL or response
+        body. Commands add the advice on credentials an AccessRefused needs.
+
+        Args:
+            exc (Exception): A Requests or urllib3 error.
+            action (str): What failed, such as ``Download from HOST``.
+        """
         status = getattr(getattr(exc, "response", None), "status_code", None)
-        cls = RemoteObjectMissing if status == 404 else DownloadError
-        if isinstance(status, int):
-            detail = f"HTTP {status}"
-        elif isinstance(exc, ReadTimeoutError):
-            detail = "the connection stalled"
-        elif isinstance(exc, ProtocolError):
-            detail = "the connection was reset or the body was truncated"
+        # Requests reports a stalled body, or a connection the server closed
+        # before replying, as a ConnectionError around urllib3's error.
+        inner = (exc.args[0] if isinstance(exc, requests.ConnectionError)
+                 and exc.args else exc)
+        stalled = isinstance(exc, requests.Timeout) or isinstance(
+            inner, ReadTimeoutError)
+        reset = isinstance(inner, (ProtocolError,
+                                   requests.exceptions.ChunkedEncodingError))
+        cls = DownloadError
+        if status == 404:
+            cls, cause = RemoteObjectMissing, "not found on the server"
+        elif status in {401, 403}:
+            return AccessRefused(f"{action} failed: access refused (HTTP {status})",
+                                 profile=self.context.remote.auth)
+        elif isinstance(status, int) and status >= 500:
+            cause = f"server error (HTTP {status}); try again later"
+        elif isinstance(status, int):
+            cause = f"HTTP {status}"
+        elif stalled:
+            cause = "no response in time"
+        elif isinstance(exc, requests.exceptions.SSLError):
+            cause = "certificate could not be verified"
+        elif reset:
+            cause = "the connection was reset or the body was truncated"
+        elif isinstance(exc, requests.ConnectionError):
+            cause = "could not connect; check the URL and network"
         else:
-            detail = type(exc).__name__
-        if status in {401, 403}:
-            detail += (f"; check auth profile {self.context.remote.auth!r}"
-                       if self.auth is not None else
-                       "; name an auth profile with --auth, or use ~/.netrc")
-        return cls(f"Failed to download from {self.context.remote.display}: {detail}")
+            cause = type(exc).__name__
+        return cls(f"{action} failed: {cause}")
+
+    def _read_action(self, relative_path):
+        """Name a metadata read: a folder's listing, or a file's contents."""
+        display = self.context.remote.display
+        if not relative_path:
+            return f"Listing the dataset root on {display}"
+        if relative_path.endswith("/"):
+            return f"Listing {relative_path} on {display}"
+        return f"Reading {relative_path} from {display}"
 
     def _open_metadata_response(self, relative_path, *, method="GET", headers=None,
                                 data=None):
@@ -243,7 +275,8 @@ class HttpBackend(DataBackend):
         # Reading response.raw directly bypasses Requests' error wrapping, so
         # a reset, truncated or stalled transfer arrives as a urllib3 error.
         except (requests.RequestException, Urllib3Error) as exc:
-            raise self._download_error(exc) from None
+            raise self._download_error(
+                exc, f"Download from {self.context.remote.display}") from None
 
     def read_text(self, relative_path, limit):
         """Read metadata within the source root and byte limit."""
@@ -262,4 +295,4 @@ class HttpBackend(DataBackend):
             self.text_urls[relative_path] = final_url
             return text
         except requests.RequestException as exc:
-            raise self._download_error(exc) from None
+            raise self._download_error(exc, self._read_action(relative_path)) from None

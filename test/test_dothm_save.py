@@ -1,6 +1,7 @@
 """Staging large catalogues in one Git process without pathspec surprises."""
 
 import pandas as pd
+import pytest
 
 from hallmark import Repo
 
@@ -46,10 +47,11 @@ def test_saved_paths_are_literal_not_pathspecs(tmp_path):
     assert sorted(Repo(repo.worktree).state.data["path"]) == sorted(paths)
 
 
-def test_saving_drops_per_row_records_and_keeps_old_commits_readable(tmp_path):
+def _older_layout(tmp_path):
+    """Return a repository committed in the layout older versions used."""
     repo = Repo.init(tmp_path / "repo")
     state = remote_state(repo, ["b.h5", "a.h5"], sha1=["", ""])
-    # Write the layout older versions committed: one JSON record per row.
+    # One JSON record per row.
     import json
     versions = repo.dothm.path / "versions"
     versions.mkdir()
@@ -61,6 +63,12 @@ def test_saving_drops_per_row_records_and_keeps_old_commits_readable(tmp_path):
     repo.dothm.write_yaml(state.config, "config")
     repo.dothm.git.add("config.yml", "data.tsv", "versions.yml", "versions")
     repo.commit("Older layout")
+    return Repo(repo.worktree)
+
+
+def test_saving_drops_per_row_records_and_keeps_old_commits_readable(tmp_path):
+    repo = _older_layout(tmp_path)
+    versions = repo.dothm.path / "versions"
     old = repo.dothm.load_state("HEAD")
     assert sorted(old.data["path"]) == ["a.h5", "b.h5"]
 
@@ -72,6 +80,42 @@ def test_saving_drops_per_row_records_and_keeps_old_commits_readable(tmp_path):
     assert repo.status()["staged"]["added"] == []
     repo.commit("Keep the catalogue in data.tsv")
     assert repo.dothm.load_state("HEAD~1").data["path"].tolist() == ["a.h5", "b.h5"]
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+def test_a_failed_save_keeps_the_per_row_records_of_an_older_layout(
+        tmp_path, monkeypatch, when):
+    # load_state prefers the records to data.tsv, so dropping them is part
+    # of the save: a failure must keep them and the files they go with.
+    from hallmark.repo.dothm import Dothm
+
+    repo = _older_layout(tmp_path)
+    index = {path for path, _ in repo.dothm.index.entries}
+    files = {path: path.read_bytes() for path in repo.dothm.path.rglob("*")
+             if path.is_file() and ".git" not in path.parts}
+    original = Dothm._remove_from_index
+
+    def remove_from_index(self, paths):
+        if when == "after":
+            original(self, paths)
+            raise KeyboardInterrupt
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Dothm, "_remove_from_index", remove_from_index)
+    state = repo.state
+    state.meta = {"observer": "new"}
+    state.data = pd.concat([state.data, pd.DataFrame(
+        {"path": ["c.h5"], "catalog_source": ["origin"], "sha1": [""]})])
+    with pytest.raises(KeyboardInterrupt if when == "after" else OSError):
+        repo.dothm.save_state(state)
+    monkeypatch.undo()
+
+    assert {path for path, _ in repo.dothm.index.entries} == index
+    assert {path: path.read_bytes() for path in repo.dothm.path.rglob("*")
+            if path.is_file() and ".git" not in path.parts} == files
+    staged = repo.dothm.load_state(staged=True)
+    assert sorted(staged.data["path"]) == ["a.h5", "b.h5"]
+    assert staged.meta == {}
 
 
 def test_saving_a_loaded_catalogue_changes_nothing(tmp_path, monkeypatch):

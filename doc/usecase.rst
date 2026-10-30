@@ -87,6 +87,10 @@ them in that worktree::
 Each worktree stays isolated by branch, so staged state and commits do
 not interfere.
 
+For a catalog of files on a data server, ``obs2`` starts with read-only
+links to the downloaded files whose SHA-1 was committed, from the shared
+``.hm/objects``; ``hm download`` run in ``obs2`` fetches the rest.
+
 
 4. Python: Programmatic Repository Updates
 ------------------------------------------
@@ -123,7 +127,7 @@ her analysis tools; filtering the index does not modify the data files.
 
 ..  |hallmark| replace:: ``hallmark``
 
-..  _hallmark: https://github.com/l6a/hallmark
+..  _hallmark: https://github.com/lanisrc/hallmark
 
 
 .. _private-transport-reference:

@@ -26,7 +26,9 @@ import tempfile
 import yaml
 from contextlib import contextmanager
 from pathlib import Path, PureWindowsPath
+from string import Formatter
 import pandas as pd
+import parse
 
 # map checksum algorithms to their expected lengths in hexadecimal characters.
 CHECKSUM_LENGTHS = {"md5": 32, "sha1": 40, "sha256": 64, "sha512": 128}
@@ -64,6 +66,10 @@ def infer_checksum_algorithm(digest) -> str | None:
 REMOTE_REQUEST_TIMEOUT = (10, 30)
 # define a frozenset of internal repo names that should be ignored during processing.
 REPOSITORY_INTERNAL_NAMES = frozenset({".git", ".hm"})
+# Folders in which a checkout stages files and keeps the originals it moves.
+CHECKOUT_PREFIX = ".hallmark-checkout-"
+# add_worktree keeps this file in a new worktree until every file is placed.
+INCOMPLETE_WORKTREE_MARKER = ".hallmark-worktree-incomplete"
 # define a default chunk size for file I/O operations (1 MB).
 FILE_IO_CHUNK_SIZE = 1024 * 1024
 
@@ -385,7 +391,8 @@ def require_nonempty_string(
 def iter_repository_files(root: Path):
     """
     Used in repo by status.
-    Iterate over all files in a repository, excluding internal directories.
+    Iterate over all files in a repository, excluding internal directories
+    and the folders of a checkout.
 
     Args:
         root: Path to the root of the repository.
@@ -400,12 +407,14 @@ def iter_repository_files(root: Path):
         directory_names[:] = [
             name
             for name in directory_names
-            if name.lower() not in REPOSITORY_INTERNAL_NAMES]
+            if name.lower() not in REPOSITORY_INTERNAL_NAMES
+            and not name.startswith(CHECKOUT_PREFIX)]
         # get the current path as a Path object for easier file path manipulation
         current_path = Path(current)
         for file_name in file_names:
             # skip files that are internal to the repository (e.g., .git, .hm)
-            if file_name.lower() in REPOSITORY_INTERNAL_NAMES:
+            if (file_name.lower() in REPOSITORY_INTERNAL_NAMES
+                    or file_name == INCOMPLETE_WORKTREE_MARKER):
                 continue
             file_path = current_path / file_name
             # only yield file path if its a regular file or symlink (not a directory)
@@ -514,6 +523,87 @@ def convert_format_value(value: str, spec: str):
     if spec[-1] in {"f", "F", "g", "G", "e", "E"}:
         return float(value)
     return value
+
+
+def validate_format_fields(fmt: str, *, positional: bool = False) -> None:
+    """
+    Used in paraframe by glob_search and in repo by Repo.add.
+    Refuse format fields that cannot be read back from a file name.
+
+    Each field must be a name such as ``{run}``, with an optional spec such
+    as ``{doy:03d}``, because its value is stored under that name.
+
+    Args:
+        fmt (str): Format string.
+        positional (bool): Whether positional values fill ``{}`` and ``{0}``.
+
+    Raises:
+        ValueError: If a field is empty or numbered without positional values,
+            is not an identifier, converts its value, or nests a field in its
+            spec.
+    """
+    for _, name, spec, conversion in Formatter().parse(fmt):
+        if name is None:
+            continue
+        unnamed = name == "" or name.isdigit()
+        if unnamed and not positional:
+            field = "an empty field" if name == "" else f"the field {{{name}}}"
+            raise ValueError(
+                f"Format fields need names, as in {{run}}; {fmt!r} has {field}")
+        if not unnamed and not name.isidentifier():
+            raise ValueError(
+                "Format field names must be identifiers, as in {run_id}; "
+                f"{fmt!r} has {{{name}}}")
+        if conversion is not None:
+            raise ValueError(
+                f"Format fields cannot convert values; {fmt!r} has "
+                f"{{{name}!{conversion}}}")
+        if "{" in spec or "}" in spec:
+            raise ValueError(
+                f"Format specs cannot contain fields; {fmt!r} has "
+                f"{{{name}:{spec}}}")
+
+
+def literal_format(fmt: str) -> str:
+    """
+    Return a filename format without its format specs.
+
+    Field values are stored as the text the filename holds, so ``005`` in
+    ``x_{doy:03d}.h5`` stays ``005``, as ``hm add PATTERN`` records it.
+    Parse with the full format to validate a name and with this one to read
+    its values.
+
+    Args:
+        fmt (str): Format string, possibly with specs such as ``{doy:03d}``.
+
+    Returns:
+        str: The same format with every ``{name:spec}`` reduced to ``{name}``.
+    """
+    parts = []
+    for literal, field_name, _, _ in Formatter().parse(fmt):
+        parts.append(literal.replace("{", "{{").replace("}", "}}"))
+        if field_name is not None:
+            parts.append("{" + field_name + "}")
+    return "".join(parts)
+
+
+def literal_fields(fmt: str, target: str):
+    """
+    Return the field text of a name that matches ``fmt``, or None.
+
+    Args:
+        fmt (str): Format string with optional specs, used to validate.
+        target (str): Name or relative path to parse.
+
+    Returns:
+        dict[str, str] | None: Each field's text as it appears in ``target``,
+        unconverted; None if ``target`` does not match. Matching is
+        case-sensitive.
+    """
+    if parse.parse(fmt, target, case_sensitive=True) is None:
+        return None
+    match = parse.parse(literal_format(fmt), target, case_sensitive=True)
+    return None if match is None else match.named
 
 
 def names_repository_metadata(path) -> bool:

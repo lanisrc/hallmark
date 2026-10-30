@@ -24,9 +24,9 @@ import pytest
 
 from hallmark import Repo
 
-STATE_FILES = ("config.yml", "meta.yml", "data.tsv")
+STATE_FILES = ("config.yml", "meta.yml", "*.tsv")
 DEBRIS_PATTERNS = ("**/.*.part", "**/.*.tmp", "**/.hallmark-checkout-*",
-                   "**/objects/tmp/*")
+                   "**/.hallmark-worktree-incomplete", "**/objects/tmp/*")
 
 
 @dataclass
@@ -120,8 +120,8 @@ def snapshot_hm(repo_path):
     repo_path = Path(repo_path)
     dothm = repo_path if repo_path.name.endswith(".hm") else repo_path / ".hm"
     return {
-        "files": {name: (dothm / name).read_bytes() for name in STATE_FILES
-                  if (dothm / name).is_file()},
+        "files": {path.name: path.read_bytes() for pattern in STATE_FILES
+                  for path in sorted(dothm.glob(pattern)) if path.is_file()},
         "index": _git(dothm, "ls-files", "--stage"),
         "refs": _git(dothm, "for-each-ref", "--format=%(refname) %(objectname)"),
         "head": subprocess.run(["git", "-C", str(dothm), "symbolic-ref", "-q", "HEAD"],

@@ -30,6 +30,7 @@ from hallmark.transport.auth import (
     resolve_ssh_settings,
 )
 from hallmark.transport.base import (
+    AccessRefused,
     CapabilityError,
     DownloadError,
     RemoteConfigurationError,
@@ -1018,9 +1019,10 @@ def test_a_plain_success_reply_is_not_a_webdav_listing(dav):
         dav_entries(dav)
 
 
-def test_refused_webdav_listings_explain_how_to_authenticate(dav):
+def test_refused_webdav_listings_are_refused_access(dav):
     dav.handlers["PROPFIND"] = lambda handler, path: handler.send_error(403)
-    with pytest.raises(DownloadError, match="HTTP 403.*--auth"):
+    with pytest.raises(AccessRefused, match=r"Listing .* failed: access refused "
+                                            r"\(HTTP 403\)"):
         dav_entries(dav)
 
 

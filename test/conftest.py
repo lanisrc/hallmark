@@ -22,9 +22,10 @@ def pytest_runtest_makereport(item, call):
 @pytest.fixture
 def without_configured_identity(tmp_path, monkeypatch):
     """
-    Point the git configuration at an empty home directory so a test can exercise
-    what happens when no author is configured at any level. GitPython resolves the
-    global configuration through the home directory, not GIT_CONFIG_GLOBAL.
+    Point the git configuration at an empty home directory and clear the identity
+    variables a shell may set, so a test can exercise what happens when no author
+    is configured at any level. GitPython resolves the global configuration
+    through the home directory, not GIT_CONFIG_GLOBAL.
     Args:
         tmp_path: pytest fixture that provides a temporary directory for the test.
         monkeypatch: pytest fixture for temporarily modifying environment variables.
@@ -35,6 +36,9 @@ def without_configured_identity(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    for name in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                 "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.delenv(name, raising=False)
     return home
 
 

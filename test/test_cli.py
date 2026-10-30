@@ -489,6 +489,67 @@ def test_cli_config_sets_the_commit_author(without_configured_identity):
                 f"Expected the commit to be signed with the identity, got {author}"
 
 
+def test_cli_commit_takes_the_author_from_the_environment(
+        without_configured_identity, monkeypatch):
+    """
+    Test that 'commit' accepts an author given by GIT_AUTHOR_NAME and
+    GIT_AUTHOR_EMAIL, as git does, when none is configured, and signs the
+    commit as that author rather than a committer guessed from the host.
+    """
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Env Author")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "env@example.edu")
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            with GitRepo(".hm").config_writer() as writer:
+                writer.remove_section("user")
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+
+            shown = runner.invoke(hallmark, ["config", "user.name"])
+            committed = runner.invoke(hallmark, ["commit", "-m", "First dataset"])
+
+            assert shown.output.strip() == "Env Author", \
+                f"Expected the author from the environment, got: {shown.output!r}"
+            assert committed.exit_code == 0, \
+                f"Expected the commit to succeed, got: {committed.output}"
+            commit = GitRepo(".hm").head.commit
+            for actor in (commit.author, commit.committer):
+                assert (actor.name, actor.email) \
+                    == ("Env Author", "env@example.edu"), \
+                    f"Expected the environment identity, got {actor}"
+
+
+def test_cli_commit_takes_the_committer_from_the_environment(monkeypatch):
+    """
+    Test that GIT_COMMITTER_NAME and GIT_COMMITTER_EMAIL set only the committer,
+    and that a blank GIT_AUTHOR_NAME leaves the configured author in place.
+    """
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "  ")
+    monkeypatch.delenv("GIT_AUTHOR_EMAIL", raising=False)
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Env Committer")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "committer@example.edu")
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(hallmark, ["init", "repo"])
+        with use_working_directory("repo"):
+            Path("a0_i0.h5").write_text("original\n", encoding="utf-8")
+            runner.invoke(hallmark, ["add", "a{a}_i{i}.h5"])
+
+            committed = runner.invoke(hallmark, ["commit", "-m", "First dataset"])
+
+            assert committed.exit_code == 0, \
+                f"Expected the commit to succeed, got: {committed.output}"
+            commit = GitRepo(".hm").head.commit
+            assert (commit.author.name, commit.author.email) \
+                == ("Hallmark Tests", "tests@example.invalid"), \
+                f"Expected the configured author, got {commit.author}"
+            assert (commit.committer.name, commit.committer.email) \
+                == ("Env Committer", "committer@example.edu"), \
+                f"Expected the environment committer, got {commit.committer}"
+
+
 @pytest.mark.parametrize(
     "arguments", [
         ["config"],
@@ -1316,3 +1377,63 @@ def test_commands_report_a_missing_repository_when_they_run(tmp_path, monkeypatc
     result = CliRunner().invoke(hallmark, ["status"])
     assert result.exit_code == 1
     assert result.output.startswith("Error: Failed to open hallmark repository:")
+
+
+@pytest.mark.parametrize("fmt", ["data/a_{}/b.txt", "data/a_{}/b_{b:d}.txt"])
+def test_cli_add_unnamed_field_is_one_error_line(tmp_path, monkeypatch, fmt):
+    repo = Repo.init(tmp_path / "repo")
+    monkeypatch.chdir(repo.worktree)
+    Path("data/a_1").mkdir(parents=True)
+    Path("data/a_1/b_10.txt").write_text("b_10\n", encoding="utf-8")
+
+    result = CliRunner().invoke(hallmark, ["add", fmt])
+
+    assert result.exit_code == 1
+    assert result.output == (
+        f"Error: Format fields need names, as in {{run}}; {fmt!r} has an "
+        "empty field\n")
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("fmt,matched,untracked", [
+    ("a_{a:d}.txt", ["a_1.txt"], ["a_x.txt"]),
+    ("run{run}/run{run}_{run_id}.h5", ["run1/run1_a.h5", "run2/run2_b.h5"], []),
+])
+def test_cli_add_pattern_then_dot_changes_nothing(
+        tmp_path, monkeypatch, fmt, matched, untracked):
+    repo = Repo.init(tmp_path / "repo")
+    monkeypatch.chdir(repo.worktree)
+    for name in [*matched, *untracked]:
+        Path(name).parent.mkdir(parents=True, exist_ok=True)
+        Path(name).write_text(f"{name}\n", encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(hallmark, ["add", fmt])
+    skipped = "".join(f"  {name}\n" for name in untracked)
+    assert result.output == (
+        "Changes to be committed\n" + "".join(f"{name}\n" for name in matched)
+        + (f"Skipped files that do not match the branch pattern:\n{skipped}"
+           if untracked else ""))
+    assert runner.invoke(hallmark, ["commit", "-m", "First"]).exit_code == 0
+    assert runner.invoke(hallmark, ["add", "."]).exit_code == 0
+
+    status = runner.invoke(hallmark, ["status"]).output
+    # A file that does not fit the pattern stays untracked, as hm add . leaves it
+    assert status == "On branch main\n\n" + (
+        f"Untracked files:\n{skipped}" if untracked
+        else "nothing to commit, working tree clean\n")
+
+
+def test_cli_add_lists_ten_unmatched_files(tmp_path, monkeypatch):
+    repo = Repo.init(tmp_path / "repo")
+    monkeypatch.chdir(repo.worktree)
+    names = ["a_1.txt", *(f"a_x{index:02d}.txt" for index in range(12))]
+    for name in names:
+        Path(name).write_text(f"{name}\n", encoding="utf-8")
+
+    result = CliRunner().invoke(hallmark, ["add", "a_{a:d}.txt"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.split(
+        "Skipped files that do not match the branch pattern:\n")[1] == (
+        "".join(f"  {name}\n" for name in names[1:11]) + "  ... and 2 more\n")
