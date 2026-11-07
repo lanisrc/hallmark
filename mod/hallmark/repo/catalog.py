@@ -52,7 +52,20 @@ def table_names(config) -> list[str]:
 
 
 def catalog_tables(state) -> dict:
-    """Return every TSV of a state by name, ``data.tsv`` first."""
+    """
+    Return every TSV of a state by name, ``data.tsv`` first.
+
+    ``state.data`` is ``data.tsv``; a ``"data.tsv"`` key in ``state.tables``
+    would replace it, so ``tables`` holds only the other TSVs, the names
+    ``table_names(config)[1:]`` gives.
+
+    Args:
+        state (State): Repository state; one without ``tables`` has only
+            ``data.tsv``.
+
+    Returns:
+        dict[str, pandas.DataFrame]: The state's own frames by TSV name.
+    """
     return {DEFAULT_DB: state.data, **getattr(state, "tables", {})}
 
 
@@ -100,10 +113,17 @@ def row_entry(row: dict, *, name=None) -> dict:
     """
     Describe a catalogue row as a ``file:`` entry, leaving out empty values.
 
+    A size or mtime written in ASCII digits becomes an integer; every other
+    value, the catalogue source included, stays text.
+
     Args:
         row (dict): Row with ``path`` and optional checksum, size, mtime,
             catalogue source and ``sha1``.
         name (str, optional): Name of a known file, such as ``readme``.
+
+    Returns:
+        dict: The ``file:`` entry. When the row has both a SHA-1 checksum
+        and a ``sha1`` value, the entry keeps the ``sha1`` value.
     """
     entry = {"name": name} if name else {}
     entry["file"] = cell_text(row.get("path"))
@@ -111,10 +131,12 @@ def row_entry(row: dict, *, name=None) -> dict:
     checksum = cell_text(row.get("checksum"))
     if algorithm in CHECKSUM_ALGORITHMS_BY_STRENGTH and checksum:
         entry[algorithm] = checksum
-    for key in ("size_bytes", "mtime", SOURCE):
+    for key in ("size_bytes", "mtime"):
         text = cell_text(row.get(key))
         if text:
-            entry[key] = int(text) if text.isdigit() else text
+            entry[key] = int(text) if text.isascii() and text.isdigit() else text
+    if cell_text(row.get(SOURCE)):
+        entry[SOURCE] = cell_text(row[SOURCE])
     if cell_text(row.get("sha1")):
         entry["sha1"] = cell_text(row["sha1"])
     return entry
@@ -126,7 +148,17 @@ def catalog_rows(state) -> list[dict]:
 
     Rows of each TSV come first, then ``file:`` entries. Each row records
     where it is kept: ``_table`` names its TSV, or ``_section`` its
-    ``config.yml`` section, with the entry itself in ``_entry``.
+    ``config.yml`` section, with the entry itself in ``_entry``. That entry
+    is the dict in ``state.config``, not a copy, so copy it before changing
+    it.
+
+    Args:
+        state (State): Repository state.
+
+    Returns:
+        list[dict]: Rows with text values: the TSVs' rows, then the
+        ``data`` section's ``file:`` entries, then the ``meta`` section's.
+        A TSV without a ``path`` column has no rows here.
     """
     rows = []
     for name, frame in catalog_tables(state).items():

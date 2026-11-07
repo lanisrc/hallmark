@@ -134,7 +134,7 @@ def test_a_malformed_table_name_is_reported_when_saving(tmp_path):
     repo.dothm.write_yaml(repo.state.config, "config")
     # Loading still works, so status can explain what is wrong.
     assert repo.dothm.load_state().tables == {}
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must be a single path component"):
         repo.dothm.save_state(repo.dothm.load_state())
 
 

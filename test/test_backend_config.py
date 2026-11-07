@@ -26,16 +26,18 @@ def test_backend_config_roundtrip_and_selective_updates(tmp_path):
     assert remote["backend_options"] == {}
 
 
-@pytest.mark.parametrize("update", [
-    {"remote_backend": "arbitrary.module:Class"},
-    {"remote_backend_options": ["not", "a", "mapping"]},
-    {"remote_backend_options": {"nested": object()}},
+@pytest.mark.parametrize("update, message", [
+    ({"remote_backend": "arbitrary.module:Class"}, "Backend name must match"),
+    ({"remote_backend_options": ["not", "a", "mapping"]},
+     "Backend options must be a mapping"),
+    ({"remote_backend_options": {"nested": object()}},
+     "Backend options must contain YAML scalar"),
 ])
-def test_invalid_backend_update_preserves_existing_config(tmp_path, update):
+def test_invalid_backend_update_preserves_existing_config(tmp_path, update, message):
     repo = Repo.init(tmp_path / "repo")
     repo.set_config(remote_url="https://data.test/")
     before = (repo.dothm.path / "config.yml").read_bytes()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=message):
         repo.set_config(**update)
     assert (repo.dothm.path / "config.yml").read_bytes() == before
     assert "backend" not in repo.state.config["remote"]
@@ -77,8 +79,9 @@ def test_add_passes_backend_settings_to_discovery(monkeypatch, tmp_path):
     assert captured[0].backend_options["release"] == 3
 
 
+@pytest.mark.parametrize("mirror", [None, "https://mirror.test/data/"])
 def test_add_persists_backend_only_for_its_data_source(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, mirror):
     class SurveyBackend(DataBackend):
         def iter_entries(self, on_directory=None):
             assert self.context.remote.backend_options["release"] == 3
@@ -88,8 +91,16 @@ def test_add_persists_backend_only_for_its_data_source(
     monkeypatch.setattr(backends.metadata, "entry_points", lambda: {})
     register_backend("builder-survey", SurveyBackend)
     repo = Repo.init(tmp_path / "survey.hm")
+    if mirror:
+        repo.set_config(remote_url=mirror, remote_name="mirror")
     repo.add("https://api.test/", backend="builder-survey",
              backend_options={"release": 3})
-    remote = Repo(repo.dothm.path).state.config["remote"][0]
+    config = Repo(repo.dothm.path).state.config
+    [source] = config["sources"]
+    [remote] = [entry for entry in config["remote"]
+                if entry["name"] == source["remote"]]
     assert remote["backend"] == "builder-survey"
     assert remote["backend_options"] == {"release": 3}
+    others = [entry for entry in config["remote"] if entry is not remote]
+    assert others == ([{"name": "mirror", "url": mirror}] if mirror else [])
+    assert not {"backend", "backend_options"} & {*config, *source}

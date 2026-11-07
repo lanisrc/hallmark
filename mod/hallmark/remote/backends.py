@@ -77,7 +77,25 @@ def register_backend(name, backend_class):
 
 
 def get_backend(name):
-    """Resolve a registered class, lazily importing a selected installed plugin."""
+    """
+    Resolve a registered class, lazily importing a selected installed plugin.
+
+    A plugin is imported when first looked up, and its class, once valid, is
+    kept for the rest of the process.
+
+    Args:
+        name (str): Backend name from a remote's configuration.
+
+    Returns:
+        type[DataBackend]: The registered or installed backend class.
+
+    Raises:
+        RemoteConfigurationError: If the name is invalid; several installed
+            plugins, or a plugin and a registered backend, share it; no
+            backend is installed or registered under it; its plugin is
+            unable to load; or the plugin's class is not a DataBackend
+            subclass.
+    """
     name = validate_backend_name(name)
     with _lock:
         entries = _find_backend_plugins(name)
