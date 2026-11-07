@@ -42,12 +42,12 @@ def _validate_folder(value, label: str) -> str:
     """
     Return a relative folder ending in ``/``, or ``""`` for the root.
 
-    ``None``, ``""`` and ``.`` name the root; ``/`` is refused like any
-    absolute folder rather than read as the root.
+    ``None``, ``""`` and ``.`` name the root; ``/`` is refused
+    rather than read as the root.
     """
     if value in (None, ""):
         return ""
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not value.rstrip("/"):
         raise ValueError(f"{label} must be a relative folder")
     if value.rstrip("/") == ".":
         return ""
@@ -281,7 +281,8 @@ def match_remote(folder: RemoteSpec, remotes: Sequence[dict]):
 
     Returns:
         tuple[str, str] | None: The remote name and the folder's root beneath
-        it, choosing the deepest matching remote, or None.
+        it, choosing the deepest matching remote, or None. Of two
+        remotes with equally deep roots, the first configured one wins.
     """
     target = _decoded_root(folder)
     best = None
@@ -325,7 +326,8 @@ def derive_source_name(remote: str, root: str, taken: Sequence[str]) -> str:
     Name a new source after its remote and the last folder of its root.
 
     The result is always a valid source name, and is not in ``taken``.
-    Characters other than letters, digits, ``_`` and ``-`` become ``-``,
+    Each run of characters other than letters, digits, ``_`` and ``-``
+    becomes one ``-``,
     leading and trailing ``-`` and ``_`` are dropped, and the name is cut
     so that it fits in 64 characters with the ``-2``, ``-3``, ... that
     keeps it unique. A name with no letter or digit becomes ``source``.

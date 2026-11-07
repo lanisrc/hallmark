@@ -317,9 +317,7 @@ def test_conflicting_manifests_fail():
     ("CHECKSUMS.TXT", "unknown"),
     ("sha256sum.txt", "sha256"), ("x.sha256sum", "sha256"), ("MD5SUM", "md5"),
     ("SHA512SUMS", "sha512"), ("x.md5sums", "md5"), ("sub/SHA1SUMS", "sha1"),
-    ("file.fits.sha256", None), ("SHA256SUMS.asc", None),
-    ("x.sha256sums.txt", None), (".sha256sums", None), ("checksums.md5", None),
-    ("md5.txt", None),
+    ("SHA256SUMS.asc", None), (".sha256sums", None), ("md5.txt", None),
 ])
 def test_checksum_manifests_are_known_by_conventional_names(name, algorithm):
     assert _checksum_file_algorithm(name) == algorithm

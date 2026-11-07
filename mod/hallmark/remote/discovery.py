@@ -101,7 +101,10 @@ def _attach_published_checksums(context, entries):
     """
     Read published checksum metadata and attach it to discovered paths.
 
-    Each file keeps its strongest digest. Two published digests of one
+    A name in a manifest is looked up beside the manifest first. A name
+    containing ``/`` may also be relative to the dataset root, or start
+    with the manifest's own folder name. Each file keeps its strongest
+    digest. Two published digests of one
     algorithm that disagree, or one that disagrees with the server
     listing's digest, raise DownloadError whatever order they are read in.
     """

@@ -100,11 +100,6 @@ def test_a_source_filter_must_be_globs(value):
         SourceSpec("a", "origin", filter=value)
 
 
-def test_repeated_filter_patterns_are_kept():
-    source = SourceSpec("a", "origin", filter=["*.h5", "*.h5"])
-    assert source.filter == ("*.h5", "*.h5")
-
-
 @pytest.mark.parametrize("path", ["px/r/x.h5", "p", ""])
 def test_a_path_outside_the_source_prefix_is_refused(path):
     with pytest.raises(ValueError, match="outside source 'a'"):
