@@ -200,7 +200,10 @@ def test_dot_segments_name_the_root_folder():
 def test_a_lone_dot_names_the_root_folder(folder):
     assert SourceSpec("lab", "origin", prefix=folder).prefix == ""
     assert SourceSpec("lab", "origin", root=folder).root == ""
-    with pytest.raises(ValueError):
+
+
+def test_an_absolute_root_is_refused():
+    with pytest.raises(ValueError, match="Remote path cannot be empty"):
         SourceSpec("lab", "origin", root="/")
 
 
