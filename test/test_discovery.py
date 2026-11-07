@@ -191,6 +191,14 @@ def test_recursive_globs(path, pattern, matched):
     assert path_matches(path, filter=pattern) is matched
 
 
+def test_globs_stay_case_sensitive_where_local_paths_are_not(monkeypatch):
+    # Windows' os.path.normcase lower-cases, which fnmatch.fnmatch applies.
+    monkeypatch.setattr("os.path.normcase", str.lower)
+    assert not path_matches("a.FITS", filter="*.fits")
+    assert not path_matches("A/b.fits", filter="a/*.fits")
+    assert path_matches("a.fits", filter="*.fits")
+
+
 def test_exact_format_and_filter_are_both_required():
     assert path_matches("sample_001.fits", fmt="sample_{id:03d}.fits")
     assert not path_matches("sample_bad.fits", fmt="sample_{id:03d}.fits")
@@ -204,9 +212,12 @@ def test_exact_format_and_filter_are_both_required():
 def test_an_empty_filter_means_no_filter(empty):
     assert path_matches("a.fits", filter=empty)
     assert path_matches("nested/b.txt", filter=empty, fmt="nested/{name}.txt")
+    assert not path_matches("a.fits", filter=empty, fmt="nested/{name}.txt")
     source = Source({"": index("a.fits", "nested/"), "nested/": index("b.txt")})
     assert [entry.path for entry in discover_remote_files(source, filter=empty)] == [
         "a.fits", "nested/b.txt"]
+    assert [entry.path for entry in discover_remote_files(
+        source, filter=empty, fmt="nested/{name}.txt")] == ["nested/b.txt"]
 
 
 @pytest.mark.parametrize("invalid", [12, {"*.fits": True}, iter(["*.fits"])])
