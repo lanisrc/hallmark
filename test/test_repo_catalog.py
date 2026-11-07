@@ -133,13 +133,17 @@ def test_a_sha256_row_survives_the_round_trip_through_an_entry():
     assert entry_row(row_entry(found)) == found
 
 
-@pytest.mark.parametrize("state", [
-    State(),
-    State(tables={"north.tsv": pd.DataFrame(columns=["sha1"])}),
-    SimpleNamespace(config=None, data=pd.DataFrame({"sha1": [SHA1]})),
-], ids=["fresh state", "table without paths", "no tables attribute"])
-def test_catalog_rows_skips_tables_without_a_path_column(state):
-    assert catalog_rows(state) == []
+@pytest.mark.parametrize("state, expected", [
+    (State(), []),
+    (State(tables={"north.tsv": pd.DataFrame({"sha1": [SHA1]})}), []),
+    (SimpleNamespace(config=None, data=pd.DataFrame({"sha1": [SHA1]})), []),
+    (State(data=pd.DataFrame({"sha1": [SHA1]}),
+           tables={"north.tsv": pd.DataFrame({"path": ["n.h5"]})}),
+     [{"path": "n.h5", TABLE: "north.tsv"}]),
+], ids=["fresh state", "table without paths", "no tables attribute",
+        "data.tsv without paths, then a table with paths"])
+def test_catalog_rows_skips_tables_without_a_path_column(state, expected):
+    assert catalog_rows(state) == expected
 
 
 def test_catalog_rows_lists_tsv_rows_then_data_entries_then_meta_entries():
