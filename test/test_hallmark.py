@@ -56,12 +56,12 @@ def test_standard_pf_column_value_types(hallmark_test_suite_dictionary):
     pf = hallmark_test_suite_dictionary["standard_pf"]
     assert pd.api.types.is_float_dtype(pf["a"])
     # i values are whole numbers so they convert to int64, not float64
-    assert pd.api.types.is_numeric_dtype(pf["i"])
+    assert pd.api.types.is_integer_dtype(pf["i"])
 
 def test_standard_pf_values(hallmark_test_suite_dictionary):
     pf = hallmark_test_suite_dictionary["standard_pf"]
     assert set(pf["a"].unique()) == {0.0, 0.75, 0.975}
-    assert set(pf["i"].unique()) == {0.0, 30.0, 60.0, 90.0}
+    assert sorted(pf["i"].unique().tolist()) == [0, 30, 60, 90]
 
 def test_standard_pf_paths_match_created_files(hallmark_test_suite_dictionary):
     pf = hallmark_test_suite_dictionary["standard_pf"]

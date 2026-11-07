@@ -23,16 +23,34 @@ conventions.
 
 import re
 import parse
+from collections.abc import Iterator, Mapping
 from glob import escape as glob_escape, glob
 from pathlib import Path
+from string import Formatter
 
 import pandas as pd
+from pandas.api.types import is_list_like
 
 from .utils import (
     find_encoding_for_format,
     apply_regex_replacement,
+    literal_format,
     try_numeric_conversion,
     validate_format_fields)
+
+
+def _reusable(encodings):
+    """Return encodings as a list if it is a one-shot iterator, else unchanged."""
+    return list(encodings) if isinstance(encodings, Iterator) else encodings
+
+
+def _named_fields(fmt):
+    """Return the named fields of fmt in order, once each; {} and {0} are skipped."""
+    names = []
+    for _, name, _, _ in Formatter().parse(fmt):
+        if name and not name.isdigit() and name not in names:
+            names.append(name)
+    return names
 
 
 class ParaFrame(pd.DataFrame):
@@ -62,7 +80,9 @@ class ParaFrame(pd.DataFrame):
 
         Args:
             data: Data used to initialize the ``ParaFrame``.
-            encodings (dict, optional): Filename encoding specifications.
+            encodings (dict or list of dict, optional): Filename encoding
+                specifications from ``config.yml``, as a mapping or a sequence
+                of mappings. An iterator is read once and stored as a list.
                 Defaults to ``{}``.
             base_path (Path or str, optional): Root directory associated with
                 the ``ParaFrame``. Defaults to the current working directory.
@@ -70,7 +90,7 @@ class ParaFrame(pd.DataFrame):
                 :class:`pandas.DataFrame`.
         """
         super().__init__(data, **kwargs)
-        self.encodings = encodings or {}
+        self.encodings = _reusable(encodings) or {}
         self.base_path = Path(base_path) if base_path is not None else Path.cwd()
 
     @property
@@ -98,7 +118,7 @@ class ParaFrame(pd.DataFrame):
             **kwargs: Column names and values used for filtering.
 
         Returns:
-            pandas.DataFrame: The filtered ``ParaFrame``.
+            ParaFrame: The filtered ``ParaFrame``.
         """
         return self.filter(**kwargs)
 
@@ -106,24 +126,35 @@ class ParaFrame(pd.DataFrame):
         """
         Filter a ``ParaFrame`` by matching column values.
 
-        This method filters the current ``ParaFrame`` by applying one or more
-        conditions on its columns. Rows satisfying any of the specified
-        conditions are returned.
+        Each keyword is one condition on a column, and the conditions are
+        OR-ed: a row is kept when it satisfies any of them. Chain calls, as in
+        ``pf(a=0)(b=10)``, to require all of them.
 
         Args:
-            **kwargs: Column names and the values to filter by. Values may be
-                scalars or sequences (lists or tuples); a sequence matches any
-                of its elements.
+            **kwargs: Column names and the values to keep. A scalar keeps the
+                rows equal to it; rows whose value is missing (NaN, None or
+                ``<NA>``) never match a scalar. A list-like value (a list,
+                tuple, set, range, NumPy array, pandas Series or Index, or a
+                generator) keeps the rows equal to any of its elements.
+                Strings and bytes are scalars.
 
         Returns:
             ParaFrame: The rows that satisfy any of the conditions.
+
+        Raises:
+            KeyError: If a keyword is not a column.
+            ValueError: If a value is a mapping, such as a dict.
         """
         # Create a boolean mask for filtering rows based on the specified conditions
         mask = pd.Series(False, index=self.index)
         # Iterate over the provided keyword arguments to build the mask
         for column, value in kwargs.items():
-            # if the value is a sequence, use isin to check for membership
-            if isinstance(value, (tuple, list)):
+            if isinstance(value, Mapping):
+                raise ValueError(
+                    f"Filter values are scalars or lists of values; {column}= "
+                    "was given a mapping")
+            # a list-like value matches any of its elements
+            if is_list_like(value):
                 condition = self[column].isin(value)
             # otherwise, use eq to check for equality
             else:
@@ -136,7 +167,7 @@ class ParaFrame(pd.DataFrame):
     @staticmethod
     def _find_encoding_settings(fmt, encodings, *, encoding):
         """
-        Used by glob_search.
+        Used by glob_search and Repo.add_paths.
         Resolve the YAML encoding spec that applies to fmt, when encoding=True.
 
         Args:
@@ -147,8 +178,10 @@ class ParaFrame(pd.DataFrame):
 
         Returns:
             (yaml_encodings, fmt_enc): the matched encoding spec dict (``{}`` when
-            encoding is False), and the specific fmt template used to look it up
-            (fmt itself, unless a narrower entry_fmt matched within fmt).
+            encoding is False), and that spec's fmt (fmt itself when encoding is
+            False). An entry whose fmt equals fmt, compared without a leading
+            ``/``, is preferred; otherwise the first entry whose fmt is part of
+            fmt is used.
 
         Raises:
             ValueError: If encodings is malformed, or no matching/valid encoding
@@ -174,15 +207,13 @@ class ParaFrame(pd.DataFrame):
         if not all(isinstance(entry, dict) for entry in encoding_specs):
             raise ValueError("encodings must contain only dictionaries")
 
-        fmt_enc = fmt
-        for entry in encoding_specs:
-            entry_fmt = entry.get("fmt")
-            # if entry_fmt is a non-empty string and in the provided format string
-            if (isinstance(entry_fmt, str) and entry_fmt and entry_fmt in fmt):
-                # use this entry's format for encoding
-                fmt_enc = entry_fmt
-                # break after finding the first matching entry
-                break
+        entry_fmts = [entry.get("fmt") for entry in encoding_specs]
+        entry_fmts = [entry_fmt for entry_fmt in entry_fmts
+                      if isinstance(entry_fmt, str) and entry_fmt]
+        exact = [entry_fmt for entry_fmt in entry_fmts
+                 if entry_fmt.lstrip("/") == fmt.lstrip("/")]
+        within = [entry_fmt for entry_fmt in entry_fmts if entry_fmt in fmt]
+        fmt_enc = (exact or within or [fmt])[0]
 
         # find the encoding specification corresponding to fmt_enc
         yaml_encodings = find_encoding_for_format(fmt_enc, encoding_specs)
@@ -190,7 +221,7 @@ class ParaFrame(pd.DataFrame):
         if yaml_encodings is None:
             raise ValueError(
                 f"Error: The format '{fmt_enc}' is missing "
-                "from hallmark.yml.")
+                "from config.yml.")
         # get the encoding dictionary from the found specification
         enc_dict = yaml_encodings.get("encoding", {})
         # if enc_dict is not a dictionary, raise a ValueError
@@ -228,16 +259,20 @@ class ParaFrame(pd.DataFrame):
 
         Args:
             fmt (str):
-                Format string describing the expected filename pattern.
+                Format string describing the expected filename pattern,
+                relative to ``base_path``. A leading ``/`` is ignored.
 
             ``*args``:
                 Positional arguments used to fill the format string.
 
-            encodings (dict):
-                Encoding specifications from ``config.yml``.
+            encodings (dict or list of dict):
+                Encoding specifications from ``config.yml``, as a mapping or
+                a sequence of mappings. Read only when ``encoding`` is
+                ``True``.
 
             base_path (Path):
-                Root directory to search.
+                Root directory to search, taken literally.
+                Defaults to ``Path.cwd()``.
 
             debug (bool):
                 If ``True``, prints debugging information.
@@ -260,11 +295,16 @@ class ParaFrame(pd.DataFrame):
                 ``(globbed_files, pattern)``.
 
                 Otherwise returns
-                ``(yaml_encodings, fmt_g, globbed_files)``.
+                ``(yaml_encodings, fmt_g, globbed_files)``, where ``fmt_g``
+                is ``fmt`` without its leading ``/`` and format specs, used to
+                read the field values as the text the names hold.
 
         Raises:
             ValueError: If a field of ``fmt`` has no name or is not a plain
-                name with an optional spec.
+                name with an optional spec, if ``fmt`` has more unnamed fields
+                than positional values, if a keyword value does not fit its
+                field's format spec, or, with ``encoding=True``, if
+                ``encodings`` is malformed or has no usable entry for ``fmt``.
         """
         # Determine the base path for searching files.
         # If not provided, use the current working directory.
@@ -275,13 +315,13 @@ class ParaFrame(pd.DataFrame):
         # three characters '{p}'; the maximum number
         # of possible parameters is `len(fmt) // 3`.
 
-        yaml_encodings, fmt_enc = cls._find_encoding_settings(
+        yaml_encodings, _ = cls._find_encoding_settings(
             fmt, encodings, encoding=encoding)
 
         # Only the format is filled in; the base path is literal, even when
         # its folder names contain braces or glob characters.
         pattern = fmt.lstrip("/")
-        fmt_g = fmt_enc.lstrip("/")
+        fmt_g = literal_format(pattern)
 
         # plus one to ensure at least one iteration of the loop
         for i in range(pmax + 1):
@@ -304,8 +344,6 @@ class ParaFrame(pd.DataFrame):
 
                 # pattern is the glob pattern with missing field replaced by a wildcard
                 pattern = re.sub(field_pattern, replacement, pattern)
-                # fmt_g is the format string with missing field replaced by a wildcard
-                fmt_g = re.sub(field_pattern, replacement, fmt_g)
                 # set the missing keyword argument to a wildcard for globbing
                 kwargs[key] = "*"
 
@@ -349,14 +387,21 @@ class ParaFrame(pd.DataFrame):
 
         Args:
             fmt (str):
-                Format string containing ``{parameter}`` fields.
+                Format string containing ``{parameter}`` fields, relative to
+                ``base_path``. A leading ``/`` is ignored. File names must fit
+                ``fmt``, including its type specs and letter case.
 
-            encodings (dict):
-                Encoding specifications from ``config.yml``.
-                Defaults to ``{}``.
+            ``*args``:
+                Values for the unnamed fields (``{}`` or ``{0}``), in order.
+                Unnamed fields do not become columns.
+
+            encodings (dict or list of dict):
+                Encoding specifications from ``config.yml``, as a mapping or
+                a sequence of mappings. An iterator is read once and stored
+                as a list. Defaults to ``{}``.
 
             base_path (Path):
-                Root directory to search.
+                Root directory to search, taken literally.
                 Defaults to ``Path.cwd()``.
 
             debug (bool):
@@ -367,13 +412,27 @@ class ParaFrame(pd.DataFrame):
                 If ``True``, applies regex encoding.
                 Defaults to ``False``.
 
+            ``**kwargs``:
+                Values for named fields; only files whose names hold these
+                values are searched.
+
         Returns:
-            ParaFrame: A ``ParaFrame`` whose rows correspond to matched files.
-            Parsed parameters are stored as columns together with a ``path`` column.
-            ``attrs["unmatched"]`` lists the relative paths that the glob
-            found but that do not fit ``fmt``, including its type specs.
+            ParaFrame: One row per matched file, with a ``path`` column (the
+            path relative to ``base_path``, with ``/`` separators) followed by
+            one column per named field. A field's values are read as the text
+            the names hold, and become numbers only when that keeps the text,
+            so ``005`` stays ``005``. When no file matches, the frame is empty
+            but still has the ``path`` column and one column per named field
+            of ``fmt``, in order. ``attrs["unmatched"]`` lists the relative
+            paths that the glob found but that do not fit ``fmt``, including
+            its type specs.
+
+        Raises:
+            ValueError: For the problems :meth:`glob_search` raises on, or if
+                a format spec in ``fmt`` is not recognised.
         """
         base_path = Path(base_path) if base_path is not None else Path.cwd()
+        encodings = _reusable(encodings)
 
         yaml_encodings, fmt_g, globbed_files = cls.glob_search(
             fmt, *args,
@@ -385,9 +444,7 @@ class ParaFrame(pd.DataFrame):
         )
 
         # As in hm add ., a name must fit the typed format, letter case included.
-        # The spec names that format, so encodings is read only once.
-        fmt_enc = yaml_encodings["fmt"] if encoding else fmt
-        checker = parse.compile(fmt_enc.lstrip("/"), case_sensitive=True)
+        checker = parse.compile(fmt.lstrip("/"), case_sensitive=True)
         parser = parse.compile(fmt_g, case_sensitive=True)
         frame = []
         unmatched = []
@@ -408,12 +465,15 @@ class ParaFrame(pd.DataFrame):
                     print(f'Failed to parse "{f}"')
             else:
                 frame.append({"path": f_short, **r.named})
+        # with no rows, the columns come from fmt and stay as text
+        columns = None if frame else ["path", *_named_fields(fmt)]
+        result = cls(frame, columns=columns,
+                     encodings=encodings, base_path=base_path)
         # attempt to convert each parameter column to numeric
         # if conversion fails the column stays as string
-        result = cls(frame, encodings=encodings, base_path=base_path)
         for column in result.columns:
             # if the column is not "path", attempt to convert it to numeric
-            if column != "path":
+            if frame and column != "path":
                 result[column] = try_numeric_conversion(result[column])
         result.attrs["unmatched"] = unmatched
         return result

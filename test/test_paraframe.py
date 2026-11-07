@@ -1,5 +1,10 @@
+import pickle
 import re
+from pathlib import Path
+from types import MappingProxyType
 
+import numpy as np
+import pandas as pd
 from hallmark import ParaFrame
 import pytest
 
@@ -26,13 +31,13 @@ def test_paraframe_class_functionality(create_temp_data):
     scalar_filter = pf(a=0)
     # checking that the correct number of files and column values are filtered
     assert len(scalar_filter) == 10
-    assert scalar_filter["a"].unique() == 0
+    assert scalar_filter["a"].unique().tolist() == [0]
 
     # users wants to filter files to see those with a = 0 or 1
     list_filter = pf(a=[0,1])
     # checking that the correct number of files and column values are filtered
     assert len(list_filter) == 20
-    assert all(list_filter["a"].unique() == [0,1])
+    assert sorted(list_filter["a"].unique().tolist()) == [0, 1]
 
     # users want to filter files to see those with a = 0 or b = 10
     tuple_filter = pf(a=0, b=10)
@@ -57,7 +62,7 @@ def test_paraframe_class_functionality(create_temp_data):
     # users want to filter files to see those with a >= 1 and a <=4
     mask_filter = pf[(1 <= pf.a) & (pf.a <= 4)]
     assert len(mask_filter) == 40
-    assert all(mask_filter["a"].unique() == [1,2,3,4])
+    assert sorted(mask_filter["a"].unique().tolist()) == [1, 2, 3, 4]
 
 
 def test_debug(create_temp_data, capsys):
@@ -71,12 +76,108 @@ def test_debug(create_temp_data, capsys):
     assert "100 matches" in captured.out
 
 
+### filter tests ###
+
+@pytest.mark.parametrize("make_value", [
+    lambda: (1, 0),
+    lambda: {0, 1},
+    lambda: frozenset({0, 1}),
+    lambda: range(2),
+    lambda: np.array([1, 0]),
+    lambda: pd.Series([1, 0], index=[7, 8]),
+    lambda: pd.Index([1, 0]),
+    lambda: (value for value in (1, 0)),
+], ids=["tuple", "set", "frozenset", "range", "ndarray", "series", "index",
+        "generator"])
+def test_filter_list_like_value_matches_any_of_its_elements(make_value):
+    pf = ParaFrame({"path": ["p0", "p1", "p2"], "a": [0, 1, 2]})
+
+    assert pf(a=make_value())["path"].tolist() == ["p0", "p1"]
+
+
+@pytest.mark.parametrize("values,value", [
+    (["a", "b", "ab"], "ab"),
+    ([b"a", b"b", b"ab"], b"ab"),
+], ids=["str", "bytes"])
+def test_filter_text_value_is_a_scalar(values, value):
+    pf = ParaFrame({"path": ["p0", "p1", "p2"], "kind": values})
+
+    assert pf(kind=value)["path"].tolist() == ["p2"]
+
+
+@pytest.mark.parametrize("value", [{0: "p0"}, MappingProxyType({0: "p0"})],
+                         ids=["dict", "mapping"])
+def test_filter_refuses_a_mapping_value(value):
+    pf = ParaFrame({"path": ["p0", "p1"], "a": [0, 1]})
+
+    with pytest.raises(ValueError, match="a= was given a mapping"):
+        pf(a=value)
+
+
+def test_filter_on_a_missing_column_raises_keyerror():
+    pf = ParaFrame({"path": ["p0", "p1"], "a": [0, 1]})
+
+    with pytest.raises(KeyError, match="zz"):
+        pf(zz=1)
+
+
+def test_filter_skips_missing_values_in_a_nullable_column():
+    pf = ParaFrame({"path": ["p0", "p1", "p2"],
+                    "a": pd.array([None, 1, 2], dtype="Int64")})
+
+    assert pf(a=1)["path"].tolist() == ["p1"]
+
+
+### metadata tests ###
+
+@pytest.mark.parametrize("operation,paths", [
+    (lambda pf: pf(a=[1, 2]), ["a_1.txt", "a_2.txt"]),
+    (lambda pf: pf.iloc[1:], ["a_1.txt", "a_2.txt"]),
+    (lambda pf: pf.copy(), ["a_0.txt", "a_1.txt", "a_2.txt"]),
+    (lambda pf: pf.sort_values("a", ascending=False),
+     ["a_2.txt", "a_1.txt", "a_0.txt"]),
+    (lambda pf: pd.concat([pf.iloc[:1], pf.iloc[2:]]), ["a_0.txt", "a_2.txt"]),
+    (lambda pf: pickle.loads(pickle.dumps(pf)), ["a_0.txt", "a_1.txt", "a_2.txt"]),
+], ids=["filter", "slice", "copy", "sort_values", "concat", "pickle"])
+def test_pandas_operations_keep_the_paraframe_metadata(tmp_path, operation, paths):
+    _write_files(tmp_path, "a_0.txt", "a_1.txt", "a_2.txt", "a_x.txt")
+    specs = [{"fmt": "a_{a:d}.txt", "encoding": {"aspin": r"m([0-9]+)"}}]
+    pf = ParaFrame.parse("a_{a:d}.txt", base_path=tmp_path,
+                         encodings=specs, encoding=True)
+
+    result = operation(pf)
+
+    assert type(result) is ParaFrame
+    assert result["path"].tolist() == paths
+    assert result.encodings == specs
+    assert result.base_path == tmp_path
+    assert result.attrs["unmatched"] == ["a_x.txt"]
+
+
+def test_a_new_paraframe_defaults_to_no_encodings_and_the_current_folder(
+        tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    pf = ParaFrame({"a": [1]})
+
+    assert pf.encodings == {}
+    assert pf.base_path == Path.cwd()
+
+
+def test_a_paraframe_stores_iterator_encodings_as_a_list():
+    specs = [{"fmt": "a_{a}.txt", "encoding": {"aspin": r"m([0-9]+)"}}]
+
+    pf = ParaFrame({"a": [1]}, encodings=iter(specs))
+
+    assert pf.encodings == specs
+
+
 #### glob_search tests ###
 
-def test_glob_search_applies_final_wildcard_for_short_format(tmp_path):
+def test_glob_search_replaces_a_missing_field_with_a_wildcard(tmp_path):
     """
-    Test that ParaFrame.glob_search correctly applies a final wildcard when the
-    provided format string is shorter than the maximum number of path components.
+    Test that ParaFrame.glob_search turns a field given no value into the glob
+    wildcard ``*``, so every file in the folder is found.
     Args:
         tmp_path (Path): Temporary directory provided by pytest for testing.
     """
@@ -147,6 +248,38 @@ def test_glob_search_encoding_true_rejects_noniterable_encodings(tmp_path):
             encoding=True)
 
 
+def test_glob_search_takes_a_base_path_with_glob_characters_literally(tmp_path):
+    _write_files(tmp_path, "run[1]/a_1.txt", "run1/a_2.txt")
+
+    matches, _ = ParaFrame.glob_search(
+        "a_{a}.txt", base_path=tmp_path / "run[1]", return_pattern=True)
+
+    assert matches == [str(tmp_path / "run[1]" / "a_1.txt")]
+
+
+def test_glob_search_strips_the_leading_slash_and_every_format_spec(tmp_path):
+    _write_files(tmp_path, "x_005_q.h5", "x_012_q.h5")
+
+    yaml_encodings, fmt_g, matches = ParaFrame.glob_search(
+        "/x_{doy:03d}_{a}.h5", base_path=tmp_path, doy=5)
+
+    assert yaml_encodings == {}
+    assert fmt_g == "x_{doy}_{a}.h5"
+    assert matches == [str(tmp_path / "x_005_q.h5")]
+
+
+def test_parse_and_glob_search_default_to_the_current_folder(tmp_path, monkeypatch):
+    _write_files(tmp_path, "a_1.txt", "sub/a_2.txt")
+    monkeypatch.chdir(tmp_path)
+
+    matches, _ = ParaFrame.glob_search("a_{a}.txt", return_pattern=True)
+    frame = ParaFrame.parse("a_{a}.txt")
+
+    assert matches == [str(Path.cwd() / "a_1.txt")]
+    assert frame["path"].tolist() == ["a_1.txt"]
+    assert frame.base_path == Path.cwd()
+
+
 ### parse tests ###
 
 def test_parse_accepts_single_encoding_mapping(tmp_path):
@@ -180,6 +313,7 @@ def test_parse_reads_encodings_given_as_a_generator(tmp_path):
     assert frame.to_dict(orient="records") == [
         {"path": "am0.5_i30.h5", "aspin": -0.5, "i": 30}]
     assert frame.attrs["unmatched"] == ["am1_i30.h5"]
+    assert frame.encodings == specs
 
 
 def test_parse_encoding_false_ignores_invalid_encoding_specs(tmp_path):
@@ -211,7 +345,7 @@ def test_parse_encoding_true_requires_matching_fmt_spec(tmp_path):
     Raises:
         ValueError: If no matching fmt encoding entry exists when encoding=True.
     """
-    with pytest.raises(ValueError, match="missing from hallmark.yml"):
+    with pytest.raises(ValueError, match="missing from config.yml"):
         ParaFrame.parse(
             "a_{n}.dat",
             base_path=tmp_path,
@@ -252,7 +386,8 @@ def test_parse_skips_files_that_fail_to_match_after_encoding(tmp_path, capsys):
     data_path = tmp_path / "a_qq.dat"
     data_path.write_text("contents\n", encoding="utf-8")
     # this "aspin" regex rewrites the literal "a_" prefix itself, so the encoded
-    # name no longer matches the "a_{n}.dat" parser template at all
+    # name no longer matches the "a_{n}.dat" parser template at all; it is keyed
+    # "aspin" because that is the only key apply_regex_replacement applies
     encoding = {"fmt": "a_{n}.dat", "encoding": {"aspin": r"(a)_"}}
 
     frame = ParaFrame.parse(
@@ -349,6 +484,60 @@ def test_parse_enforces_type_spec(tmp_path, capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_parse_is_case_sensitive(tmp_path):
+    _write_files(tmp_path, "q_X_x1.txt", "q_xA_X1.txt")
+
+    frame = ParaFrame.parse("{a}_x{b:d}.txt", base_path=tmp_path)
+
+    assert frame.to_dict(orient="records") == [
+        {"path": "q_X_x1.txt", "a": "q_X", "b": 1}]
+    assert frame.attrs["unmatched"] == ["q_xA_X1.txt"]
+
+
+def test_parse_keyword_for_a_field_with_a_spec_keeps_the_literal_text(tmp_path):
+    _write_files(tmp_path, "x_005.h5", "x_012.h5")
+
+    everything = ParaFrame.parse("x_{doy:03d}.h5", base_path=tmp_path)
+    selected = ParaFrame.parse("x_{doy:03d}.h5", base_path=tmp_path, doy=5)
+
+    assert selected.to_dict(orient="records") == [
+        {"path": "x_005.h5", "doy": "005"}]
+    assert selected["doy"].dtype == everything["doy"].dtype
+
+
+@pytest.mark.parametrize("fmt", ["b_{a}_{b:d}_{a}_{}.txt", "b_{a}_{b:d}_{a}_{0}.txt"])
+def test_parse_with_no_match_keeps_the_path_and_field_columns(tmp_path, fmt):
+    _write_files(tmp_path, "b_x_q_x_1.txt")
+
+    frame = ParaFrame.parse(fmt, 1, base_path=tmp_path)
+
+    assert frame.empty
+    assert list(frame.columns) == ["path", "a", "b"]
+    assert frame.dtypes.tolist() == [object, object, object]
+    assert frame.attrs["unmatched"] == ["b_x_q_x_1.txt"]
+    selected = frame(a=1)
+    assert selected.empty
+    assert list(selected.columns) == ["path", "a", "b"]
+
+
+@pytest.mark.parametrize("encodings", [
+    [{"fmt": "a_{aspin}.dat", "encoding": {"aspin": r"m([0-9]+(?:\.[0-9]+)?)"}}],
+    [{"fmt": "a_{aspin}.dat", "encoding": {"aspin": r"p([0-9]+)"}},
+     {"fmt": "prefix_a_{aspin}.dat",
+      "encoding": {"aspin": r"m([0-9]+(?:\.[0-9]+)?)"}}],
+], ids=["narrower entry only", "narrower entry before the exact one"])
+def test_parse_with_a_narrower_encoding_entry_reads_the_full_format(
+        tmp_path, encodings):
+    _write_files(tmp_path, "prefix_a_m0.5.dat")
+
+    frame = ParaFrame.parse("prefix_a_{aspin}.dat", base_path=tmp_path,
+                            encodings=encodings, encoding=True)
+
+    assert frame.to_dict(orient="records") == [
+        {"path": "prefix_a_m0.5.dat", "aspin": -0.5}]
+    assert frame.attrs["unmatched"] == []
+
+
 ### _find_encoding_settings tests ###
 
 def test_resolve_encoding_spec_narrows_to_matching_entry_fmt():
@@ -400,5 +589,68 @@ def test_resolve_encoding_spec_requires_encodings_when_encoding_true():
     Raises:
         ValueError: If encoding=True but no encodings were provided.
     """
-    with pytest.raises(ValueError, match="missing from hallmark.yml"):
+    with pytest.raises(ValueError, match="missing from config.yml"):
         ParaFrame._find_encoding_settings("a_{n}.dat", None, encoding=True)
+
+
+SPIN = {"aspin": r"m([0-9]+)"}
+
+
+@pytest.mark.parametrize("unusable", [
+    {"fmt": "", "encoding": SPIN},
+    {"fmt": 123, "encoding": SPIN},
+    {"encoding": SPIN},
+], ids=["empty fmt", "non-string fmt", "no fmt"])
+@pytest.mark.parametrize("fmt", ["a_{aspin}.dat", "prefix_a_{aspin}.dat"],
+                         ids=["exact", "narrower"])
+def test_resolve_encoding_spec_skips_entries_without_a_usable_fmt(unusable, fmt):
+    usable = {"fmt": "a_{aspin}.dat", "encoding": SPIN}
+
+    yaml_encodings, fmt_enc = ParaFrame._find_encoding_settings(
+        fmt, [unusable, usable], encoding=True)
+
+    assert yaml_encodings is usable
+    assert fmt_enc == "a_{aspin}.dat"
+
+
+@pytest.mark.parametrize("fmt,entry_fmts", [
+    ("prefix_a_{n}.dat", ["a_{n}.dat", "prefix_a_{n}.dat"]),
+    ("/a_{n}.dat", ["{n}.dat", "a_{n}.dat"]),
+    ("a_{n}.dat", ["{n}.dat", "/a_{n}.dat"]),
+], ids=["same text", "searched with a leading slash",
+        "entry with a leading slash"])
+def test_resolve_encoding_spec_prefers_the_entry_for_fmt_itself(fmt, entry_fmts):
+    encodings = [{"fmt": entry_fmt, "encoding": SPIN} for entry_fmt in entry_fmts]
+
+    yaml_encodings, fmt_enc = ParaFrame._find_encoding_settings(
+        fmt, encodings, encoding=True)
+
+    assert yaml_encodings is encodings[1]
+    assert fmt_enc == entry_fmts[1]
+
+
+def test_resolve_encoding_spec_without_an_encoding_key_has_no_regex_spec():
+    with pytest.raises(ValueError, match=re.escape("'a_{n}.dat' has no regex spec")):
+        ParaFrame._find_encoding_settings(
+            "a_{n}.dat", [{"fmt": "a_{n}.dat"}], encoding=True)
+
+
+@pytest.mark.parametrize("encodings", [[], {}], ids=["empty list", "empty mapping"])
+def test_resolve_encoding_spec_with_no_entries_names_the_missing_format(encodings):
+    with pytest.raises(ValueError, match=re.escape(
+            "The format 'a_{n}.dat' is missing from config.yml")):
+        ParaFrame._find_encoding_settings("a_{n}.dat", encodings, encoding=True)
+
+
+def test_resolve_encoding_spec_refuses_a_string():
+    with pytest.raises(ValueError, match="only dictionaries"):
+        ParaFrame._find_encoding_settings("a_{n}.dat", "a_{n}.dat", encoding=True)
+
+
+def test_resolve_encoding_spec_with_encoding_false_does_not_read_encodings():
+    class Unreadable:
+        def __iter__(self):
+            raise AssertionError("encodings were read")
+
+    assert ParaFrame._find_encoding_settings(
+        "/a_{n}.dat", Unreadable(), encoding=False) == ({}, "/a_{n}.dat")
