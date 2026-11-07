@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from hallmark import DataBackend, HttpBackend, SshBackend, CyVerseBackend
+from hallmark import DataBackend, HttpBackend, Repo, SshBackend, CyVerseBackend
 from hallmark.remote import backends
+from hallmark.remote.backends import S3Backend, WebDavBackend
 from hallmark.remote.discovery import discover_remote_files
 from hallmark.transport import OperationContext
 from hallmark.transport.base import (
@@ -14,13 +15,43 @@ from hallmark.transport.base import (
     readonly_backend_options, copy_backend_options,
 )
 
+PRODUCTION_REGISTRY = backends._registered
+
 
 @pytest.fixture(autouse=True)
 def isolated_registry(monkeypatch):
-    monkeypatch.setattr(backends, "_registered", {
-        "http": HttpBackend, "ssh": SshBackend, "cyverse": CyVerseBackend})
+    monkeypatch.setattr(backends, "_registered", dict(backends._registered))
     monkeypatch.setattr(backends, "_loaded", {})
     monkeypatch.setattr(backends.metadata, "entry_points", lambda: {})
+
+
+def install_plugins(monkeypatch, *names, backend_class=HttpBackend):
+    """Install entry points by name; return the names loaded and the entries."""
+    loads = []
+
+    def entry(name):
+        def load():
+            loads.append(name)
+            return backend_class
+        return SimpleNamespace(name=name, load=load)
+
+    installed = [entry(name) for name in names]
+    monkeypatch.setattr(backends.metadata, "entry_points",
+                        lambda: {"hallmark.backends": installed})
+    return loads, installed
+
+
+def test_the_production_registry_holds_exactly_the_builtin_backends():
+    assert PRODUCTION_REGISTRY == {
+        "http": HttpBackend, "ssh": SshBackend, "cyverse": CyVerseBackend,
+        "webdav": WebDavBackend, "s3": S3Backend}
+
+
+@pytest.mark.parametrize("name", ["http", "ssh", "cyverse", "webdav", "s3"])
+def test_every_builtin_name_is_reserved(name):
+    with pytest.raises(RemoteConfigurationError, match="already registered"):
+        backends.register_backend(name, HttpBackend)
+    assert backends._registered[name] is PRODUCTION_REGISTRY[name]
 
 
 @pytest.mark.parametrize("url, expected", [
@@ -81,7 +112,7 @@ def test_backend_lifecycle_and_generic_discovery(tmp_path):
         context.transport.fetch("tile.fits", tmp_path / "payload")
         assert (tmp_path / "payload").read_bytes() == b"contents"
     assert events == ["prepare", "prepare", "close"]
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="interrupted"):
         with OperationContext(remote):
             raise RuntimeError("interrupted")
     assert events[-2:] == ["cancel", "close"]
@@ -178,6 +209,78 @@ def test_plugin_load_failure_is_actionable_and_sanitized(monkeypatch):
     with pytest.raises(RemoteConfigurationError, match="Unable to load backend") as exc:
         backends.get_backend("survey")
     assert "sensitive" not in str(exc.value)
+
+
+def test_an_installed_plugin_name_is_reserved_without_loading_the_plugin(monkeypatch):
+    loads, _ = install_plugins(monkeypatch, "survey")
+    with pytest.raises(RemoteConfigurationError, match="already registered"):
+        backends.register_backend("survey", SshBackend)
+    assert loads == []
+    assert "survey" not in backends._registered
+    assert backends.get_backend("survey") is HttpBackend
+
+
+def test_a_loaded_plugin_stays_cached_and_reserved_after_it_is_uninstalled(
+        monkeypatch):
+    class SurveyBackend(DataBackend):
+        pass
+
+    loads, installed = install_plugins(
+        monkeypatch, "survey", backend_class=SurveyBackend)
+    assert backends.get_backend("survey") is SurveyBackend
+    installed.clear()
+    assert backends.get_backend("survey") is SurveyBackend
+    assert loads == ["survey"]
+    with pytest.raises(RemoteConfigurationError, match="already registered"):
+        backends.register_backend("survey", HttpBackend)
+    assert "survey" not in backends._registered
+
+
+def test_only_the_selected_plugin_is_loaded(monkeypatch):
+    loads, _ = install_plugins(monkeypatch, "other", "survey")
+    assert backends.get_backend("survey") is HttpBackend
+    assert loads == ["survey"]
+    assert list(backends._loaded) == ["survey"]
+
+
+def test_a_plugin_class_that_fails_validation_is_loaded_again_on_each_lookup(
+        monkeypatch):
+    loads, _ = install_plugins(monkeypatch, "survey", backend_class=object)
+    for _ in range(2):
+        with pytest.raises(RemoteConfigurationError, match="DataBackend subclass"):
+            backends.get_backend("survey")
+    assert loads == ["survey", "survey"]
+    assert "survey" not in backends._loaded
+
+
+@pytest.mark.parametrize("name", ["Bad", 12, None, "a" * 65, "http\n"], ids=[
+    "upper-case", "int", "None", "65-characters", "trailing-newline"])
+def test_an_invalid_name_is_rejected_before_plugins_are_scanned(monkeypatch, name):
+    def scan():
+        raise AssertionError("Validation must come before scanning plugins")
+
+    monkeypatch.setattr(backends.metadata, "entry_points", scan)
+    with pytest.raises(RemoteConfigurationError, match="Backend name must match"):
+        backends.get_backend(name)
+
+
+def test_planning_a_download_never_inspects_backend_plugins(monkeypatch, tmp_path):
+    class SurveyBackend(DataBackend):
+        def iter_entries(self, on_directory=None):
+            yield RemoteEntry("tile.fits", size=12)
+
+    backends.register_backend("survey", SurveyBackend)
+    repo = Repo.init(tmp_path / "survey")
+    repo.add("https://api.test/", backend="survey")
+    repo.set_config(remote_backend="uninstalled")
+
+    def scan():
+        raise AssertionError("Planning must not inspect installed plugins")
+
+    monkeypatch.setattr(backends.metadata, "entry_points", scan)
+    plan = Repo(repo.worktree).plan_download()
+    assert plan.remote_backend == "uninstalled"
+    assert [item.relative_path.as_posix() for item in plan.items] == ["tile.fits"]
 
 
 def test_options_are_copied_and_deeply_immutable():
