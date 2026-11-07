@@ -268,6 +268,9 @@ def test_remote_names_derived_from_hosts_are_short_and_readable(url, expected):
     ("origin", "", ["origin", "origin-2"], "origin-3"),
     ("x" * 70, "", [], "x" * 64),
     ("x" * 70, "", ["x" * 64], "x" * 62 + "-2"),
+    # A longer suffix takes more of the name.
+    ("x" * 70, "", ["x" * 64] + [f"{'x' * 62}-{n}" for n in range(2, 10)],
+     "x" * 61 + "-10"),
     ("origin", "y" * 70 + "/", [], "origin-" + "y" * 57),
     ("origin", "y" * 70 + "/", ["origin-" + "y" * 57], "origin-" + "y" * 55 + "-2"),
 ])
@@ -279,11 +282,13 @@ def test_derived_source_names_are_cleaned_and_cut_to_fit(remote, root, taken,
 @pytest.mark.parametrize("remote", ["origin", "eht.data", "-", "_", "é", "x" * 100])
 @pytest.mark.parametrize("root", ["", "raw/", "%%%/", "_x/", "y" * 100 + "/"])
 def test_derived_source_names_are_always_valid(remote, root):
-    first = derive_source_name(remote, root, [])
-    second = derive_source_name(remote, root, [first])
-    assert validate_source_name(first) == first
-    assert validate_source_name(second) == second
-    assert second != first
+    # Ten names reach a two-digit suffix, -10.
+    taken = []
+    for _ in range(10):
+        name = derive_source_name(remote, root, taken)
+        assert validate_source_name(name) == name
+        assert name not in taken
+        taken.append(name)
 
 
 def legacy_state(rows=("a.h5", "b.h5")):
