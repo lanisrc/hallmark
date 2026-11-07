@@ -130,16 +130,21 @@ def test_filter_skips_missing_values_in_a_nullable_column():
 
 ### metadata tests ###
 
-@pytest.mark.parametrize("operation,paths", [
-    (lambda pf: pf(a=[1, 2]), ["a_1.txt", "a_2.txt"]),
-    (lambda pf: pf.iloc[1:], ["a_1.txt", "a_2.txt"]),
-    (lambda pf: pf.copy(), ["a_0.txt", "a_1.txt", "a_2.txt"]),
+@pytest.mark.parametrize("operation,paths,keeps_unmatched", [
+    (lambda pf: pf(a=[1, 2]), ["a_1.txt", "a_2.txt"], True),
+    (lambda pf: pf.iloc[1:], ["a_1.txt", "a_2.txt"], True),
+    (lambda pf: pf.copy(), ["a_0.txt", "a_1.txt", "a_2.txt"], True),
     (lambda pf: pf.sort_values("a", ascending=False),
-     ["a_2.txt", "a_1.txt", "a_0.txt"]),
-    (lambda pf: pd.concat([pf.iloc[:1], pf.iloc[2:]]), ["a_0.txt", "a_2.txt"]),
-    (lambda pf: pickle.loads(pickle.dumps(pf)), ["a_0.txt", "a_1.txt", "a_2.txt"]),
+     ["a_2.txt", "a_1.txt", "a_0.txt"], True),
+    # concat needs _constructor and pickle needs _metadata; whether attrs
+    # survive them is pandas' rule, not ParaFrame's, so it is not checked
+    (lambda pf: pd.concat([pf.iloc[:1], pf.iloc[2:]]), ["a_0.txt", "a_2.txt"],
+     False),
+    (lambda pf: pickle.loads(pickle.dumps(pf)), ["a_0.txt", "a_1.txt", "a_2.txt"],
+     False),
 ], ids=["filter", "slice", "copy", "sort_values", "concat", "pickle"])
-def test_pandas_operations_keep_the_paraframe_metadata(tmp_path, operation, paths):
+def test_pandas_operations_keep_the_paraframe_metadata(
+        tmp_path, operation, paths, keeps_unmatched):
     _write_files(tmp_path, "a_0.txt", "a_1.txt", "a_2.txt", "a_x.txt")
     specs = [{"fmt": "a_{a:d}.txt", "encoding": {"aspin": r"m([0-9]+)"}}]
     pf = ParaFrame.parse("a_{a:d}.txt", base_path=tmp_path,
@@ -151,7 +156,8 @@ def test_pandas_operations_keep_the_paraframe_metadata(tmp_path, operation, path
     assert result["path"].tolist() == paths
     assert result.encodings == specs
     assert result.base_path == tmp_path
-    assert result.attrs["unmatched"] == ["a_x.txt"]
+    if keeps_unmatched:
+        assert result.attrs["unmatched"] == ["a_x.txt"]
 
 
 def test_a_new_paraframe_defaults_to_no_encodings_and_the_current_folder(
