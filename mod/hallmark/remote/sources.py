@@ -39,7 +39,12 @@ def validate_source_name(name) -> str:
 
 
 def _validate_folder(value, label: str) -> str:
-    """Return a relative folder ending in ``/``, or ``""`` for the root."""
+    """
+    Return a relative folder ending in ``/``, or ``""`` for the root.
+
+    ``None``, ``""`` and ``.`` name the root; ``/`` is refused like any
+    absolute folder rather than read as the root.
+    """
     if value in (None, ""):
         return ""
     if not isinstance(value, str):
@@ -183,7 +188,9 @@ def effective_sources(state) -> list:
 
     Catalogues written before sources existed have one data remote and rows
     relative to its URL; they are read as a single source named after that
-    remote, without changing anything on disk.
+    remote, without changing anything on disk. A remote name that is not a
+    valid source name is turned into one as :func:`derive_source_name` does.
+    ``sources: null`` counts as no ``sources`` section.
 
     Args:
         state (State): Repository state.
@@ -193,27 +200,34 @@ def effective_sources(state) -> list:
 
     Raises:
         ValueError: If the configured remotes or sources are invalid, or a
-            source names an unknown remote.
+            source names an unknown remote. Remote references are not
+            checked when no remotes are configured.
     """
     config = state.config if isinstance(state.config, dict) else {}
     names = remote_names(config)
-    if "sources" in config:
+    if config.get("sources") is not None:
         return normalize_sources(config["sources"], names)
     legacy = any("path" in frame.columns and "sha1" not in frame.columns
                  for frame in catalog_tables(state).values())
     if not legacy or len(names) != 1:
         return []
-    return [SourceSpec(names[0], names[0])]
+    remote = names[0]
+    name = remote if _NAME.fullmatch(remote) else derive_source_name(remote, "", [])
+    return [SourceSpec(name, remote)]
 
 
 def materialize_sources(state) -> list:
     """
     Write a legacy catalogue's synthesized source into the state.
 
-    An unnamed single remote is named ``origin``, ``sources`` is recorded and
-    each row of every TSV gains its ``catalog_source``; ``file:`` entries
-    name no source while there is only one. A state that already records
-    sources is left unchanged.
+    A state that already records sources is left unchanged; ``sources:
+    null`` counts as not recorded. Otherwise the ``remote`` section is
+    written as a list, a lone unnamed remote is named ``origin`` and the
+    synthesized sources are recorded as ``sources``, even when there are
+    none: a catalogue without legacy rows, or a legacy catalogue with no
+    remote or several, gets ``sources: []``. Each row of every non-empty
+    TSV gains its ``catalog_source``; ``file:`` entries name no source
+    while there is only one.
 
     Args:
         state (State): Repository state to update in place.
@@ -227,7 +241,7 @@ def materialize_sources(state) -> list:
             source names an unknown remote.
     """
     config = state.config
-    if "sources" in config:
+    if config.get("sources") is not None:
         return effective_sources(state)
     sources = effective_sources(state)
     remotes = normalize_remotes(config.get("remote"))
@@ -288,9 +302,14 @@ def match_remote(folder: RemoteSpec, remotes: Sequence[dict]):
 def _unique(name: str, taken) -> str:
     candidate, number = name, 2
     while candidate in taken:
-        candidate = f"{name}-{number}"
+        suffix = f"-{number}"
+        candidate = name[:64 - len(suffix)] + suffix
         number += 1
     return candidate
+
+
+def _name_part(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", text).strip("-")
 
 
 def derive_remote_name(folder: RemoteSpec, taken: Sequence[str]) -> str:
@@ -302,10 +321,18 @@ def derive_remote_name(folder: RemoteSpec, taken: Sequence[str]) -> str:
 
 
 def derive_source_name(remote: str, root: str, taken: Sequence[str]) -> str:
-    """Name a new source after its remote and the last folder of its root."""
+    """
+    Name a new source after its remote and the last folder of its root.
+
+    The result is always a valid source name, and is not in ``taken``.
+    Characters other than letters, digits, ``_`` and ``-`` become ``-``,
+    leading and trailing ``-`` and ``_`` are dropped, and the name is cut
+    so that it fits in 64 characters with the ``-2``, ``-3``, ... that
+    keeps it unique. A name with no letter or digit becomes ``source``.
+    """
     segment = root.rstrip("/").rsplit("/", 1)[-1] if root else ""
-    segment = re.sub(r"[^A-Za-z0-9_-]+", "-", segment).strip("-")
-    base = f"{remote}-{segment}" if segment else remote
+    parts = (_name_part(remote), _name_part(segment))
+    base = "-".join(part for part in parts if part).strip("-_")
     return _unique(base[:64].rstrip("-_") or "source", set(taken))
 
 
