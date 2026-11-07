@@ -203,7 +203,7 @@ def test_a_lone_dot_names_the_root_folder(folder):
 
 
 def test_an_absolute_root_is_refused():
-    with pytest.raises(ValueError, match="Remote path cannot be empty"):
+    with pytest.raises(ValueError, match="Source root must be a relative folder"):
         SourceSpec("lab", "origin", root="/")
 
 
