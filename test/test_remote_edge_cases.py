@@ -276,6 +276,21 @@ def test_a_named_remote_serves_a_folder_inside_it(tmp_path, pages):
     assert repo.state.data["path"].tolist() == ["a.fits", "raw/b.fits"]
 
 
+@pytest.mark.parametrize("again", ["./raw/", "/raw/"])
+def test_a_folder_written_with_dot_or_empty_segments_is_the_same_folder(
+        tmp_path, pages, again):
+    served, _ = pages
+    served[ROOT] = listing("a.fits")
+    served[ROOT + "raw/"] = listing("b.fits")
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT)
+    repo.add(ROOT + "raw/")
+    repo.add(ROOT + again)
+    assert [source["name"] for source in repo.state.config["sources"]] == [
+        "origin", "origin-raw"]
+    assert repo.state.data["path"].tolist() == ["a.fits", "raw/b.fits"]
+
+
 def test_a_source_name_cannot_move_to_another_folder(tmp_path, pages):
     served, _ = pages
     served[ROOT] = listing("a.fits")

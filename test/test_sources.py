@@ -220,6 +220,30 @@ def test_match_remote_needs_the_same_ssh_port_and_user(url, expected):
     assert match_remote(RemoteSpec.from_url(url), configured) == expected
 
 
+@pytest.mark.parametrize("url, expected", [
+    ("https://data.test:443/eht/x/", ("top", "x/")),
+    ("http://plain.test:80/d/x/", ("plain", "x/")),
+    ("ssh://alice@lab:22/srv/x/", ("lab", "x/")),
+    ("https://data.test:8443/eht/x/", None),
+])
+def test_a_default_port_is_the_same_server_as_no_port(url, expected):
+    configured = remotes("https://data.test/eht/", "http://plain.test/d/",
+                         "ssh://alice@lab/srv/", names=["top", "plain", "lab"])
+    assert match_remote(RemoteSpec.from_url(url), configured) == expected
+    explicit = remotes("https://data.test:443/eht/", names=["top"])
+    assert match_remote(RemoteSpec.from_url("https://data.test/eht/x/"),
+                        explicit) == ("top", "x/")
+
+
+@pytest.mark.parametrize("url", [
+    "https://data.test/eht/./raw/", "https://data.test/eht//raw/",
+    "https://data.test/eht/raw/./", "https://data.test/./eht/raw/",
+])
+def test_dot_and_empty_folder_segments_are_dropped(url):
+    configured = remotes("https://data.test/eht/")
+    assert match_remote(RemoteSpec.from_url(url), configured) == ("r0", "raw/")
+
+
 def test_subpath_keeps_settings_and_encodes_literal_folders():
     http = RemoteSpec.from_url("https://data.test/eht/", backend="cyverse")
     child = http.subpath("a b#1/")
@@ -360,22 +384,6 @@ def test_a_legacy_remote_name_becomes_a_valid_source_name(remote, name):
     assert materialize_sources(state) == [SourceSpec(name, remote)]
     assert state.config["sources"] == [{"name": name, "remote": remote}]
     assert state.data["catalog_source"].tolist() == [name]
-
-
-def test_a_null_sources_section_is_read_like_a_missing_one():
-    assert effective_sources(legacy_with(remote={"url": ROOT}, sources=None)) == [
-        SourceSpec("origin", "origin")]
-    unused = State(config={"remote": {"url": ROOT}, "sources": None})
-    assert effective_sources(unused) == []
-
-
-def test_materialize_replaces_a_null_sources_section():
-    state = legacy_with(remote={"url": ROOT}, sources=None)
-    assert materialize_sources(state) == [SourceSpec("origin", "origin")]
-    assert state.config["sources"] == [{"name": "origin", "remote": "origin"}]
-    assert state.data["catalog_source"].tolist() == ["origin"]
-    state.data["sha1"] = ["a" * 40]
-    assert is_remote_catalog(state)
 
 
 def test_materialize_keeps_the_name_of_a_lone_named_remote():

@@ -40,6 +40,17 @@ def test_table_names_lists_each_data_tsv_once_with_data_tsv_first(config, expect
     assert table_names(config) == expected
 
 
+@pytest.mark.parametrize("data, clash", [
+    ([{"db": "North", "fmt": "{x}.h5"}, {"db": "north", "fmt": "{y}.h5"}],
+     "'North.tsv' and 'north.tsv'"),
+    ([{"db": "DATA.TSV", "fmt": "{x}.h5"}], "'data.tsv' and 'DATA.TSV'"),
+])
+def test_table_names_that_differ_only_in_case_are_refused(data, clash):
+    with pytest.raises(ValueError,
+                       match=f"TSV names {clash} differ only in letter case"):
+        table_names({"data": data})
+
+
 @pytest.mark.parametrize("db", [5, float("nan"), ["north"]])
 def test_a_table_name_must_be_text(db):
     with pytest.raises(ValueError, match="TSV database name must be a string"):
@@ -119,6 +130,17 @@ def test_an_entry_row_catalogues_the_strongest_checksum_other_than_sha1(
 def test_a_row_entry_keeps_only_set_values_and_integer_sizes_and_mtimes(
         found, name, expected):
     assert row_entry(found, name=name) == expected
+
+
+@pytest.mark.parametrize("algorithm, checksum, expected", [
+    ("", MD5, {"md5": MD5}),
+    ("unknown", SHA256, {"sha256": SHA256}),
+    ("", "abc123", {}),
+])
+def test_a_row_entry_names_an_unlabelled_checksum_by_its_length(
+        algorithm, checksum, expected):
+    row = {"path": "a.txt", "checksum_algorithm": algorithm, "checksum": checksum}
+    assert row_entry(row) == {"file": "a.txt", **expected}
 
 
 def test_a_sha256_row_survives_the_round_trip_through_an_entry():

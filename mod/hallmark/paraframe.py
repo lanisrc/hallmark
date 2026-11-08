@@ -23,13 +23,12 @@ conventions.
 
 import re
 import parse
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from glob import escape as glob_escape, glob
 from pathlib import Path
 from string import Formatter
 
 import pandas as pd
-from pandas.api.types import is_list_like
 
 from .utils import (
     find_encoding_for_format,
@@ -127,34 +126,31 @@ class ParaFrame(pd.DataFrame):
         Filter a ``ParaFrame`` by matching column values.
 
         Each keyword is one condition on a column, and the conditions are
-        OR-ed: a row is kept when it satisfies any of them. Chain calls, as in
-        ``pf(a=0)(b=10)``, to require all of them.
+        OR-ed: a row is kept when it satisfies any of them, so a call with no
+        keywords keeps no rows. Chain calls, as in ``pf(a=0)(b=10)``, to
+        require all of them.
+
+        This replaces :meth:`pandas.DataFrame.filter`: it selects rows by
+        value, not columns by label.
 
         Args:
-            **kwargs: Column names and the values to keep. A scalar keeps the
-                rows equal to it; rows whose value is missing (NaN, None or
-                ``<NA>``) never match a scalar. A list-like value (a list,
-                tuple, set, range, NumPy array, pandas Series or Index, or a
-                generator) keeps the rows equal to any of its elements.
-                Strings and bytes are scalars.
+            **kwargs: Column names and the values to keep. A list or tuple
+                keeps the rows equal to any of its elements; any other value
+                keeps the rows equal to it. Rows whose value is missing (NaN,
+                None or ``<NA>``) never match a single value.
 
         Returns:
             ParaFrame: The rows that satisfy any of the conditions.
 
         Raises:
             KeyError: If a keyword is not a column.
-            ValueError: If a value is a mapping, such as a dict.
         """
         # Create a boolean mask for filtering rows based on the specified conditions
         mask = pd.Series(False, index=self.index)
         # Iterate over the provided keyword arguments to build the mask
         for column, value in kwargs.items():
-            if isinstance(value, Mapping):
-                raise ValueError(
-                    f"Filter values are scalars or lists of values; {column}= "
-                    "was given a mapping")
-            # a list-like value matches any of its elements
-            if is_list_like(value):
+            # if the value is a sequence, use isin to check for membership
+            if isinstance(value, (tuple, list)):
                 condition = self[column].isin(value)
             # otherwise, use eq to check for equality
             else:
@@ -178,10 +174,8 @@ class ParaFrame(pd.DataFrame):
 
         Returns:
             (yaml_encodings, fmt_enc): the matched encoding spec dict (``{}`` when
-            encoding is False), and that spec's fmt (fmt itself when encoding is
-            False). An entry whose fmt equals fmt, compared without a leading
-            ``/``, is preferred; otherwise the first entry whose fmt is part of
-            fmt is used.
+            encoding is False), and the specific fmt template used to look it up
+            (fmt itself, unless a narrower entry_fmt matched within fmt).
 
         Raises:
             ValueError: If encodings is malformed, or no matching/valid encoding
@@ -207,13 +201,15 @@ class ParaFrame(pd.DataFrame):
         if not all(isinstance(entry, dict) for entry in encoding_specs):
             raise ValueError("encodings must contain only dictionaries")
 
-        entry_fmts = [entry.get("fmt") for entry in encoding_specs]
-        entry_fmts = [entry_fmt for entry_fmt in entry_fmts
-                      if isinstance(entry_fmt, str) and entry_fmt]
-        exact = [entry_fmt for entry_fmt in entry_fmts
-                 if entry_fmt.lstrip("/") == fmt.lstrip("/")]
-        within = [entry_fmt for entry_fmt in entry_fmts if entry_fmt in fmt]
-        fmt_enc = (exact or within or [fmt])[0]
+        fmt_enc = fmt
+        for entry in encoding_specs:
+            entry_fmt = entry.get("fmt")
+            # if entry_fmt is a non-empty string and in the provided format string
+            if (isinstance(entry_fmt, str) and entry_fmt and entry_fmt in fmt):
+                # use this entry's format for encoding
+                fmt_enc = entry_fmt
+                # break after finding the first matching entry
+                break
 
         # find the encoding specification corresponding to fmt_enc
         yaml_encodings = find_encoding_for_format(fmt_enc, encoding_specs)
@@ -286,8 +282,9 @@ class ParaFrame(pd.DataFrame):
                 configuration.
 
             ``**kwargs``:
-                Keyword arguments used to fill the format string.
-                Missing values are replaced with the wildcard ``*``.
+                Keyword arguments used to fill the format string; each must
+                name a field of ``fmt``. Missing values are replaced with the
+                wildcard ``*``.
 
         Returns:
             tuple:
@@ -296,12 +293,15 @@ class ParaFrame(pd.DataFrame):
 
                 Otherwise returns
                 ``(yaml_encodings, fmt_g, globbed_files)``, where ``fmt_g``
-                is ``fmt`` without its leading ``/`` and format specs, used to
-                read the field values as the text the names hold.
+                is the format the encoding lookup settled on (``fmt`` itself
+                when ``encoding`` is False) without its leading ``/`` and
+                format specs, used to read the field values as the text the
+                names hold.
 
         Raises:
             ValueError: If a field of ``fmt`` has no name or is not a plain
-                name with an optional spec, if ``fmt`` has more unnamed fields
+                name with an optional spec, if a keyword names no field of
+                ``fmt``, if ``fmt`` has more unnamed fields
                 than positional values, if a keyword value does not fit its
                 field's format spec, or, with ``encoding=True``, if
                 ``encodings`` is malformed or has no usable entry for ``fmt``.
@@ -315,13 +315,18 @@ class ParaFrame(pd.DataFrame):
         # three characters '{p}'; the maximum number
         # of possible parameters is `len(fmt) // 3`.
 
-        yaml_encodings, _ = cls._find_encoding_settings(
+        yaml_encodings, fmt_enc = cls._find_encoding_settings(
             fmt, encodings, encoding=encoding)
+        # a keyword that names no field is a mistake, not a filter
+        unknown = sorted(set(kwargs) - set(_named_fields(fmt)))
+        if unknown:
+            raise ValueError(
+                f"{fmt!r} has no field named " + ", ".join(map(repr, unknown)))
 
         # Only the format is filled in; the base path is literal, even when
         # its folder names contain braces or glob characters.
         pattern = fmt.lstrip("/")
-        fmt_g = literal_format(pattern)
+        fmt_g = literal_format(fmt_enc.lstrip("/"))
 
         # plus one to ensure at least one iteration of the loop
         for i in range(pmax + 1):
@@ -414,7 +419,8 @@ class ParaFrame(pd.DataFrame):
 
             ``**kwargs``:
                 Values for named fields; only files whose names hold these
-                values are searched.
+                values are searched. Each keyword must name a field of
+                ``fmt``.
 
         Returns:
             ParaFrame: One row per matched file, with a ``path`` column (the
@@ -422,8 +428,7 @@ class ParaFrame(pd.DataFrame):
             one column per named field. A field's values are read as the text
             the names hold, and become numbers only when that keeps the text,
             so ``005`` stays ``005``. When no file matches, the frame is empty
-            but still has the ``path`` column and one column per named field
-            of ``fmt``, in order. ``attrs["unmatched"]`` lists the relative
+            and has no columns. ``attrs["unmatched"]`` lists the relative
             paths that the glob found but that do not fit ``fmt``, including
             its type specs.
 
@@ -444,7 +449,9 @@ class ParaFrame(pd.DataFrame):
         )
 
         # As in hm add ., a name must fit the typed format, letter case included.
-        checker = parse.compile(fmt.lstrip("/"), case_sensitive=True)
+        # The spec names that format, so encodings is read only once.
+        fmt_enc = yaml_encodings["fmt"] if encoding else fmt
+        checker = parse.compile(fmt_enc.lstrip("/"), case_sensitive=True)
         parser = parse.compile(fmt_g, case_sensitive=True)
         frame = []
         unmatched = []
@@ -465,15 +472,12 @@ class ParaFrame(pd.DataFrame):
                     print(f'Failed to parse "{f}"')
             else:
                 frame.append({"path": f_short, **r.named})
-        # with no rows, the columns come from fmt and stay as text
-        columns = None if frame else ["path", *_named_fields(fmt)]
-        result = cls(frame, columns=columns,
-                     encodings=encodings, base_path=base_path)
+        result = cls(frame, encodings=encodings, base_path=base_path)
         # attempt to convert each parameter column to numeric
         # if conversion fails the column stays as string
         for column in result.columns:
             # if the column is not "path", attempt to convert it to numeric
-            if frame and column != "path":
+            if column != "path":
                 result[column] = try_numeric_conversion(result[column])
         result.attrs["unmatched"] = unmatched
         return result

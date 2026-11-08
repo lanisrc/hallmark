@@ -1,9 +1,7 @@
 import pickle
 import re
 from pathlib import Path
-from types import MappingProxyType
 
-import numpy as np
 import pandas as pd
 from hallmark import ParaFrame
 import pytest
@@ -78,21 +76,10 @@ def test_debug(create_temp_data, capsys):
 
 ### filter tests ###
 
-@pytest.mark.parametrize("make_value", [
-    lambda: (1, 0),
-    lambda: {0, 1},
-    lambda: frozenset({0, 1}),
-    lambda: range(2),
-    lambda: np.array([1, 0]),
-    lambda: pd.Series([1, 0], index=[7, 8]),
-    lambda: pd.Index([1, 0]),
-    lambda: (value for value in (1, 0)),
-], ids=["tuple", "set", "frozenset", "range", "ndarray", "series", "index",
-        "generator"])
-def test_filter_list_like_value_matches_any_of_its_elements(make_value):
+def test_filter_tuple_value_matches_any_of_its_elements():
     pf = ParaFrame({"path": ["p0", "p1", "p2"], "a": [0, 1, 2]})
 
-    assert pf(a=make_value())["path"].tolist() == ["p0", "p1"]
+    assert pf(a=(1, 0))["path"].tolist() == ["p0", "p1"]
 
 
 @pytest.mark.parametrize("values,value", [
@@ -103,15 +90,6 @@ def test_filter_text_value_is_a_scalar(values, value):
     pf = ParaFrame({"path": ["p0", "p1", "p2"], "kind": values})
 
     assert pf(kind=value)["path"].tolist() == ["p2"]
-
-
-@pytest.mark.parametrize("value", [{0: "p0"}, MappingProxyType({0: "p0"})],
-                         ids=["dict", "mapping"])
-def test_filter_refuses_a_mapping_value(value):
-    pf = ParaFrame({"path": ["p0", "p1"], "a": [0, 1]})
-
-    with pytest.raises(ValueError, match="a= was given a mapping"):
-        pf(a=value)
 
 
 def test_filter_on_a_missing_column_raises_keyerror():
@@ -511,37 +489,13 @@ def test_parse_keyword_for_a_field_with_a_spec_keeps_the_literal_text(tmp_path):
     assert selected["doy"].dtype == everything["doy"].dtype
 
 
-@pytest.mark.parametrize("fmt", ["b_{a}_{b:d}_{a}_{}.txt", "b_{a}_{b:d}_{a}_{0}.txt"])
-def test_parse_with_no_match_keeps_the_path_and_field_columns(tmp_path, fmt):
-    _write_files(tmp_path, "b_x_q_x_1.txt")
+def test_parse_refuses_a_keyword_that_names_no_field(tmp_path):
+    _write_files(tmp_path, "a_1/b_1.txt", "a_2/b_2.txt")
 
-    frame = ParaFrame.parse(fmt, 1, base_path=tmp_path)
-
-    assert frame.empty
-    assert list(frame.columns) == ["path", "a", "b"]
-    assert frame.dtypes.tolist() == [object, object, object]
-    assert frame.attrs["unmatched"] == ["b_x_q_x_1.txt"]
-    selected = frame(a=1)
-    assert selected.empty
-    assert list(selected.columns) == ["path", "a", "b"]
-
-
-@pytest.mark.parametrize("encodings", [
-    [{"fmt": "a_{aspin}.dat", "encoding": {"aspin": r"m([0-9]+(?:\.[0-9]+)?)"}}],
-    [{"fmt": "a_{aspin}.dat", "encoding": {"aspin": r"p([0-9]+)"}},
-     {"fmt": "prefix_a_{aspin}.dat",
-      "encoding": {"aspin": r"m([0-9]+(?:\.[0-9]+)?)"}}],
-], ids=["narrower entry only", "narrower entry before the exact one"])
-def test_parse_with_a_narrower_encoding_entry_reads_the_full_format(
-        tmp_path, encodings):
-    _write_files(tmp_path, "prefix_a_m0.5.dat")
-
-    frame = ParaFrame.parse("prefix_a_{aspin}.dat", base_path=tmp_path,
-                            encodings=encodings, encoding=True)
-
-    assert frame.to_dict(orient="records") == [
-        {"path": "prefix_a_m0.5.dat", "aspin": -0.5}]
-    assert frame.attrs["unmatched"] == []
+    with pytest.raises(ValueError, match=re.escape("has no field named 'aa'")):
+        ParaFrame.parse("a_{a}/b_{b}.txt", base_path=tmp_path, aa=1)
+    assert ParaFrame.parse("a_{a}/b_{b}.txt", base_path=tmp_path,
+                           a=1)["path"].tolist() == ["a_1/b_1.txt"]
 
 
 ### _find_encoding_settings tests ###
@@ -617,22 +571,6 @@ def test_resolve_encoding_spec_skips_entries_without_a_usable_fmt(unusable, fmt)
 
     assert yaml_encodings is usable
     assert fmt_enc == "a_{aspin}.dat"
-
-
-@pytest.mark.parametrize("fmt,entry_fmts", [
-    ("prefix_a_{n}.dat", ["a_{n}.dat", "prefix_a_{n}.dat"]),
-    ("/a_{n}.dat", ["{n}.dat", "a_{n}.dat"]),
-    ("a_{n}.dat", ["{n}.dat", "/a_{n}.dat"]),
-], ids=["same text", "searched with a leading slash",
-        "entry with a leading slash"])
-def test_resolve_encoding_spec_prefers_the_entry_for_fmt_itself(fmt, entry_fmts):
-    encodings = [{"fmt": entry_fmt, "encoding": SPIN} for entry_fmt in entry_fmts]
-
-    yaml_encodings, fmt_enc = ParaFrame._find_encoding_settings(
-        fmt, encodings, encoding=True)
-
-    assert yaml_encodings is encodings[1]
-    assert fmt_enc == entry_fmts[1]
 
 
 def test_resolve_encoding_spec_without_an_encoding_key_has_no_regex_spec():
