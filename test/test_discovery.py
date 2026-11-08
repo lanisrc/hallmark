@@ -9,7 +9,8 @@ from hallmark.remote.discovery import (
 )
 from hallmark.remote.backends import HttpBackend
 from hallmark.transport.base import (
-    CapabilityError, DownloadError, RemoteEntry, RemoteSpec, TransferCancelled,
+    CapabilityError, DownloadError, RemoteConfigurationError, RemoteEntry,
+    RemoteSpec, TransferCancelled,
 )
 
 
@@ -334,7 +335,36 @@ def test_manifest_lines_take_binary_markers_upper_case_and_crlf():
 def test_gnu_escaped_manifest_names_are_refused():
     source = Listing(["a.fits", "SHA256SUMS"], {
         "SHA256SUMS": "a" * 64 + "  a.fits\n\\" + "b" * 64 + "  a\\nb.fits\n"})
-    with pytest.raises(DownloadError, match="GNU escaped manifest filenames"):
+    with pytest.raises(DownloadError, match="Checksum manifest 'SHA256SUMS': "
+                                            "GNU escaped manifest filenames"):
+        discover_remote_files(source)
+
+
+@pytest.mark.parametrize("name", ["/srv/data/b.fits", "../b.fits", ".git/config"])
+def test_an_unsafe_manifest_name_names_its_manifest(name):
+    source = Listing(["a.fits", "sub/SHA256SUMS"],
+                     {"sub/SHA256SUMS": "a" * 64 + "  " + name + "\n"})
+    with pytest.raises(RemoteConfigurationError,
+                       match="Checksum manifest 'sub/SHA256SUMS' lists an unsafe name"):
+        discover_remote_files(source)
+
+
+def test_an_unreadable_manifest_names_itself_and_keeps_other_errors():
+    source = Listing(["data/a.h5", "bin/sha256sum"])
+
+    def read_text(path, **_):
+        raise DownloadError("Remote text is not valid utf-8")
+
+    source.read_text = read_text
+    with pytest.raises(DownloadError, match="Checksum manifest 'bin/sha256sum': "
+                                            "Remote text is not valid utf-8"):
+        discover_remote_files(source, filter="data/*.h5")
+
+    def cancelled(path, **_):
+        raise TransferCancelled("cancelled")
+
+    source.read_text = cancelled
+    with pytest.raises(TransferCancelled, match="^cancelled$"):
         discover_remote_files(source)
 
 

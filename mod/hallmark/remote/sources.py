@@ -190,7 +190,6 @@ def effective_sources(state) -> list:
     relative to its URL; they are read as a single source named after that
     remote, without changing anything on disk. A remote name that is not a
     valid source name is turned into one as :func:`derive_source_name` does.
-    ``sources: null`` counts as no ``sources`` section.
 
     Args:
         state (State): Repository state.
@@ -205,7 +204,7 @@ def effective_sources(state) -> list:
     """
     config = state.config if isinstance(state.config, dict) else {}
     names = remote_names(config)
-    if config.get("sources") is not None:
+    if "sources" in config:
         return normalize_sources(config["sources"], names)
     legacy = any("path" in frame.columns and "sha1" not in frame.columns
                  for frame in catalog_tables(state).values())
@@ -220,8 +219,8 @@ def materialize_sources(state) -> list:
     """
     Write a legacy catalogue's synthesized source into the state.
 
-    A state that already records sources is left unchanged; ``sources:
-    null`` counts as not recorded. Otherwise the ``remote`` section is
+    A state that already records sources is left unchanged. Otherwise the
+    ``remote`` section is
     written as a list, a lone unnamed remote is named ``origin`` and the
     synthesized sources are recorded as ``sources``, even when there are
     none: a catalogue without legacy rows, or a legacy catalogue with no
@@ -241,7 +240,7 @@ def materialize_sources(state) -> list:
             source names an unknown remote.
     """
     config = state.config
-    if config.get("sources") is not None:
+    if "sources" in config:
         return effective_sources(state)
     sources = effective_sources(state)
     remotes = normalize_remotes(config.get("remote"))
@@ -260,15 +259,27 @@ def materialize_sources(state) -> list:
     return sources
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ssh": 22, "sftp": 22}
+
+
 def _decoded_root(spec: RemoteSpec) -> str:
-    """Return a remote's literal root folder ending in ``/``."""
+    """
+    Return a remote's literal root folder, starting and ending with ``/``.
+
+    ``.`` and empty segments are dropped, so ``data/./raw`` and
+    ``data//raw`` name the folder ``data/raw``.
+    """
     root = spec.root if spec.scheme in {"ssh", "sftp", "s3"} else unquote(spec.root)
-    return root.rstrip("/") + "/"
+    parts = [part for part in root.split("/") if part not in ("", ".")]
+    return "/" + "".join(part + "/" for part in parts)
 
 
 def _same_server(left: RemoteSpec, right: RemoteSpec) -> bool:
-    return ((left.scheme, left.host.lower(), left.port, left.user)
-            == (right.scheme, right.host.lower(), right.port, right.user))
+    """Compare scheme, host, port and user; a default port equals no port."""
+    def key(spec):
+        port = spec.port or _DEFAULT_PORTS.get(spec.scheme)
+        return spec.scheme, spec.host.lower(), port, spec.user
+    return key(left) == key(right)
 
 
 def match_remote(folder: RemoteSpec, remotes: Sequence[dict]):
@@ -283,6 +294,10 @@ def match_remote(folder: RemoteSpec, remotes: Sequence[dict]):
         tuple[str, str] | None: The remote name and the folder's root beneath
         it, choosing the deepest matching remote, or None. Of two
         remotes with equally deep roots, the first configured one wins.
+
+    Folders are compared without ``.`` and empty segments, and a default
+    port (443, 80 or 22) equals no port. The scheme must match exactly, so
+    ``ssh://`` and ``sftp://`` URLs of one host are different servers.
     """
     target = _decoded_root(folder)
     best = None

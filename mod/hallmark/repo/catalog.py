@@ -10,7 +10,8 @@ status cover all of them, so they read the catalogue through these helpers.
 
 from __future__ import annotations
 
-from ..utils import CHECKSUM_ALGORITHMS_BY_STRENGTH, as_list_of_dicts
+from ..utils import (
+    CHECKSUM_ALGORITHMS_BY_STRENGTH, as_list_of_dicts, infer_checksum_algorithm)
 from .config import validate_tsv_filename
 from .state import DEFAULT_DB, cell_text
 
@@ -38,7 +39,9 @@ def table_names(config) -> list[str]:
         list[str]: TSV file names, ``data.tsv`` first.
 
     Raises:
-        ValueError: If an entry's ``db`` is not a valid TSV file name.
+        ValueError: If an entry's ``db`` is not a valid TSV file name, or two
+            names differ only in letter case, which would be one file on
+            macOS and Windows.
     """
     names = [DEFAULT_DB]
     entries = as_list_of_dicts(config.get("data")) if isinstance(config, dict) else None
@@ -47,6 +50,12 @@ def table_names(config) -> list[str]:
                 and (entry.get("db") or entry.get("fmt"))):
             name = validate_tsv_filename(entry.get("db") or DEFAULT_DB)
             if name not in names:
+                clash = next((other for other in names
+                              if other.lower() == name.lower()), None)
+                if clash is not None:
+                    raise ValueError(
+                        f"TSV names {clash!r} and {name!r} differ only in "
+                        "letter case")
                 names.append(name)
     return names
 
@@ -114,7 +123,9 @@ def row_entry(row: dict, *, name=None) -> dict:
     Describe a catalogue row as a ``file:`` entry, leaving out empty values.
 
     A size or mtime written in ASCII digits becomes an integer; every other
-    value, the catalogue source included, stays text.
+    value, the catalogue source included, stays text. A checksum whose
+    algorithm is empty or ``unknown`` is named by its length, as
+    ``hm add`` reads it.
 
     Args:
         row (dict): Row with ``path`` and optional checksum, size, mtime,
@@ -129,6 +140,8 @@ def row_entry(row: dict, *, name=None) -> dict:
     entry["file"] = cell_text(row.get("path"))
     algorithm = cell_text(row.get("checksum_algorithm")).lower()
     checksum = cell_text(row.get("checksum"))
+    if checksum and algorithm in ("", "unknown"):
+        algorithm = infer_checksum_algorithm(checksum) or ""
     if algorithm in CHECKSUM_ALGORITHMS_BY_STRENGTH and checksum:
         entry[algorithm] = checksum
     for key in ("size_bytes", "mtime"):

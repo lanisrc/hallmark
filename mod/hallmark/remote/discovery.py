@@ -14,7 +14,8 @@ from tqdm import tqdm
 from ..utils import (
     CHECKSUM_ALGORITHMS_BY_STRENGTH, infer_checksum_algorithm, is_valid_checksum)
 from ..transport.base import (
-    DownloadError, RemoteEntry, RemoteObjectMissing, validate_remote_path,
+    DownloadError, RemoteConfigurationError, RemoteEntry, RemoteObjectMissing,
+    validate_remote_path,
 )
 
 
@@ -121,10 +122,17 @@ def _attach_published_checksums(context, entries):
             text = context.read_text(path, large=True)
         except RemoteObjectMissing:
             continue
+        except DownloadError as exc:
+            # Name the manifest; subclasses such as TransferCancelled pass as raised.
+            if type(exc) is not DownloadError:
+                raise
+            raise DownloadError(f"Checksum manifest {path!r}: {exc}") from exc
         parent = PurePosixPath(path).parent
         for line in text.splitlines():
             if line.startswith("\\"):
-                raise DownloadError("GNU escaped manifest filenames are unsupported")
+                raise DownloadError(
+                    f"Checksum manifest {path!r}: GNU escaped manifest filenames "
+                    "are unsupported")
             match = re.fullmatch(r"([0-9a-fA-F]{8,}) [ *](.+)", line)
             if not match:
                 continue
@@ -136,7 +144,12 @@ def _attach_published_checksums(context, entries):
                 continue
             while filename.startswith("./"):
                 filename = filename[2:]
-            filename = validate_remote_path(filename).as_posix()
+            try:
+                filename = validate_remote_path(filename).as_posix()
+            except RemoteConfigurationError as exc:
+                raise RemoteConfigurationError(
+                    f"Checksum manifest {path!r} lists an unsafe name: {exc}"
+                ) from exc
             candidates = [(parent / filename).as_posix()]
             if "/" in filename:
                 candidates.append(filename)
