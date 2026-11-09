@@ -1,7 +1,6 @@
 Data backends
 =============
 
-
 A data backend discovers files and transfers them from a data source. It does
 not determine where the Hallmark catalog is hosted. The same catalog can be
 shared through GitHub, an HTTP server or SFTP while its backend accesses a
@@ -24,7 +23,13 @@ implementations:
   the checksums those servers keep (``oc:checksums``) as ``server`` checksums.
 * ``S3Backend`` (``s3``) lists and transfers objects in AWS S3 and compatible
   stores for ``s3://BUCKET/PREFIX/`` remotes. It needs the optional ``boto3``
-  dependency (``pip install hallmark[s3]``).
+  dependency (``pip install hallmark[s3]``). Its backend options are
+  ``endpoint_url`` (for stores other than AWS), ``region``,
+  ``addressing_style`` (``auto``, ``virtual`` or ``path``), ``anonymous``
+  (``true`` for public buckets), ``page_size`` (objects per listing request, at
+  most 1000) and ``etag_md5`` (``auto`` treats single-part ETags as MD5
+  checksums; leave it unset for buckets that encrypt objects with KMS or
+  customer keys, whose ETags are not checksums).
 
 Without an explicit backend, Hallmark selects one from the data URL:
 ``ssh`` for SSH and SFTP URLs, ``s3`` for S3 URLs, ``webdav`` for ``webdav://`` and ``webdavs://``
@@ -64,9 +69,10 @@ accepts the same settings in Python. The data remote stores ``backend`` and
          release: dr1
 
 Options contain ordinary configuration that can be shared with the catalog.
-Keep tokens, passwords and private keys outside them. The built-in SSH backend
-uses local auth profiles; HTTP retains Requests' authentication and environment
-behavior. A plugin documents how it obtains any additional credentials locally.
+Keep tokens, passwords and private keys outside them. The built-in backends
+take credentials from local auth profiles; without one, HTTP retains Requests'
+authentication and environment behavior. A plugin documents how it obtains any
+additional credentials locally.
 The example ``release`` option above is interpreted by the plugin, not Hallmark.
 
 Update an existing remote in Python with
@@ -106,7 +112,7 @@ operation has been cancelled.
        dataset root. Report completed directories through the optional callback.
        Missing sizes, timestamps and published checksums remain ``None``.
        Set ``checksum_source="server"`` on a digest the service itself reports;
-       the catalogue records it so collaborators can tell it from a published
+       the catalog records it so collaborators can tell it from a published
        checksum file (``"published"``).
    * - ``read_text(relative_path, limit)``
      - Read metadata within the supplied byte limit and return decoded text.

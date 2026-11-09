@@ -1,9 +1,6 @@
 API Reference
 =============
 
-This section contains the automatically generated API documentation for the
-``hallmark`` package.
-
 Core Repository
 ---------------
 
@@ -36,6 +33,7 @@ Repository Worktrees
 
 .. automodule:: hallmark.repo.branches
    :members:
+   :show-inheritance:
 
 State Management
 ----------------
@@ -46,6 +44,7 @@ State Management
 
 .. automodule:: hallmark.repo.catalog
    :members:
+   :show-inheritance:
 
 Data Handling
 -------------
@@ -65,24 +64,51 @@ Downloading
    :members:
    :show-inheritance:
 
-Catalog sources
+.. automodule:: hallmark.remote.plan
+   :members:
+   :show-inheritance:
+
+Catalog Sources
 ---------------
 
 .. automodule:: hallmark.remote
    :members:
+   :show-inheritance:
 
 .. automodule:: hallmark.remote.add
    :members:
+   :show-inheritance:
    :exclude-members: path, source, content, clashes, can_prefix
 
 .. automodule:: hallmark.remote.sources
    :members:
+   :show-inheritance:
 
 .. automodule:: hallmark.remote.discovery
    :members:
+   :show-inheritance:
 
 .. automodule:: hallmark.remote.clone
    :members:
+   :show-inheritance:
+
+Data Backends
+-------------
+
+.. automodule:: hallmark.remote.backends
+   :members:
+   :show-inheritance:
+
+Authentication Profiles
+-----------------------
+
+.. automodule:: hallmark.transport.auth
+   :members:
+   :show-inheritance:
+
+.. automodule:: hallmark.transport.secrets
+   :members:
+   :show-inheritance:
 
 Utilities
 ---------
@@ -106,148 +132,6 @@ Utilities
 Command Line Interface
 ----------------------
 
-The Hallmark command-line interface provides commands for creating, managing,
-and interacting with Hallmark repositories.
-
 .. automodule:: hallmark.cli
    :members:
    :show-inheritance:
-
-Preparing a repository
-----------------------
-
-Create a local repository::
-
-   hm init ./local-project
-
-Stage and commit a remote catalog without downloading dataset files::
-
-   hm init ./lab
-   cd ./lab
-   hm add 'ssh://lab-data/srv/data/run{run:d}.h5'
-   hm commit -m 'Add remote data'
-
-Repeat ``--fmt`` to catalog several filename formats, each in its own TSV::
-
-   hm add 'ssh://lab-data/srv/data/' --fmt 'run{run:d}.h5=runs' \
-       --fmt 'logs/run{run:d}.log=logs'
-
-Let ``hm detect`` suggest formats for a configured remote, or a folder inside
-one, and catalog with them using ``--add``::
-
-   hm detect origin
-   hm detect 'ssh://lab-data/srv/data/logs/' --add
-
-Use ``hm clone SOURCE PATH`` for an existing Hallmark Git repository
-or published HTTP/SFTP snapshot. Git clones retain the full catalog and its
-history; snapshots start new local history. Use ``--source-type git`` or
-``--source-type catalog`` to override automatic detection.
-
-Downloading remote data
------------------------
-
-Preview the selected files using the local catalog, then confirm a download::
-
-   hm download --all --dry-run
-   hm download --filter 'runs/**'
-
-Explicit paths and ``--tsv data.tsv`` also select files. Every nonempty transfer
-in the CLI requires interactive confirmation, including the default clone
-transfer. ``clone --no-download`` skips data and the prompt. Clone filters and
-formats cannot be combined with this flag and leave the complete catalog unchanged.
-Declining clone's prompt keeps the catalog and exits successfully.
-A filter or filename format never authorizes a transfer.
-
-Like ``Repo.download``, ``Repo.clone(url, path)`` transfers data only with
-approval: an ``approve(plan)`` callback returning Boolean True, or
-``approved=True``. Without approval, or when it is declined, the catalog is
-cloned without data. Pass ``download=False`` for catalog-only or bare clones. A
-bare destination with downloads enabled fails before cloning.
-
-When a remote shares paths with a source already catalogued, ``Repo.add``
-refuses unless ``on_duplicate`` says otherwise: ``"skip"`` leaves those paths
-out, or a callable receives a ``hallmark.remote.add.Duplicates`` listing each
-path and whether its content matches, and returns ``"skip"``, ``"abort"`` or
-``("prefix", "DIR")``. Skipped paths are in the result's ``attrs["skipped"]``.
-
-For separate Python downloads, first inspect the selected files::
-
-   from hallmark import Repo
-
-   repo = Repo.init('lab')
-   repo.add('ssh://lab-data/srv/data/', progress=True)
-   repo.commit('Add remote data')
-   plan = repo.plan_download(filter='runs/**')
-   print(plan.summary())
-
-After reviewing the plan, approve the download and check for failures::
-
-   result = repo.download(plan, approved=True, progress=True)
-   if result['failed']:
-       raise RuntimeError('\n'.join(result['errors']))
-
-Plans preserve their selected remote, backend settings, destination and
-checksums even when repository configuration later changes. Size estimates
-require recorded file sizes; duration estimates also require a supplied
-transfer rate.
-
-.. automodule:: hallmark.remote.plan
-   :members:
-
-Data backends
--------------
-
-See :doc:`backends` for registration, installed plugins and the transfer
-contract. Backend classes are also exported from ``hallmark``. Existing
-``hallmark.transport`` imports remain compatibility aliases.
-
-.. automodule:: hallmark.remote.backends
-   :members:
-   :show-inheritance:
-
-Data remotes
-------------
-
-Associate a data remote with a local SSH authentication profile::
-
-   repo.set_config(remote_name="campus", remote_auth="campus")
-
-Remove the profile reference::
-
-   repo.set_config(remote_name="campus", remote_auth="")
-
-The repository stores the profile name. The SSH settings remain in the
-local authentication file. Passing ``remote_auth=None`` leaves the
-reference unchanged.
-
-``Repo.download`` returns a dictionary containing ``succeeded``,
-``failed``, ``total_bytes``, and ``errors``. Check ``failed`` and ``errors``
-for individual transfer failures. ``plan.skipped_items`` lists existing files
-whose checksums match. ``plan.outdated_items`` lists earlier downloads that no
-longer match their catalog row; each item's ``replaces`` is the SHA-1 of the
-file it replaces, whose bytes stay in ``.hm/objects``. Execution checks
-destinations again before connecting and replaces only files the approved plan
-listed. Its result also includes ``skipped`` paths when more files match at
-execution, ``replaced`` paths, and ``unchanged`` paths that were fetched to
-compare and already held the same content.
-Unknown catalog paths and existing-file conflicts raise ``DownloadError``
-before transfer. Configuration errors and failed SSH
-connection checks raise ``DownloadError`` before downloads begin.
-HTTP, SSH, and SFTP downloads use the same rules for destination paths
-and checksum verification.
-
-See :doc:`private_data` for CLI and Python examples, and
-:ref:`private-transport-reference` for authentication settings and
-supported server configurations.
-
-Authentication profiles
------------------------
-
-Profiles live in the local authentication file, not in the repository.
-A remote stores only the profile name.
-
-.. automodule:: hallmark.transport.auth
-   :members:
-
-.. automodule:: hallmark.transport.secrets
-   :members:
