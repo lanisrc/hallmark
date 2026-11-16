@@ -1118,10 +1118,14 @@ def test_download_cli_requires_affirmative_approval(
     repo.download = reject_download
     args = ["download", "--all"]
     result = CliRunner().invoke(hallmark, args, input=answer)
-    assert result.exit_code != 0
     assert f"{count} file(s)" in result.output
     assert "Download these files? [y/N]" in result.output
-    assert "Aborted!" in result.output
+    if answer == "":
+        assert result.exit_code == 1
+        assert "Aborted!" in result.output
+    else:
+        assert result.exit_code == 0
+        assert "Skipped download." in result.output
 
 
 def test_clone_cli_no_download_copies_metadata_only(monkeypatch, tmp_path):
@@ -1181,9 +1185,11 @@ def test_cli_downloads_only_approved_selected_payload(
         assert requests_made == ["https://example.test/data/tiny.fits"]
         assert (target / "tiny.fits").read_bytes() == b"fits"
     else:
-        if during_clone and answer in {"n\n", "\n"}:
+        if answer in {"n\n", "\n"}:
             assert result.exit_code == 0, result.output
             assert (target / ".hm/data.tsv").is_file()
+            if not during_clone:
+                assert "Skipped download." in result.output
         else:
             assert result.exit_code != 0
         assert requests_made == []
@@ -1247,7 +1253,12 @@ def test_add_then_download_requires_confirmation(monkeypatch, tmp_path, answer):
     assert "Download these files? [y/N]" in result.output
     assert Repo(destination).state.data["path"].tolist() == ["a.fits"]
     assert (destination / "a.fits").exists() == (answer == "y\n")
-    assert (result.exit_code == 0) == (answer == "y\n")
+    if answer == "" and _CLICK_RUNNER_SIGNALS_EOF:
+        assert result.exit_code != 0
+    else:
+        assert result.exit_code == 0, result.output
+        if answer != "y\n":
+            assert "Skipped download." in result.output
 
 
 # Staging-specific coverage from sam/add-restore. Existing tests above remain.

@@ -201,7 +201,7 @@ def _run_download(repo, plan, *, max_workers):
         max_workers (int): Maximum concurrent download workers.
 
     Raises:
-        Abort: If a nonempty download is declined.
+        Abort: If the confirmation prompt is interrupted.
         ClickException: If any file transfers fail.
         DownloadError: If the download cannot be started.
     """
@@ -214,7 +214,9 @@ def _run_download(repo, plan, *, max_workers):
             if results.get("staged") or results.get("staging_error"):
                 _report_download_results(results)
         return
-    click.confirm("Download these files?", default=False, abort=True)
+    if not click.confirm("Download these files?", default=False):
+        click.echo("Skipped download.")
+        return
     results = repo.download(plan, approved=True, max_workers=max_workers,
                             progress=True)
 
