@@ -39,6 +39,21 @@ class CloneError(HallmarkError, GitError):
         clone_path: Optional[Union[Path, str]] = None,
         display_path: Optional[Union[Path, str]] = None,
     ) -> "CloneError":
+        """
+        Build a clone error from a failed Git command.
+
+        The message starts at Git's ``fatal:`` line when there is one, and names
+        ``display_path`` wherever Git printed the clone path.
+
+        Args:
+            error (GitCommandError): The failed Git command.
+            fallback (str, optional): Message to use when Git printed nothing.
+            clone_path (Path | str, optional): Path that Git cloned into.
+            display_path (Path | str, optional): Path to show the user instead.
+
+        Returns:
+            CloneError: The error to raise.
+        """
         text = str(error.stderr or fallback or error).strip()
         if "fatal:" in text:
             text = text[text.index("fatal:"):].strip(" '")

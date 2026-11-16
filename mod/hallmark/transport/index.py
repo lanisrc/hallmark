@@ -32,6 +32,7 @@ class _IndexParser(HTMLParser):
         self.cell_role = None
 
     def handle_starttag(self, tag, attrs):
+        """Note tables, forms, rows and cells, and start a record for each link."""
         attrs = dict(attrs)
         if tag == "table":
             self.has_table = True
@@ -53,6 +54,7 @@ class _IndexParser(HTMLParser):
             self.in_anchor = True
 
     def handle_endtag(self, tag):
+        """End the current row, link or cell."""
         if tag == "tr":
             self.row_kind = None
             self.current = None
@@ -64,6 +66,7 @@ class _IndexParser(HTMLParser):
             self.cell_role = None
 
     def handle_data(self, data):
+        """Collect page text, and each link's trailing text and size."""
         self.text.append(data)
         if self.current is not None and not self.in_anchor:
             self.current["tail"] += data

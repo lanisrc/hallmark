@@ -1,3 +1,11 @@
+"""
+Infer filename format strings (fmts) from the paths in a dataset.
+
+``detect_fmt`` turns relative paths into fmts with named parameters, and
+``merge_fmts_sharing_all_literals`` and ``combine_alike_fmts`` merge fmts
+with the same literal structure. ``scan_inventory`` lists a folder's files.
+"""
+
 from __future__ import annotations
 
 import re

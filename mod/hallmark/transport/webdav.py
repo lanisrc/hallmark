@@ -49,6 +49,7 @@ def _strongest_checksum(element):
 
 
 def _timestamp(element):
+    """Return an XML element's HTTP date as Unix seconds, or None."""
     try:
         return int(parsedate_to_datetime(element.text.strip()).timestamp())
     except (AttributeError, TypeError, ValueError, IndexError):

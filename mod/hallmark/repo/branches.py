@@ -290,6 +290,11 @@ def checkout(repo, target_branch):
 
 
 def _checkout(repo, target_branch):
+    """
+    Switch the worktree and ``.hm`` to a branch, remote branch or commit.
+
+    Returns False, changing nothing, when the target is the current branch.
+    """
     # Validate and normalize the target branch name
     target_branch = repo._validate_branch_name(target_branch)
 

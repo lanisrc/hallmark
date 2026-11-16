@@ -107,7 +107,7 @@ class HttpBackend(DataBackend):
             self.auth.resolve()
 
     def _auth_option(self):
-        # Without a profile, call Requests exactly as before.
+        """Return the ``auth`` keyword for Requests, or none without a profile."""
         return {"auth": self.auth} if self.auth is not None else {}
 
     def _parse_directory_listing(self, text, directory):

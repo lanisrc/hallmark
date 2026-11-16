@@ -262,6 +262,13 @@ def clone_catalog(cls, url, path, *, auth=None, source_type="auto"):
 
 
 def _prepare_catalog(cls, url, path, display_path, *, auth, source_type):
+    """
+    Create the staged repository for a clone.
+
+    A Git source is cloned. Otherwise the published catalog snapshot at the
+    URL, or in its ``.hm/`` folder, goes into a new repository; in auto mode,
+    an HTTP(S) URL without a snapshot is cloned with Git instead.
+    """
     if source_type not in {"auto", "git", "catalog"}:
         raise ValueError("source_type must be auto, git, or catalog")
     url = str(url)

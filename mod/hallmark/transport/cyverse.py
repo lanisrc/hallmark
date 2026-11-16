@@ -32,5 +32,6 @@ class CyVerseBackend(HttpBackend):
     """Discover CyVerse collections and transfer their files over HTTP(S)."""
 
     def _parse_directory_listing(self, text, directory):
+        """Read a directory listing page with the CyVerse parser."""
         return _parse_directory_listing(text, self.context.remote.url, directory,
                             parser_class=CyVerseIndexParser)

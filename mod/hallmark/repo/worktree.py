@@ -13,6 +13,8 @@
 # limitations under the License.
 
 
+"""The Worktree path type: the data folder that a repository catalogs."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -58,6 +60,7 @@ class Worktree(type(Path())):
         return cls(resolved)
 
     def with_segments(self, *pathsegments):
+        """Make derived paths plain Paths, which need not be existing folders."""
         return Path(*pathsegments)
 
     def __truediv__(self, key):

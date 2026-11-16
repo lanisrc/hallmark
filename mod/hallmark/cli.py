@@ -240,6 +240,7 @@ class _HallmarkGroup(click.Group):
     """Report user-fixable errors from any command without a traceback."""
 
     def invoke(self, ctx):
+        """Run a command, turning user-fixable errors into ClickExceptions."""
         try:
             return super().invoke(ctx)
         except (click.exceptions.Exit, click.exceptions.Abort, ClickException):
@@ -303,6 +304,11 @@ def _load_backend_options(path):
 @hallmark.command(short_help="Initialize an empty local repository.")
 @click.argument("path", default=".")
 def init(path):
+    """Initialize an empty hallmark repository at PATH.
+
+    PATH defaults to the current directory. Existing files are kept, and a
+    folder that already has a .hm repository is refused.
+    """
     with _translate_cli_errors(
         GitError, ValueError, OSError,
         prefix=f'Failed to initialize hallmark repository at "{path}"'):

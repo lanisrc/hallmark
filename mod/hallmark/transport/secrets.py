@@ -133,6 +133,7 @@ class SecretRef:
         return Secret(self._run_command(where))
 
     def _run_command(self, where: str) -> str:
+        """Run the secret command without a shell and return its one output line."""
         program = shutil.which(self.target[0])
         if program is None:
             raise RemoteConfigurationError(

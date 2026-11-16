@@ -44,6 +44,7 @@ def _find_backend_plugins(name):
 
 
 def _validate_backend_class(backend_class):
+    """Return a DataBackend subclass unchanged; raise for anything else."""
     if (not isinstance(backend_class, type)
             or not issubclass(backend_class, DataBackend)
             or backend_class is DataBackend):

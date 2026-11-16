@@ -379,6 +379,7 @@ remote:
                 writer.set_value("user", "email", email)
 
     def _read_identity(self, reader) -> tuple[Optional[str], Optional[str]]:
+        """Return the user name and email from a Git config reader, or None for each."""
         values = []
         for key in ("name", "email"):
             try:
