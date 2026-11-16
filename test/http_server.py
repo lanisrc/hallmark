@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import fnmatch
+import hashlib
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
@@ -418,3 +419,74 @@ class LocalServer:
     def close(self):
         self.httpd.shutdown()
         self.httpd.server_close()
+
+
+WEBDAV_MTIME = "Mon, 05 Oct 2026 12:00:00 GMT"
+
+
+def multistatus(*responses):
+    """Wrap PROPFIND ``member`` responses in a WebDAV multistatus body."""
+    return ('<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" '
+            'xmlns:oc="http://owncloud.org/ns">' + "".join(responses)
+            + "</d:multistatus>").encode()
+
+
+def member(href, *, collection=False, size=None, checksums=None, status=200):
+    """One PROPFIND response, with ownCloud ``oc:checksums`` when given."""
+    props = ("<d:resourcetype><d:collection/></d:resourcetype>" if collection
+             else "<d:resourcetype/>")
+    missing = ""
+    if size is not None:
+        props += f"<d:getcontentlength>{size}</d:getcontentlength>"
+    props += f"<d:getlastmodified>{WEBDAV_MTIME}</d:getlastmodified>"
+    if checksums:
+        props += f"<oc:checksums><oc:checksum>{checksums}</oc:checksum></oc:checksums>"
+    else:
+        missing = ("<d:propstat><d:prop><oc:checksums/></d:prop>"
+                   "<d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>")
+    return (f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>{props}"
+            f"</d:prop><d:status>HTTP/1.1 {status} OK</d:status></d:propstat>"
+            f"{missing}</d:response>")
+
+
+def dav_handler(server):
+    """A PROPFIND handler for ``LocalServer`` built from its current files.
+
+    Each collection under ``/data/`` lists its files with sizes and
+    ``SHA1``/``MD5`` checksums, and its sub-collections, at ``Depth: 1``.
+    """
+    def propfind(handler, path):
+        length = int(handler.headers.get("Content-Length") or 0)
+        if length:
+            handler.rfile.read(length)
+        if handler.headers.get("Depth") != "1" or not path.startswith("/data/"):
+            handler.send_error(400)
+            return
+        relative = path[len("/data/"):]
+        children = {}
+        for name, data in server.files.items():
+            if not name.startswith(relative):
+                continue
+            head, _, rest = name[len(relative):].partition("/")
+            children.setdefault(head, None if rest else data)
+        if not children and relative:
+            handler.send_error(404)
+            return
+        responses = [member(quote(path), collection=True)]
+        for name, data in sorted(children.items()):
+            href = quote(path + name)
+            if data is None:
+                responses.append(member(href + "/", collection=True))
+            else:
+                responses.append(member(
+                    href, size=len(data),
+                    checksums=f"SHA1:{hashlib.sha1(data).hexdigest()} "
+                              f"MD5:{hashlib.md5(data).hexdigest()}"))
+        body = multistatus(*responses)
+        handler.send_response(207)
+        handler.send_header("Content-Type", "application/xml")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    return propfind

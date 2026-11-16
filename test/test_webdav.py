@@ -9,33 +9,7 @@ from hallmark import Repo
 from hallmark.remote.discovery import discover_remote_files
 from hallmark.transport import OperationContext, RemoteSpec
 from hallmark.transport.base import CapabilityError, DownloadError
-from http_server import LocalServer
-
-MTIME = "Mon, 05 Oct 2026 12:00:00 GMT"
-
-
-def multistatus(*responses):
-    return ('<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" '
-            'xmlns:oc="http://owncloud.org/ns">' + "".join(responses)
-            + "</d:multistatus>").encode()
-
-
-def member(href, *, collection=False, size=None, checksums=None, status=200):
-    props = ("<d:resourcetype><d:collection/></d:resourcetype>" if collection
-             else "<d:resourcetype/>")
-    missing = ""
-    if size is not None:
-        props += f"<d:getcontentlength>{size}</d:getcontentlength>"
-    props += f"<d:getlastmodified>{MTIME}</d:getlastmodified>"
-    if checksums:
-        props += f"<oc:checksums><oc:checksum>{checksums}</oc:checksum></oc:checksums>"
-    else:
-        missing = ("<d:propstat><d:prop><oc:checksums/></d:prop>"
-                   "<d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>")
-    return (f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>{props}"
-            f"</d:prop><d:status>HTTP/1.1 {status} OK</d:status></d:propstat>"
-            f"{missing}</d:response>")
-
+from http_server import LocalServer, member, multistatus
 
 @pytest.fixture
 def dav():
