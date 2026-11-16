@@ -682,6 +682,8 @@ def _place_stored_objects(repo, state, root, *, skip_existing):
     for destination, sha1 in pending:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if remote:
+            if not repo.objects.verify(sha1):
+                raise ValueError(f"Stored file failed verification: {destination}")
             repo.objects.materialize(sha1, destination)
         else:
             repo.objects.restore(sha1, destination)

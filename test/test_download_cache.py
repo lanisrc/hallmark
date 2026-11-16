@@ -942,6 +942,20 @@ def test_a_worktree_links_downloaded_files_read_only(tmp_path, server, pattern,
     assert status["untracked"] == []
 
 
+def test_worktree_rejects_a_changed_stored_file(repo):
+    download(repo, file_paths=["b.fits"])
+    repo.commit("Record b.fits")
+    path = repo.worktree / "b.fits"
+    path.chmod(0o600)
+    path.write_bytes(b"changed")
+
+    with pytest.raises(RuntimeError, match=r"failed verification: .*b\.fits"):
+        repo.add_worktree("linked")
+    assert not (repo.worktree.parent / "linked").exists()
+    assert "linked" not in repo.branches()["names"]
+    assert path.read_bytes() == b"changed"
+
+
 def test_a_worktree_of_a_partly_downloaded_catalogue_links_what_is_stored(
         repo, server):
     download(repo, file_paths=["b.fits"])
