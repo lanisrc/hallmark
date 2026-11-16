@@ -78,6 +78,7 @@ markers = [
     "chaos: fault injection, crash consistency and seeded random operations",
     "survey: end-to-end survey workflows against loopback HTTP and SSH servers",
     "survey_live: tiny downloads from public archives (HALLMARK_RUN_LIVE_TESTS=1 required)",
+    "e2e: one research cycle through every CLI option and every public API entry point",
 ]
 
 [tool.coverage.run]
