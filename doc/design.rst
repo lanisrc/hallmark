@@ -194,6 +194,8 @@ The data flow can be summarized as::
 
 Discovery reads listings and published checksum manifests, never dataset
 files, and stages its catalog only after a complete scan.
+Hallmark uses checksum manifests to verify data files and excludes the
+manifests themselves from the catalog.
 A server without a usable listing needs a published catalog or a backend
 plugin.
 Filename formats belong to the whole catalog and sort the files of every

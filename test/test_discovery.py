@@ -189,16 +189,18 @@ def test_only_conventional_checksum_metadata_is_read():
         "": index("data.fits", "sha256sums.txt", "custom_checksum_payload.bin"),
         "sha256sums.txt": f"{digest}  data.fits\n",
     })
-    entries = discover_remote_files(source, filter="*.fits")
-    assert entries == [RemoteEntry(path="data.fits", checksum_algorithm="sha256",
-                                   checksum=digest, checksum_source="published")]
+    entries = discover_remote_files(source)
+    assert [entry.path for entry in entries] == [
+        "custom_checksum_payload.bin", "data.fits"]
+    assert entries[1].checksum == digest
+    assert entries[1].checksum_source == "published"
     assert source.reads == ["", "sha256sums.txt"]
 
 
 def test_checksum_manifest_cannot_add_unlisted_files():
     source = Source({"": index("sha256sums.txt"),
                      "sha256sums.txt": "a" * 64 + "  phantom.fits\n"})
-    assert [entry.path for entry in discover_remote_files(source)] == ["sha256sums.txt"]
+    assert discover_remote_files(source) == []
 
 
 def test_nested_manifest_accepts_published_directory_prefixed_paths():

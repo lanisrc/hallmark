@@ -187,6 +187,7 @@ def discover_remote_files(
             server_checksum not in CHECKSUM_ALGORITHMS_BY_STRENGTH:
         raise ValueError(f"Unsupported server checksum {server_checksum!r}")
     entries = {}
+    matched_paths = []
     counts = {"directories": 0, "files": 0, "matched": 0, "current": ""}
     bar = tqdm(total=None, unit="dir", desc="Discovering", disable=not bool(progress)) \
         if not callable(progress) else None
@@ -207,7 +208,10 @@ def discover_remote_files(
         if path not in entries:
             entries[path] = entry
             counts["files"] += 1
-            counts["matched"] += int(path_matches(path, filter=filter, fmt=fmt))
+            if _checksum_file_algorithm(path) is None and path_matches(
+                    path, filter=filter, fmt=fmt):
+                matched_paths.append(path)
+                counts["matched"] += 1
             report_progress()
 
     try:
@@ -216,8 +220,7 @@ def discover_remote_files(
             context.check_cancelled()
             add_file_entry(entry)
         _attach_published_checksums(context, entries)
-        selected = [entries[path] for path in sorted(entries)
-                    if path_matches(path, filter=filter, fmt=fmt)]
+        selected = [entries[path] for path in sorted(matched_paths)]
         selected = context.transport.complete_entries(selected)
         if server_checksum is not None:
             selected = _attach_server_checksums(context, selected, server_checksum)
