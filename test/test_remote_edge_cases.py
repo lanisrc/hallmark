@@ -200,7 +200,10 @@ def test_dot_segments_name_the_root_folder():
 def test_a_lone_dot_names_the_root_folder(folder):
     assert SourceSpec("lab", "origin", prefix=folder).prefix == ""
     assert SourceSpec("lab", "origin", root=folder).root == ""
-    with pytest.raises(ValueError):
+
+
+def test_an_absolute_root_is_refused():
+    with pytest.raises(ValueError, match="Source root must be a relative folder"):
         SourceSpec("lab", "origin", root="/")
 
 
@@ -270,6 +273,21 @@ def test_a_named_remote_serves_a_folder_inside_it(tmp_path, pages):
         {"name": "origin", "url": ROOT, "backend": "http"}]
     assert repo.state.config["sources"][1] == {
         "name": "origin-raw", "remote": "origin", "root": "raw/"}
+    assert repo.state.data["path"].tolist() == ["a.fits", "raw/b.fits"]
+
+
+@pytest.mark.parametrize("again", ["./raw/", "/raw/"])
+def test_a_folder_written_with_dot_or_empty_segments_is_the_same_folder(
+        tmp_path, pages, again):
+    served, _ = pages
+    served[ROOT] = listing("a.fits")
+    served[ROOT + "raw/"] = listing("b.fits")
+    repo = Repo.init(tmp_path / "data")
+    repo.add(ROOT)
+    repo.add(ROOT + "raw/")
+    repo.add(ROOT + again)
+    assert [source["name"] for source in repo.state.config["sources"]] == [
+        "origin", "origin-raw"]
     assert repo.state.data["path"].tolist() == ["a.fits", "raw/b.fits"]
 
 

@@ -130,12 +130,15 @@ def snapshot_hm(repo_path):
     }
 
 
-def check_invariants(repo_path, *, fsck=True):
+def check_invariants(repo_path, *, fsck=True, objects=True):
     """Check a repository for corruption and leftover temporary files.
 
     Args:
         repo_path: Worktree or bare ``.hm`` path.
         fsck (bool): Also run ``git fsck``, which is slower.
+        objects (bool): Require an object for every SHA-1 in each branch's
+            ``data.tsv``. Pass False for a remote catalogue whose files were
+            never downloaded.
 
     Returns:
         Violations: Empty (falsy) when every invariant holds.
@@ -160,7 +163,7 @@ def check_invariants(repo_path, *, fsck=True):
                 found.corruption.append(f"object {path} has checksum {digest}")
 
     dothm = Path(repo.dothm.path)
-    for head in repo.dothm.heads:
+    for head in repo.dothm.heads if objects else ():
         try:
             text = _git(dothm, "show", f"{head.name}:data.tsv")
         except subprocess.CalledProcessError:

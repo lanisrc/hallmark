@@ -48,7 +48,8 @@ def test_remote_add_is_recursive_filtered_and_payload_free(
     plan = repo.plan_download()
     assert plan.file_count == 2
     assert plan.unknown_size_count == 2
-    assert events[-1]["directories"] == 2
+    last = events[-1]
+    assert (last["directories"], last["files"], last["matched"]) == (2, 3, 2)
 
 
 def test_remote_add_does_not_require_filename_inference(tmp_path, metadata_server):

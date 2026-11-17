@@ -10,7 +10,8 @@ status cover all of them, so they read the catalogue through these helpers.
 
 from __future__ import annotations
 
-from ..utils import CHECKSUM_ALGORITHMS_BY_STRENGTH, as_list_of_dicts
+from ..utils import (
+    CHECKSUM_ALGORITHMS_BY_STRENGTH, as_list_of_dicts, infer_checksum_algorithm)
 from .config import validate_tsv_filename
 from .state import DEFAULT_DB, cell_text
 
@@ -38,7 +39,9 @@ def table_names(config) -> list[str]:
         list[str]: TSV file names, ``data.tsv`` first.
 
     Raises:
-        ValueError: If an entry's ``db`` is not a valid TSV file name.
+        ValueError: If an entry's ``db`` is not a valid TSV file name, or two
+            names differ only in letter case, which would be one file on
+            macOS and Windows.
     """
     names = [DEFAULT_DB]
     entries = as_list_of_dicts(config.get("data")) if isinstance(config, dict) else None
@@ -47,12 +50,31 @@ def table_names(config) -> list[str]:
                 and (entry.get("db") or entry.get("fmt"))):
             name = validate_tsv_filename(entry.get("db") or DEFAULT_DB)
             if name not in names:
+                clash = next((other for other in names
+                              if other.lower() == name.lower()), None)
+                if clash is not None:
+                    raise ValueError(
+                        f"TSV names {clash!r} and {name!r} differ only in "
+                        "letter case")
                 names.append(name)
     return names
 
 
 def catalog_tables(state) -> dict:
-    """Return every TSV of a state by name, ``data.tsv`` first."""
+    """
+    Return every TSV of a state by name, ``data.tsv`` first.
+
+    ``state.data`` is ``data.tsv``; a ``"data.tsv"`` key in ``state.tables``
+    would replace it, so ``tables`` holds only the other TSVs, the names
+    ``table_names(config)[1:]`` gives.
+
+    Args:
+        state (State): Repository state; one without ``tables`` has only
+            ``data.tsv``.
+
+    Returns:
+        dict[str, pandas.DataFrame]: The state's own frames by TSV name.
+    """
     return {DEFAULT_DB: state.data, **getattr(state, "tables", {})}
 
 
@@ -100,21 +122,34 @@ def row_entry(row: dict, *, name=None) -> dict:
     """
     Describe a catalogue row as a ``file:`` entry, leaving out empty values.
 
+    A size or mtime written in ASCII digits becomes an integer; every other
+    value, the catalogue source included, stays text. A checksum whose
+    algorithm is empty or ``unknown`` is named by its length, as
+    ``hm add`` reads it.
+
     Args:
         row (dict): Row with ``path`` and optional checksum, size, mtime,
             catalogue source and ``sha1``.
         name (str, optional): Name of a known file, such as ``readme``.
+
+    Returns:
+        dict: The ``file:`` entry. When the row has both a SHA-1 checksum
+        and a ``sha1`` value, the entry keeps the ``sha1`` value.
     """
     entry = {"name": name} if name else {}
     entry["file"] = cell_text(row.get("path"))
     algorithm = cell_text(row.get("checksum_algorithm")).lower()
     checksum = cell_text(row.get("checksum"))
+    if checksum and algorithm in ("", "unknown"):
+        algorithm = infer_checksum_algorithm(checksum) or ""
     if algorithm in CHECKSUM_ALGORITHMS_BY_STRENGTH and checksum:
         entry[algorithm] = checksum
-    for key in ("size_bytes", "mtime", SOURCE):
+    for key in ("size_bytes", "mtime"):
         text = cell_text(row.get(key))
         if text:
-            entry[key] = int(text) if text.isdigit() else text
+            entry[key] = int(text) if text.isascii() and text.isdigit() else text
+    if cell_text(row.get(SOURCE)):
+        entry[SOURCE] = cell_text(row[SOURCE])
     if cell_text(row.get("sha1")):
         entry["sha1"] = cell_text(row["sha1"])
     return entry
@@ -126,7 +161,17 @@ def catalog_rows(state) -> list[dict]:
 
     Rows of each TSV come first, then ``file:`` entries. Each row records
     where it is kept: ``_table`` names its TSV, or ``_section`` its
-    ``config.yml`` section, with the entry itself in ``_entry``.
+    ``config.yml`` section, with the entry itself in ``_entry``. That entry
+    is the dict in ``state.config``, not a copy, so copy it before changing
+    it.
+
+    Args:
+        state (State): Repository state.
+
+    Returns:
+        list[dict]: Rows with text values: the TSVs' rows, then the
+        ``data`` section's ``file:`` entries, then the ``meta`` section's.
+        A TSV without a ``path`` column has no rows here.
     """
     rows = []
     for name, frame in catalog_tables(state).items():
