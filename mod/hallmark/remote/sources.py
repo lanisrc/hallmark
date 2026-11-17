@@ -320,7 +320,12 @@ def match_remote(folder: RemoteSpec, remotes: Sequence[dict]):
 
 
 def _unique(name: str, taken) -> str:
-    """Return ``name``, or the first of ``name-2``, ``name-3``, ... not taken."""
+    """
+    Return ``name``, or the first of ``name-2``, ``name-3``, ... not taken.
+
+    ``name`` is cut before each suffix so that the result fits in 64
+    characters.
+    """
     candidate, number = name, 2
     while candidate in taken:
         suffix = f"-{number}"
@@ -330,6 +335,12 @@ def _unique(name: str, taken) -> str:
 
 
 def _name_part(text: str) -> str:
+    """
+    Clean the remote or folder part of a derived source name.
+
+    Each run of characters outside A-Z, a-z, 0-9, ``_`` and ``-`` becomes
+    one ``-``, and ``-`` is trimmed from both ends.
+    """
     return re.sub(r"[^A-Za-z0-9_-]+", "-", text).strip("-")
 
 
