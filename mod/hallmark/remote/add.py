@@ -143,6 +143,7 @@ def _describe_selection(filter):
 
 
 def _listed(paths, limit=10):
+    """Indent up to ``limit`` sorted paths, one per line, and count the rest."""
     paths = sorted(paths)
     shown = "\n".join(f"  {path}" for path in paths[:limit])
     more = len(paths) - limit
@@ -352,6 +353,7 @@ def _clash_listing(structural, duplicates):
 
 
 def _parents(path):
+    """Return each parent folder of a POSIX path, outermost first."""
     parts = path.split("/")[:-1]
     return ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
 
@@ -409,6 +411,7 @@ def _carry_sha1(rows, previous, worktree):
 
 
 def _exists_in(worktree, path):
+    """Return whether a path exists in the worktree, counting broken links."""
     if worktree is None:
         return False
     try:

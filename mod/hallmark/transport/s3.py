@@ -161,6 +161,7 @@ class S3Backend(DataBackend):
         return DownloadError(f"S3 request for {where} failed: {type(exc).__name__}")
 
     def _key(self, relative_path):
+        """Return the object key for a validated relative path."""
         return self.prefix + validate_remote_path(relative_path).as_posix()
 
     def iter_entries(self, on_directory=None):
@@ -188,6 +189,12 @@ class S3Backend(DataBackend):
             raise self._error(exc, self.prefix) from None
 
     def _entry(self, item):
+        """
+        Turn a listed object into a RemoteEntry, or None for one to skip.
+
+        Folder placeholders and repository metadata are skipped. The SHA
+        checksums that the listing names are kept for ``complete_entries``.
+        """
         key = item["Key"]
         relative = key[len(self.prefix):]
         # Keys ending in "/" are folder placeholders created by consoles.

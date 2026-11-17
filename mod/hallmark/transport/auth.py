@@ -206,6 +206,7 @@ def _profile(document, name, kind):
 
 
 def _bound_hosts(profile):
+    """Pop a profile's hosts, which must be a non-empty list of names."""
     hosts = profile.pop("hosts", None)
     if (not isinstance(hosts, list) or not hosts
             or any(not isinstance(host, str) for host in hosts)):
@@ -291,6 +292,7 @@ class HttpSettings:
 
 
 def _http_settings(remote, document):
+    """Build HttpSettings from a profile bound to the remote's host."""
     name = remote.auth
     profile = _profile(document, name, "http")
     hosts = tuple(host.lower() for host in _bound_hosts(profile))
@@ -348,6 +350,7 @@ class S3Settings:
 
 
 def _string_list(profile, key, name, required):
+    """Pop a non-empty list of names; a missing optional key gives ()."""
     values = profile.pop(key, None)
     if values is None and not required:
         return ()
@@ -359,6 +362,7 @@ def _string_list(profile, key, name, required):
 
 
 def _s3_settings(remote, document):
+    """Build S3Settings from a profile bound to the remote's bucket and endpoint."""
     name = remote.auth
     profile = _profile(document, name, "s3")
     buckets = _string_list(profile, "buckets", name, True)

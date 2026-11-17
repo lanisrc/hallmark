@@ -209,6 +209,14 @@ class Repo:
 
 
     def _parse_local_files(self, fmt, encoding, paths=None):
+        """
+        Match worktree files against a fmt and return them as a ParaFrame.
+
+        A fmt that contains "/" is matched from the worktree root. Any other fmt
+        is matched inside each folder that holds one of ``paths`` (every
+        repository file by default). Unmatched paths are listed in
+        ``attrs["unmatched"]``.
+        """
         root = Path(self.worktree).resolve()
         encodings = branch_encodings(self) if encoding else None
 

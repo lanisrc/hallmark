@@ -1407,6 +1407,7 @@ def _run_transfers(remote_spec, output_root, jobs, run_job, record, *, max_worke
 
 
 def _output_root(worktree_path) -> Path:
+    """Resolve the download folder, refusing a path that is not a directory."""
     output_root = Path(worktree_path).expanduser().resolve()
     if output_root.exists() and not output_root.is_dir():
         raise DownloadError(f"Download output is not a directory: {output_root}")
@@ -1525,6 +1526,7 @@ def _still_outdated(store, sha1, destination) -> bool:
 
 
 def _record_placed(results, placed):
+    """Add placed downloads to the results: counts, checksums and path lists."""
     for item, sha1, how, error in placed:
         if error is not None:
             results["failed"] += 1

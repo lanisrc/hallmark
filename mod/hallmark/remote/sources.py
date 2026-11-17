@@ -51,6 +51,7 @@ def _validate_folder(value, label: str) -> str:
 
 
 def _normalize_filter(value) -> tuple:
+    """Return a filter as a tuple of non-empty globs; None or "" means none."""
     if value in (None, ""):
         return ()
     patterns = [value] if isinstance(value, str) else value
@@ -253,6 +254,7 @@ def _decoded_root(spec: RemoteSpec) -> str:
 
 
 def _same_server(left: RemoteSpec, right: RemoteSpec) -> bool:
+    """Return whether two remotes share scheme, host (in any case), port and user."""
     return ((left.scheme, left.host.lower(), left.port, left.user)
             == (right.scheme, right.host.lower(), right.port, right.user))
 
@@ -286,6 +288,7 @@ def match_remote(folder: RemoteSpec, remotes: Sequence[dict]):
 
 
 def _unique(name: str, taken) -> str:
+    """Return ``name``, or the first of ``name-2``, ``name-3``, ... not taken."""
     candidate, number = name, 2
     while candidate in taken:
         candidate = f"{name}-{number}"

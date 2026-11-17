@@ -49,11 +49,13 @@ _WRITE_BITS = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
 
 
 def _make_read_only(path: Path) -> None:
+    """Remove every write permission bit from a file."""
     mode = stat.S_IMODE(os.stat(path).st_mode)
     os.chmod(path, mode & ~_WRITE_BITS)
 
 
 def _make_writable(path: Path) -> None:
+    """Give a file's owner write permission."""
     mode = stat.S_IMODE(os.stat(path).st_mode)
     os.chmod(path, mode | stat.S_IWUSR)
 
@@ -301,6 +303,7 @@ class Objects:
         return False
 
     def _stat_path(self, sha1: str) -> Path:
+        """Return the path of the size and mtime record kept for an object."""
         normalized = self._validate_sha1(sha1)
         return self.stats / normalized[:2] / normalized[2:]
 
@@ -313,6 +316,7 @@ class Objects:
             temp.write_text(f"{info.st_size} {info.st_mtime_ns}\n", encoding="ascii")
 
     def _recorded_stat(self, sha1: str) -> Optional[tuple]:
+        """Return an object's recorded (size, mtime_ns), or None without one."""
         try:
             size, mtime_ns = self._stat_path(sha1).read_text(encoding="ascii").split()
             return int(size), int(mtime_ns)
